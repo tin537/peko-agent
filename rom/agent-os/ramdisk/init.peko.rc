@@ -1,0 +1,89 @@
+# init.peko.rc — The agent service definition
+#
+# Imported by init.rc. This is where peko-agent actually starts.
+
+# ═══════════════════════════════════════════════════════════
+# Agent service
+# ═══════════════════════════════════════════════════════════
+
+service peko-agent /system/bin/peko-agent \
+    --config /data/peko/config.toml \
+    --port 8080
+    class core
+    user root
+    group root input graphics audio radio inet net_raw net_admin
+    capabilities NET_RAW NET_ADMIN SYS_PTRACE DAC_OVERRIDE NET_BIND_SERVICE
+    seclabel u:r:peko_agent:s0
+    socket peko stream 0660 root root
+    writepid /dev/cpuset/foreground/tasks
+    oom_score_adjust -900
+
+    # Restart on crash (max 4 times in 4 minutes, then give up)
+    onrestart setprop sys.peko.crash_count +1
+    restart_period 60
+
+on late-init
+    # Start core services (ueventd, logd)
+    class_start core
+
+    # Wait for data partition
+    wait /data/peko 5
+
+    # Start the agent
+    start peko-agent
+
+    # Signal ready after agent is up
+    setprop sys.peko.ready 1
+
+# ═══════════════════════════════════════════════════════════
+# Networking support services (minimal)
+# ═══════════════════════════════════════════════════════════
+
+# netd — network daemon (required for DNS resolution + WiFi)
+service netd /system/bin/netd
+    class core
+    socket dnsproxyd stream 0660 root inet
+    socket mdns stream 0660 root system
+    socket fwmarkd stream 0660 root inet
+    seclabel u:r:netd:s0
+
+# wpa_supplicant — WiFi authentication (device-specific path)
+service wpa_supplicant /vendor/bin/hw/wpa_supplicant \
+    -g@android:wpa_wlan0 \
+    -iwlan0 \
+    -c/data/misc/wifi/wpa_supplicant.conf
+    class core
+    socket wpa_wlan0 dgram 660 wifi wifi
+    disabled
+    oneshot
+
+# Start WiFi if interface exists
+on property:sys.peko.wifi=1
+    start wpa_supplicant
+    ifup wlan0
+
+# ═══════════════════════════════════════════════════════════
+# Modem / RIL (minimal — for AT command access)
+# ═══════════════════════════════════════════════════════════
+
+# We don't need rild (Radio Interface Layer daemon).
+# peko-agent talks to the modem directly via /dev/ttyACM*.
+# But we need the modem firmware loaded (device-specific).
+
+on property:sys.peko.modem=1
+    # Device-specific modem power-on sequence
+    # write /sys/class/modem/modem0/state on
+    # chmod 0660 /dev/ttyACM0
+    setprop gsm.version.baseband unknown
+
+# ═══════════════════════════════════════════════════════════
+# Shutdown
+# ═══════════════════════════════════════════════════════════
+
+on property:sys.powerctl=shutdown*
+    stop peko-agent
+    sync
+
+on property:sys.powerctl=reboot*
+    stop peko-agent
+    sync

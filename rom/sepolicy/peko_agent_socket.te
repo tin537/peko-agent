@@ -1,0 +1,9 @@
+# peko_agent_socket.te — Socket type definition
+
+type peko_agent_socket, file_type;
+
+# Allow init to create the socket
+allow init peko_agent_socket:sock_file { create setattr unlink };
+
+# Allow peko_agent to use its socket
+allow peko_agent peko_agent_socket:sock_file { read write getattr setattr create unlink };

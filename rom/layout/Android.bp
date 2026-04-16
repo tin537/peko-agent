@@ -1,0 +1,50 @@
+// Android.bp — AOSP Soong build integration for Peko Agent
+//
+// For building peko-agent as part of a full AOSP ROM build.
+// Place this file at: device/<vendor>/<device>/peko/Android.bp
+//
+// NOTE: For standalone development, use Cargo (see .cargo/config.toml).
+//       This file is only needed for full AOSP ROM integration.
+
+// Pre-built binary (built with Cargo, imported into AOSP)
+cc_prebuilt_binary {
+    name: "peko-agent",
+    stem: "peko-agent",
+    srcs: ["peko-agent"],  // pre-built aarch64 ELF
+    vendor: false,
+    init_rc: [
+        "peko-agent.rc",
+        "peko-frameworkless.rc",
+    ],
+    required: [
+        "peko_agent_sepolicy",
+    ],
+
+    // Install to /system/bin/
+    compile_multilib: "64",
+    target: {
+        android_arm64: {
+            srcs: ["peko-agent"],
+        },
+    },
+}
+
+// Default configuration file
+prebuilt_etc {
+    name: "peko-config-default",
+    src: "config.example.toml",
+    filename: "peko-config-default.toml",
+    sub_dir: "peko",
+}
+
+// SELinux policy
+filegroup {
+    name: "peko_agent_sepolicy",
+    srcs: [
+        "sepolicy/peko_agent.te",
+        "sepolicy/peko_agent_socket.te",
+        "sepolicy/peko_prop.te",
+        "sepolicy/file_contexts",
+        "sepolicy/property_contexts",
+    ],
+}

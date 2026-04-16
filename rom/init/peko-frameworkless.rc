@@ -1,0 +1,51 @@
+# peko-frameworkless.rc — Full frameworkless boot override
+# This replaces the normal late-init sequence.
+# Place at: /system/etc/init/peko-frameworkless.rc
+#
+# WARNING: This disables the entire Android framework.
+#          The device will have NO GUI, NO apps, NO Play Store.
+#          Only peko-agent runs as the userspace agent.
+#
+# Enable by adding to build.prop:
+#   persist.peko.frameworkless=1
+#
+# The device remains accessible via:
+#   - Web UI at http://<device-ip>:8080
+#   - ADB shell
+#   - Unix socket at /dev/socket/peko
+
+on late-init && property:persist.peko.frameworkless=1
+    trigger early-fs
+    trigger fs
+    trigger post-fs
+    trigger post-fs-data
+    trigger peko-boot
+
+on peko-boot
+    # Start only essential core services
+    class_start core
+
+    # Bring up networking without ConnectivityService
+    start netd
+    # DNS
+    setprop net.dns1 8.8.8.8
+    setprop net.dns2 8.8.4.4
+
+    # Wait for network
+    wait_for_prop net.tcp.default_init_rwnd 0
+
+    # Start the agent
+    mkdir /data/peko 0770 root root
+    restorecon_recursive /data/peko
+    start peko-agent
+
+    # Mark boot complete
+    setprop sys.boot_completed 1
+    setprop sys.peko.mode frameworkless
+
+    # Log memory footprint
+    exec -- /system/bin/sh -c "cat /proc/meminfo | head -5 > /data/peko/boot_meminfo.txt"
+
+# Explicitly do NOT start these:
+# class_start main      ← no Zygote, no SystemServer
+# class_start late_start

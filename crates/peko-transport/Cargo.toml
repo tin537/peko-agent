@@ -1,0 +1,15 @@
+[package]
+name = "peko-transport"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true

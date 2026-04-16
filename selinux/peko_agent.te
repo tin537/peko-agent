@@ -1,0 +1,23 @@
+type peko_agent, domain;
+type peko_agent_exec, exec_type, file_type, system_file_type;
+init_daemon_domain(peko_agent)
+
+# Kernel device access
+allow peko_agent input_device:chr_file { open read write ioctl };
+allow peko_agent gpu_device:chr_file rw_file_perms;
+allow peko_agent graphics_device:chr_file rw_file_perms;
+allow peko_agent tty_device:chr_file rw_file_perms;
+allow peko_agent self:capability { net_raw net_admin sys_ptrace };
+
+# Network access for LLM API calls
+allow peko_agent self:tcp_socket create_stream_socket_perms;
+allow peko_agent self:udp_socket create_socket_perms;
+allow peko_agent port:tcp_socket name_connect;
+
+# Filesystem access
+allow peko_agent peko_data_file:dir create_dir_perms;
+allow peko_agent peko_data_file:file create_file_perms;
+
+# Binder IPC (optional, for HAL access)
+allow peko_agent binder_device:chr_file rw_file_perms;
+binder_use(peko_agent)

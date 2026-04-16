@@ -1,0 +1,4 @@
+# property_contexts — SELinux labels for peko system properties
+
+sys.peko.          u:object_r:peko_prop:s0
+persist.peko.      u:object_r:peko_prop:s0

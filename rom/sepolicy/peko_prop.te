@@ -1,0 +1,3 @@
+# peko_prop.te — Property type definition
+
+type peko_prop, property_type;

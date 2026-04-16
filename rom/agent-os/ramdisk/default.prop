@@ -1,0 +1,38 @@
+# default.prop — peko Agent-OS default properties
+#
+# These are set before any .rc files are parsed.
+
+# Agent-OS identification
+ro.build.display.id=pekoAgentOS-1.0
+ro.build.version.release=14
+ro.build.version.sdk=34
+ro.build.type=userdebug
+ro.product.model=pekoAgent
+ro.product.brand=peko
+ro.product.name=peko_agent
+ro.product.device=peko
+ro.product.manufacturer=ftmstars
+
+# Security
+ro.secure=1
+ro.adb.secure=0
+ro.debuggable=1
+ro.allow.mock.location=0
+persist.sys.usb.config=adb
+
+# Boot mode
+persist.peko.frameworkless=1
+sys.peko.mode=agent-os
+
+# No framework
+ro.zygote=none
+dalvik.vm.dex2oat-threads=0
+
+# Networking
+net.dns1=8.8.8.8
+net.dns2=1.1.1.1
+net.gprs.local-ip=0.0.0.0
+
+# Disable unnecessary features
+ro.com.google.gmsversion=
+persist.sys.timezone=UTC

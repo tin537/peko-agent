@@ -1,0 +1,261 @@
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("failed to read config file: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("failed to parse config: {0}")]
+    Parse(#[from] toml::de::Error),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PekoConfig {
+    pub agent: AgentConfig,
+    pub provider: ProviderConfig,
+    #[serde(default)]
+    pub tools: ToolsConfig,
+    pub hardware: Option<HardwareConfig>,
+    pub startup: Option<StartupConfig>,
+    pub telegram: Option<TelegramConfig>,
+    #[serde(default)]
+    pub schedule: Vec<ScheduleEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleEntry {
+    pub name: String,
+    pub cron: String,
+    pub task: String,
+    #[serde(default = "default_schedule_notify")]
+    pub notify: String,
+    #[serde(default = "bool_true")]
+    pub enabled: bool,
+}
+
+fn default_schedule_notify() -> String { "log".to_string() }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelegramConfig {
+    pub bot_token: String,
+    #[serde(default)]
+    pub allowed_users: Vec<i64>,
+    #[serde(default = "bool_true")]
+    pub send_screenshots: bool,
+    #[serde(default = "default_telegram_max_message")]
+    pub max_message_length: usize,
+}
+
+fn default_telegram_max_message() -> usize { 4000 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+    #[serde(default = "default_context_window")]
+    pub context_window: usize,
+    #[serde(default = "default_history_share")]
+    pub history_share: f32,
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub anthropic: Option<ProviderEntry>,
+    pub openrouter: Option<ProviderEntry>,
+    pub local: Option<ProviderEntry>,
+    #[serde(default = "default_priority")]
+    pub priority: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderEntry {
+    pub api_key: Option<String>,
+    pub model: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolsConfig {
+    #[serde(default = "bool_true")]
+    pub screenshot: bool,
+    #[serde(default = "bool_true")]
+    pub touch: bool,
+    #[serde(default = "bool_true")]
+    pub key_event: bool,
+    #[serde(default = "bool_true")]
+    pub text_input: bool,
+    #[serde(default = "bool_true")]
+    pub sms: bool,
+    #[serde(default = "bool_true")]
+    pub call: bool,
+    #[serde(default = "bool_true")]
+    pub ui_dump: bool,
+    #[serde(default = "bool_true")]
+    pub notification: bool,
+    #[serde(default = "bool_true")]
+    pub filesystem: bool,
+    #[serde(default = "bool_true")]
+    pub shell: bool,
+    #[serde(default)]
+    pub filesystem_config: FilesystemConfig,
+    #[serde(default)]
+    pub shell_config: ShellConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilesystemConfig {
+    #[serde(default = "default_allowed_paths")]
+    pub allowed_paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShellConfig {
+    #[serde(default = "default_shell_timeout")]
+    pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HardwareConfig {
+    pub touchscreen_device: Option<String>,
+    pub framebuffer_device: Option<String>,
+    pub modem_device: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartupConfig {
+    pub task: Option<String>,
+}
+
+impl PekoConfig {
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let content = std::fs::read_to_string(path)?;
+        let mut config: PekoConfig = toml::from_str(&content)?;
+        config.apply_env_overrides();
+        Ok(config)
+    }
+
+    pub fn from_str(s: &str) -> Result<Self, ConfigError> {
+        let mut config: PekoConfig = toml::from_str(s)?;
+        config.apply_env_overrides();
+        Ok(config)
+    }
+
+    fn apply_env_overrides(&mut self) {
+        if let Ok(val) = std::env::var("PEKO_API_KEY") {
+            if let Some(ref mut p) = self.provider.anthropic {
+                p.api_key = Some(val);
+            }
+        }
+        if let Ok(val) = std::env::var("PEKO_MODEL") {
+            if let Some(ref mut p) = self.provider.anthropic {
+                p.model = val;
+            }
+        }
+        if let Ok(val) = std::env::var("PEKO_MAX_ITERATIONS") {
+            if let Ok(n) = val.parse() {
+                self.agent.max_iterations = n;
+            }
+        }
+        if let Ok(val) = std::env::var("PEKO_LOG_LEVEL") {
+            self.agent.log_level = val;
+        }
+        if let Ok(val) = std::env::var("PEKO_DATA_DIR") {
+            self.agent.data_dir = PathBuf::from(val);
+        }
+    }
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            screenshot: true,
+            touch: true,
+            key_event: true,
+            text_input: true,
+            sms: true,
+            call: true,
+            ui_dump: true,
+            notification: true,
+            filesystem: true,
+            shell: true,
+            filesystem_config: FilesystemConfig::default(),
+            shell_config: ShellConfig::default(),
+        }
+    }
+}
+
+impl Default for FilesystemConfig {
+    fn default() -> Self {
+        Self {
+            allowed_paths: default_allowed_paths(),
+        }
+    }
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            timeout_seconds: default_shell_timeout(),
+        }
+    }
+}
+
+fn default_max_iterations() -> usize { 50 }
+fn default_context_window() -> usize { 200_000 }
+fn default_history_share() -> f32 { 0.7 }
+fn default_data_dir() -> PathBuf { PathBuf::from("/data/peko") }
+fn default_log_level() -> String { "info".to_string() }
+fn default_priority() -> Vec<String> { vec!["anthropic".to_string()] }
+fn default_max_tokens() -> usize { 8192 }
+fn default_allowed_paths() -> Vec<PathBuf> {
+    vec![PathBuf::from("/data/peko"), PathBuf::from("/sdcard")]
+}
+fn default_shell_timeout() -> u64 { 30 }
+fn bool_true() -> bool { true }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_minimal_config() {
+        let toml = r#"
+[agent]
+max_iterations = 10
+
+[provider]
+priority = ["anthropic"]
+
+[provider.anthropic]
+model = "claude-sonnet-4-20250514"
+"#;
+        let config = PekoConfig::from_str(toml).unwrap();
+        assert_eq!(config.agent.max_iterations, 10);
+        assert_eq!(config.agent.context_window, 200_000);
+        assert_eq!(config.provider.anthropic.unwrap().model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_defaults() {
+        let toml = r#"
+[agent]
+
+[provider]
+
+[provider.anthropic]
+model = "claude-sonnet-4-20250514"
+"#;
+        let config = PekoConfig::from_str(toml).unwrap();
+        assert_eq!(config.agent.max_iterations, 50);
+        assert_eq!(config.agent.history_share, 0.7);
+        assert!(config.tools.screenshot);
+        assert!(config.tools.shell);
+    }
+}

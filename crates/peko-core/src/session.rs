@@ -1,0 +1,204 @@
+use rusqlite::{Connection, params};
+use std::path::Path;
+use chrono::Utc;
+use uuid::Uuid;
+
+use crate::message::Message;
+
+pub struct SessionStore {
+    conn: Connection,
+}
+
+#[derive(Debug)]
+pub struct StoredMessage {
+    pub role: String,
+    pub content: String,
+    pub tool_name: Option<String>,
+    pub tool_args: Option<String>,
+    pub is_error: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug)]
+pub struct SessionSummary {
+    pub id: String,
+    pub started_at: String,
+    pub task: String,
+    pub status: String,
+    pub iterations: i64,
+}
+
+impl SessionStore {
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        let conn = Connection::open(path)?;
+        let store = Self { conn };
+        store.init_schema()?;
+        Ok(store)
+    }
+
+    pub fn open_in_memory() -> anyhow::Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        let store = Self { conn };
+        store.init_schema()?;
+        Ok(store)
+    }
+
+    fn init_schema(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                started_at TEXT NOT NULL,
+                task TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                iterations INTEGER DEFAULT 0,
+                completed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_name TEXT,
+                tool_args TEXT,
+                tool_use_id TEXT,
+                is_error INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+            "
+        )?;
+        Ok(())
+    }
+
+    pub fn create_session(&self, task: &str) -> anyhow::Result<String> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO sessions (id, started_at, task, status) VALUES (?1, ?2, ?3, 'running')",
+            params![id, now, task],
+        )?;
+        Ok(id)
+    }
+
+    pub fn append_message(&self, session_id: &str, message: &Message) -> anyhow::Result<()> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        match message {
+            Message::System(text) => {
+                self.conn.execute(
+                    "INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?1, ?2, 'system', ?3, ?4)",
+                    params![id, session_id, text, now],
+                )?;
+            }
+            Message::User(text) => {
+                self.conn.execute(
+                    "INSERT INTO messages (id, session_id, role, content, created_at) VALUES (?1, ?2, 'user', ?3, ?4)",
+                    params![id, session_id, text, now],
+                )?;
+            }
+            Message::Assistant { text, tool_calls } => {
+                let content = text.clone().unwrap_or_default();
+                let tool_args = if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::to_string(tool_calls)?)
+                };
+                self.conn.execute(
+                    "INSERT INTO messages (id, session_id, role, content, tool_args, created_at) VALUES (?1, ?2, 'assistant', ?3, ?4, ?5)",
+                    params![id, session_id, content, tool_args, now],
+                )?;
+            }
+            Message::ToolResult { tool_use_id, name, content, is_error, .. } => {
+                self.conn.execute(
+                    "INSERT INTO messages (id, session_id, role, content, tool_name, tool_use_id, is_error, created_at) VALUES (?1, ?2, 'tool_result', ?3, ?4, ?5, ?6, ?7)",
+                    params![id, session_id, content, name, tool_use_id, *is_error as i32, now],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn update_status(&self, session_id: &str, status: &str, iterations: usize) -> anyhow::Result<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "UPDATE sessions SET status = ?1, iterations = ?2, completed_at = ?3 WHERE id = ?4",
+            params![status, iterations as i64, now, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn load_messages(&self, session_id: &str) -> anyhow::Result<Vec<StoredMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT role, content, tool_name, tool_args, is_error, created_at \
+             FROM messages WHERE session_id = ?1 ORDER BY created_at ASC"
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(StoredMessage {
+                role: row.get(0)?,
+                content: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                tool_name: row.get(2)?,
+                tool_args: row.get(3)?,
+                is_error: row.get::<_, i32>(4).unwrap_or(0) != 0,
+                created_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn delete_session(&self, session_id: &str) -> anyhow::Result<()> {
+        self.conn.execute("DELETE FROM messages WHERE session_id = ?1", params![session_id])?;
+        self.conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])?;
+        Ok(())
+    }
+
+    pub fn recent_sessions(&self, limit: usize) -> anyhow::Result<Vec<SessionSummary>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, started_at, task, status, iterations FROM sessions ORDER BY started_at DESC LIMIT ?1"
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                started_at: row.get(1)?,
+                task: row.get(2)?,
+                status: row.get(3)?,
+                iterations: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_session() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let id = store.create_session("test task").unwrap();
+        assert!(!id.is_empty());
+
+        let sessions = store.recent_sessions(10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].task, "test task");
+        assert_eq!(sessions[0].status, "running");
+    }
+
+    #[test]
+    fn test_append_and_update() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let id = store.create_session("test").unwrap();
+
+        store.append_message(&id, &Message::user("hello")).unwrap();
+        store.append_message(&id, &Message::assistant_text("hi")).unwrap();
+        store.update_status(&id, "completed", 2).unwrap();
+
+        let sessions = store.recent_sessions(10).unwrap();
+        assert_eq!(sessions[0].status, "completed");
+        assert_eq!(sessions[0].iterations, 2);
+    }
+}

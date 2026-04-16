@@ -1,0 +1,11 @@
+[package]
+name = "peko-hal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nix = { version = "0.29", features = ["ioctl", "fs", "term", "mman"] }
+libc = "0.2"
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true

@@ -1,0 +1,19 @@
+# file_contexts — SELinux file labels for Peko Agent
+#
+# Apply with: restorecon -Rv /system/bin/peko-agent /data/peko
+
+# Binary
+/system/bin/peko-agent                u:object_r:peko_agent_exec:s0
+
+# Data directory
+/data/peko(/.*)?                       u:object_r:peko_data_file:s0
+/data/peko/config\.toml                u:object_r:peko_data_file:s0
+/data/peko/state\.db                   u:object_r:peko_data_file:s0
+/data/peko/state\.db-journal           u:object_r:peko_data_file:s0
+/data/peko/state\.db-wal               u:object_r:peko_data_file:s0
+/data/peko/peko\.log                 u:object_r:peko_data_file:s0
+/data/peko/sessions(/.*)?              u:object_r:peko_data_file:s0
+/data/peko/logs(/.*)?                  u:object_r:peko_data_file:s0
+
+# Socket
+/dev/socket/peko                       u:object_r:peko_agent_socket:s0

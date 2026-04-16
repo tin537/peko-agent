@@ -1,0 +1,129 @@
+# init.rc — Peko Agent-OS: Minimal init for agent-only boot
+#
+# This replaces the entire standard Android init.rc.
+# Only starts what the agent needs: filesystems, networking, and peko-agent.
+
+import /init.peko.rc
+
+# ═══════════════════════════════════════════════════════════
+# Early init — before anything else
+# ═══════════════════════════════════════════════════════════
+
+on early-init
+    # Mount essential virtual filesystems
+    mount tmpfs tmpfs /dev mode=0755
+    mkdir /dev/pts 0755 root root
+    mkdir /dev/socket 0755 root root
+    mount devpts devpts /dev/pts
+    mount proc proc /proc
+    mount sysfs sysfs /sys
+    mount tmpfs tmpfs /sys/fs/cgroup mode=0750 uid=0 gid=1000
+    mount tmpfs tmpfs /mnt mode=0755
+
+    # Set kernel parameters
+    write /proc/sys/kernel/panic_on_oops 1
+    write /proc/sys/kernel/hung_task_timeout_secs 0
+    write /proc/sys/kernel/sched_child_runs_first 0
+    write /proc/sys/vm/overcommit_memory 1
+    write /proc/sys/vm/min_free_kbytes 8192
+
+    # Create device nodes
+    write /proc/sys/kernel/hotplug /sbin/ueventd
+
+# ═══════════════════════════════════════════════════════════
+# Filesystem mount
+# ═══════════════════════════════════════════════════════════
+
+on fs
+    mount_all /vendor/etc/fstab.${ro.hardware} --early
+    # Or for devices without vendor fstab:
+    # mount ext4 /dev/block/by-name/system /system ro
+    # mount ext4 /dev/block/by-name/vendor /vendor ro
+    # mount ext4 /dev/block/by-name/userdata /data nosuid nodev
+
+on post-fs
+    # Remount /system read-only for safety
+    mount rootfs rootfs / ro remount
+
+    # /data must be writable for agent state
+    restorecon_recursive /data
+
+on post-fs-data
+    # Agent data directory
+    mkdir /data/peko 0770 root root
+    mkdir /data/peko/sessions 0770 root root
+    mkdir /data/peko/logs 0770 root root
+
+    # Copy default config if first boot
+    copy /system/etc/peko/config.toml /data/peko/config.toml
+    chmod 0660 /data/peko/config.toml
+    chown root root /data/peko/config.toml
+
+    restorecon_recursive /data/peko
+
+    # Signal data is ready
+    setprop vold.has_quotas 0
+    setprop vold.has_reserved 0
+
+# ═══════════════════════════════════════════════════════════
+# Networking
+# ═══════════════════════════════════════════════════════════
+
+on boot
+    # Enable IP forwarding
+    write /proc/sys/net/ipv4/ip_forward 0
+    write /proc/sys/net/ipv4/conf/all/accept_redirects 0
+
+    # DNS
+    setprop net.dns1 8.8.8.8
+    setprop net.dns2 1.1.1.1
+
+    # WiFi — bring up interface if available
+    # (device-specific, may need wpa_supplicant)
+    ifup lo
+    ifup wlan0
+
+# ═══════════════════════════════════════════════════════════
+# Essential services only
+# ═══════════════════════════════════════════════════════════
+
+# ueventd — creates /dev nodes
+service ueventd /system/bin/ueventd
+    class core
+    critical
+    seclabel u:r:ueventd:s0
+
+# logd — system logging
+service logd /system/bin/logd
+    class core
+    socket logd stream 0666 logd logd
+    socket logdr seqpacket 0666 logd logd
+    socket logdw dgram+passcred 0222 logd logd
+    group root system readproc
+    writepid /dev/cpuset/system-background/tasks
+
+# ═══════════════════════════════════════════════════════════
+# Services we explicitly DO NOT start:
+#
+#   zygote        — Java VM, not needed
+#   surfaceflinger — display compositor, not needed (direct fb)
+#   servicemanager — Binder registry, not needed
+#   vold          — volume daemon, not needed
+#   installd      — package installer, not needed
+#   media.*       — media services, not needed
+#   camera*       — camera services, not needed
+#   bluetooth     — BT services, not needed
+#   audio*        — audio services, not needed
+#
+# Total RAM saved: ~600-800 MB
+# ═══════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════
+# Boot complete
+# ═══════════════════════════════════════════════════════════
+
+on property:sys.peko.ready=1
+    setprop sys.boot_completed 1
+    # Log boot stats
+    exec -- /system/bin/sh -c "echo Boot complete: $(cat /proc/uptime) > /data/peko/logs/boot.log"
+    exec -- /system/bin/sh -c "cat /proc/meminfo | head -5 >> /data/peko/logs/boot.log"

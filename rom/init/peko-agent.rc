@@ -1,0 +1,62 @@
+# peko-agent.rc — Android init service definition
+# Place at: /system/etc/init/peko-agent.rc  (or /vendor/etc/init/)
+#
+# Two modes:
+#   Hybrid mode:      Agent coexists with Android framework
+#   Frameworkless mode: Agent IS the userspace (no Zygote)
+#
+# Trigger with: setprop sys.peko.start 1
+
+service peko-agent /system/bin/peko-agent \
+    --config /data/peko/config.toml \
+    --port 8080
+    class core
+    user root
+    group root input graphics audio radio inet net_raw net_admin
+    capabilities NET_RAW NET_ADMIN SYS_PTRACE DAC_OVERRIDE
+    seclabel u:r:peko_agent:s0
+    socket peko stream 0660 root root
+    writepid /dev/cpuset/foreground/tasks
+    oneshot
+    disabled
+    # Resource limits
+    rlimit rtprio 10 10
+    oom_score_adjust -900
+
+# ─── Hybrid mode trigger ──────────────────────────────────
+# Start agent alongside the normal Android framework
+on property:sys.peko.start=1
+    mkdir /data/peko 0770 root root
+    restorecon_recursive /data/peko
+    start peko-agent
+
+on property:sys.peko.start=0
+    stop peko-agent
+
+# ─── Frameworkless mode ────────────────────────────────────
+# Replace the normal boot flow — skip Zygote entirely
+# To enable: set persist.peko.frameworkless=1 in build.prop
+on property:persist.peko.frameworkless=1 && property:sys.boot_completed=0
+    # Skip framework services
+    setprop ctl.stop zygote
+    setprop ctl.stop surfaceflinger
+    # Start agent
+    mkdir /data/peko 0770 root root
+    restorecon_recursive /data/peko
+    start peko-agent
+    setprop sys.peko.mode frameworkless
+
+# ─── Data directory setup ──────────────────────────────────
+on post-fs-data
+    mkdir /data/peko 0770 root root
+    mkdir /data/peko/sessions 0770 root root
+    mkdir /data/peko/logs 0770 root root
+    restorecon_recursive /data/peko
+
+# ─── Watchdog: restart on crash (optional) ─────────────────
+on property:init.svc.peko-agent=stopped && property:sys.peko.restart=1
+    start peko-agent
+
+# ─── Clean shutdown ────────────────────────────────────────
+on property:sys.shutdown.requested=*
+    stop peko-agent

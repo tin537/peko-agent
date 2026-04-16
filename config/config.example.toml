@@ -1,0 +1,51 @@
+[agent]
+max_iterations = 50
+context_window = 200000
+history_share = 0.7
+data_dir = "/data/peko"
+log_level = "info"
+
+[provider]
+priority = ["anthropic"]
+
+[provider.anthropic]
+# api_key = "sk-ant-..."    # Or set ANTHROPIC_API_KEY env var
+model = "claude-sonnet-4-20250514"
+max_tokens = 8192
+
+# [provider.openrouter]
+# api_key = "sk-or-..."     # Or set OPENROUTER_API_KEY env var
+# model = "ftmstars/peko-3-llama-3.1-405b"
+# base_url = "https://openrouter.ai/api/v1"
+# max_tokens = 4096
+
+# [provider.local]
+# model = "peko-3-8b"
+# base_url = "http://localhost:8080/v1"
+# max_tokens = 4096
+
+[tools]
+screenshot = true
+touch = true
+key_event = true
+text_input = true
+sms = true
+call = true
+ui_dump = true
+notification = true
+filesystem = true
+shell = true
+
+[tools.filesystem_config]
+allowed_paths = ["/data/peko", "/sdcard"]
+
+[tools.shell_config]
+timeout_seconds = 30
+
+# [hardware]
+# touchscreen_device = "/dev/input/event2"
+# framebuffer_device = "/dev/graphics/fb0"
+# modem_device = "/dev/ttyACM0"
+
+# [startup]
+# task = "Take a screenshot and describe what you see"

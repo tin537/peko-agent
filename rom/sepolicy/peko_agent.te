@@ -1,0 +1,167 @@
+# peko_agent.te — Type enforcement policy
+# Complete SELinux policy for Peko Agent agent daemon
+
+# ═══════════════════════════════════════════════════════════
+# Domain and type definitions
+# ═══════════════════════════════════════════════════════════
+
+type peko_agent, domain, coredomain;
+type peko_agent_exec, exec_type, file_type, system_file_type;
+type peko_data_file, file_type, data_file_type;
+
+# Auto-transition: init executes peko_agent_exec → enters peko_agent domain
+init_daemon_domain(peko_agent)
+
+# ═══════════════════════════════════════════════════════════
+# Input subsystem — /dev/input/event*
+# Touch injection, key events, device enumeration
+# ═══════════════════════════════════════════════════════════
+
+allow peko_agent input_device:chr_file { open read write ioctl getattr };
+allow peko_agent input_device:dir { open read search };
+
+# uinput virtual device creation
+allow peko_agent uhid_device:chr_file { open read write ioctl };
+allow peko_agent uinput_device:chr_file { open read write ioctl };
+
+# ═══════════════════════════════════════════════════════════
+# Display — framebuffer + DRM for screenshots
+# ═══════════════════════════════════════════════════════════
+
+allow peko_agent gpu_device:chr_file { open read write ioctl mmap getattr };
+allow peko_agent graphics_device:chr_file { open read write ioctl mmap getattr };
+allow peko_agent graphics_device:dir { open read search };
+
+# DRM subsystem
+allow peko_agent dri_device:chr_file { open read write ioctl mmap getattr };
+
+# Framebuffer mmap
+allow peko_agent self:capability { sys_rawio };
+
+# ═══════════════════════════════════════════════════════════
+# Serial / Modem — AT commands for SMS, calls
+# ═══════════════════════════════════════════════════════════
+
+allow peko_agent tty_device:chr_file { open read write ioctl getattr setattr };
+allow peko_agent serial_device:chr_file { open read write ioctl };
+allow peko_agent radio_device:chr_file { open read write ioctl };
+
+# ═══════════════════════════════════════════════════════════
+# Network — HTTPS to LLM APIs + web UI server
+# ═══════════════════════════════════════════════════════════
+
+allow peko_agent self:tcp_socket { create connect bind listen accept read write
+                                      getopt setopt shutdown getattr };
+allow peko_agent self:udp_socket { create connect bind read write
+                                      getopt setopt getattr };
+allow peko_agent port:tcp_socket { name_connect name_bind };
+allow peko_agent node:tcp_socket { node_bind };
+allow peko_agent node:udp_socket { node_bind };
+
+# DNS resolution
+allow peko_agent self:netlink_route_socket { create bind read write nlmsg_read getattr };
+allow peko_agent dns_data_file:dir { open read search };
+allow peko_agent dns_data_file:file { open read getattr };
+
+# Web UI binds to port 8080
+allow peko_agent unreserved_port:tcp_socket { name_bind name_connect };
+
+# Linux capabilities for networking
+allow peko_agent self:capability { net_raw net_admin net_bind_service };
+allow peko_agent self:capability2 { syslog };
+
+# ═══════════════════════════════════════════════════════════
+# Filesystem — agent data, config, logs, sessions
+# ═══════════════════════════════════════════════════════════
+
+# /data/peko/ — primary data directory
+allow peko_agent peko_data_file:dir { create open read write search add_name
+                                           remove_name rmdir getattr setattr };
+allow peko_agent peko_data_file:file { create open read write append rename
+                                            unlink getattr setattr lock };
+
+# /system/bin/peko-agent — the binary itself
+allow peko_agent peko_agent_exec:file { read execute getattr open };
+
+# Read system files (resolv.conf, timezone, etc.)
+allow peko_agent system_file:file { read open getattr execute execute_no_trans };
+allow peko_agent system_file:dir { open read search getattr };
+
+# /proc filesystem (for memory monitoring)
+allow peko_agent proc:file { read open getattr };
+allow peko_agent proc_meminfo:file { read open getattr };
+allow peko_agent self:process { getattr getsched signal };
+
+# /sys filesystem (LED state, device info)
+allow peko_agent sysfs:file { read open getattr };
+allow peko_agent sysfs:dir { open read search };
+allow peko_agent sysfs_type:file { read open getattr };
+
+# Temp files
+allow peko_agent tmpfs:file { read write create open unlink };
+allow peko_agent tmpfs:dir { read write add_name remove_name search };
+
+# ═══════════════════════════════════════════════════════════
+# Package manager — pm, am, installd
+# ═══════════════════════════════════════════════════════════
+
+# Execute pm, am, monkey, uiautomator, screencap, sh
+allow peko_agent shell_exec:file { read execute open getattr execute_no_trans };
+allow peko_agent toolbox_exec:file { read execute open getattr execute_no_trans };
+
+# Access /data/app for APK install
+allow peko_agent apk_data_file:dir { create open read write search add_name
+                                         remove_name getattr setattr };
+allow peko_agent apk_data_file:file { create open read write getattr setattr
+                                          rename unlink };
+
+# installd socket
+allow peko_agent installd_socket:sock_file { write };
+allow peko_agent installd:unix_stream_socket { connectto read write };
+
+# Package manager service
+allow peko_agent package_native_service:service_manager { find };
+
+# ═══════════════════════════════════════════════════════════
+# IPC — Binder, Unix sockets, properties
+# ═══════════════════════════════════════════════════════════
+
+# Binder IPC (optional, for HAL access in hybrid mode)
+binder_use(peko_agent)
+allow peko_agent binder_device:chr_file { open read write ioctl map };
+allow peko_agent servicemanager:binder { call transfer };
+
+# Unix domain socket (control interface)
+allow peko_agent peko_agent:unix_stream_socket { create bind listen accept
+                                                        read write getattr getopt
+                                                        setopt shutdown };
+
+# Android properties
+allow peko_agent property_socket:sock_file { write };
+allow peko_agent init:unix_stream_socket { connectto };
+get_prop(peko_agent, default_prop)
+get_prop(peko_agent, shell_prop)
+get_prop(peko_agent, system_prop)
+
+# Peko-specific properties
+set_prop(peko_agent, peko_prop)
+
+# ═══════════════════════════════════════════════════════════
+# Logging — logcat + file logging
+# ═══════════════════════════════════════════════════════════
+
+allow peko_agent logd:unix_dgram_socket { sendto };
+allow peko_agent logdr_socket:sock_file { write };
+
+# ═══════════════════════════════════════════════════════════
+# Capabilities and security
+# ═══════════════════════════════════════════════════════════
+
+allow peko_agent self:capability { sys_ptrace dac_override dac_read_search
+                                       fowner fsetid kill };
+
+# ptrace for process inspection (optional)
+allow peko_agent self:process { ptrace };
+
+# Signal handling
+allow peko_agent self:process { signal sigkill sigstop };

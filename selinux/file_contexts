@@ -1,0 +1,2 @@
+/system/bin/peko-agent  u:object_r:peko_agent_exec:s0
+/data/peko(/.*)?         u:object_r:peko_data_file:s0

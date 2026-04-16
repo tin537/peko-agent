@@ -1,0 +1,30 @@
+# System partition layout for Peko Agent
+#
+# Files placed on the /system partition (read-only at runtime)
+# These are flashed as part of the ROM or pushed via remounted /system
+
+/system/
+├── bin/
+│   └── peko-agent              # The agent binary (~8-12 MB stripped)
+│
+├── etc/
+│   └── init/
+│       ├── peko-agent.rc       # Hybrid mode init service
+│       └── peko-frameworkless.rc # Frameworkless boot override
+│
+└── etc/
+    └── selinux/
+        # Policy files compiled into the boot image
+        # (referenced by BOARD_SEPOLICY_DIRS in device makefile)
+
+/data/                              # Created at runtime (read-write)
+└── peko/
+    ├── config.toml                # Runtime configuration
+    ├── state.db                   # SQLite session database
+    ├── peko.log                 # Log file
+    ├── sessions/                  # Session artifacts
+    └── logs/                      # Rotated logs
+
+/dev/
+└── socket/
+    └── peko                     # Unix domain control socket (created by init)
