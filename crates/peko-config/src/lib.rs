@@ -20,6 +20,21 @@ pub struct PekoConfig {
     pub telegram: Option<TelegramConfig>,
     #[serde(default)]
     pub schedule: Vec<ScheduleEntry>,
+    #[serde(default)]
+    pub mcp: Vec<McpConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpConfig {
+    pub name: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

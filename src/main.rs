@@ -9,11 +9,11 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use peko_config::PekoConfig;
-use peko_core::{ToolRegistry, MemoryStore, SkillStore, SystemPrompt, Scheduler, ScheduledTask, TelegramSender};
+use peko_core::{ToolRegistry, MemoryStore, SkillStore, SystemPrompt, Scheduler, ScheduledTask, TelegramSender, UserModel, McpServerConfig, register_mcp_tools, TaskQueue};
 use peko_hal::{FramebufferDevice, InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
     CallTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool, ScreenshotTool,
-    ShellTool, SkillsTool, SmsTool, TextInputTool, TouchTool, UiAutomationTool,
+    DelegateTool, ShellTool, SkillsTool, SmsTool, TextInputTool, TouchTool, UiAutomationTool,
 };
 
 fn register_tools(config: &PekoConfig) -> ToolRegistry {
@@ -162,11 +162,42 @@ async fn main() -> anyhow::Result<()> {
     // Load SOUL.md personality
     let system_prompt = SystemPrompt::load_from_dir(&config.agent.data_dir);
 
-    let config_json = serde_json::to_value(&config)?;
+    // User model
+    let user_model_path = config.agent.data_dir.join("user_model.json");
+    let user_model = Arc::new(Mutex::new(UserModel::load(&user_model_path)));
+    info!("user model loaded");
 
-    let tools_arc = Arc::new(registry);
+    // MCP servers — connect and register tools
+    if !config.mcp.is_empty() {
+        let mcp_configs: Vec<McpServerConfig> = config.mcp.iter().map(|c| McpServerConfig {
+            name: c.name.clone(),
+            command: c.command.clone(),
+            args: c.args.clone(),
+            url: c.url.clone(),
+            env: c.env.clone(),
+        }).collect();
+        let _mcp_clients = register_mcp_tools(&mcp_configs, &mut registry).await;
+        info!(servers = config.mcp.len(), "MCP integration initialized");
+    }
+
+    let config_json = serde_json::to_value(&config)?;
     let config_arc = Arc::new(Mutex::new(config_json));
     let soul_arc = Arc::new(Mutex::new(system_prompt.soul_text().to_string()));
+
+    let tools_arc = Arc::new(registry);
+
+    // Create the centralized task queue — all callers submit here
+    let task_queue = TaskQueue::new(
+        tools_arc.clone(),
+        config_arc.clone(),
+        db_path.clone(),
+        memory_store.clone(),
+        skill_store.clone(),
+        soul_arc.clone(),
+        user_model.clone(),
+        user_model_path.clone(),
+        32, // max queue size
+    );
 
     let mut app_state = web::api::AppState {
         tools: tools_arc.clone(),
@@ -176,6 +207,9 @@ async fn main() -> anyhow::Result<()> {
         memory: memory_store.clone(),
         skills: skill_store.clone(),
         soul: soul_arc.clone(),
+        user_model: user_model.clone(),
+        user_model_path: user_model_path.clone(),
+        task_queue: task_queue.clone(),
         scheduler_tasks: None,
     };
 

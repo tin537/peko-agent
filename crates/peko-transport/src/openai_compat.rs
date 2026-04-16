@@ -31,6 +31,108 @@ impl OpenAICompatProvider {
         Self { client, api_key, model, base_url, max_tokens }
     }
 
+    /// Convert a neutral TransportMessage to OpenAI wire format.
+    /// Handles: assistant tool_calls, role:tool results, vision images.
+    fn to_openai_message(msg: &Message) -> serde_json::Value {
+        use crate::provider::{MessageContent, ContentBlock};
+
+        match (&msg.role as &str, &msg.content) {
+            // User with plain text
+            ("user", MessageContent::Text(text)) => {
+                json!({"role": "user", "content": text})
+            }
+            // User with content blocks (tool results or images)
+            ("user", MessageContent::Blocks(blocks)) => {
+                // Check if this is a tool result (Anthropic sends as role:user with tool_result blocks)
+                let has_tool_result = blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+
+                if has_tool_result {
+                    // Convert to OpenAI tool result format
+                    // Each tool_result block becomes a separate role:tool message
+                    // For simplicity, take the first one
+                    for block in blocks {
+                        if let ContentBlock::ToolResult { tool_use_id, content, .. } = block {
+                            return json!({
+                                "role": "tool",
+                                "tool_call_id": tool_use_id,
+                                "content": content,
+                            });
+                        }
+                    }
+                    json!({"role": "user", "content": ""})
+                } else {
+                    // User message with mixed content (text + images)
+                    let mut parts: Vec<serde_json::Value> = Vec::new();
+                    for block in blocks {
+                        match block {
+                            ContentBlock::Text { text } => {
+                                parts.push(json!({"type": "text", "text": text}));
+                            }
+                            ContentBlock::Image { source } => {
+                                // MiMo/OpenAI vision format: image_url with data URI
+                                let data_uri = format!("data:{};base64,{}", source.media_type, source.data);
+                                parts.push(json!({
+                                    "type": "image_url",
+                                    "image_url": {"url": data_uri}
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                    json!({"role": "user", "content": parts})
+                }
+            }
+            // Assistant with plain text
+            ("assistant", MessageContent::Text(text)) => {
+                json!({"role": "assistant", "content": text})
+            }
+            // Assistant with tool calls (Anthropic format blocks → OpenAI tool_calls)
+            ("assistant", MessageContent::Blocks(blocks)) => {
+                let mut text_content = String::new();
+                let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+
+                for block in blocks {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            text_content.push_str(text);
+                        }
+                        ContentBlock::ToolUse { id, name, input } => {
+                            tool_calls.push(json!({
+                                "id": id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": input.to_string(),
+                                }
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+
+                let mut msg = json!({
+                    "role": "assistant",
+                    "content": if text_content.is_empty() { serde_json::Value::Null } else { json!(text_content) },
+                });
+                if !tool_calls.is_empty() {
+                    msg["tool_calls"] = json!(tool_calls);
+                }
+                msg
+            }
+            // Tool result (shouldn't reach here if converted from user blocks above, but handle it)
+            ("tool", MessageContent::Text(content)) => {
+                json!({"role": "tool", "content": content})
+            }
+            // Fallback
+            (role, MessageContent::Text(text)) => {
+                json!({"role": role, "content": text})
+            }
+            (role, _) => {
+                json!({"role": role, "content": ""})
+            }
+        }
+    }
+
     fn parse_openai_delta(
         data: &serde_json::Value,
         tool_buffers: &mut HashMap<usize, (String, String, String)>,
@@ -99,7 +201,7 @@ impl LlmProvider for OpenAICompatProvider {
             "content": system_prompt,
         })];
         for msg in messages {
-            oai_messages.push(serde_json::to_value(msg)?);
+            oai_messages.push(Self::to_openai_message(msg));
         }
 
         let mut body = json!({

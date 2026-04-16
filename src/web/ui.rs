@@ -630,19 +630,69 @@ async function send() {
     var res = await fetch(API + '/api/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: text })
+      body: JSON.stringify({ input: text, session_id: activeSessionId || undefined })
     });
 
     showTyping(false);
     if (!res.ok) { addMsg('error', 'HTTP ' + res.status + ': ' + (await res.text())); setBusy(false); return; }
 
     var reader = res.body.getReader();
+    function processSSE(ev) {
+      switch (ev.type) {
+        case 'text_delta':
+          if (!cur) {
+            cur = addMsg('assistant', '');
+            cur._textEl = cur.querySelector('[data-text]');
+          }
+          if (cur._textEl) cur._textEl.textContent += ev.text;
+          scrollBottom();
+          break;
+        case 'thinking':
+          addMsg('thinking', esc(ev.text));
+          break;
+        case 'tool_start':
+          cur = null;
+          showTyping(true);
+          break;
+        case 'tool_result':
+          showTyping(false);
+          var toolHtml = '<div class="text-emerald-400 text-[11px] font-semibold font-mono mb-1.5">' + esc(ev.name || 'tool') + '</div>';
+          if (ev.image) {
+            var imgSrc = ev.image.startsWith('data:') ? ev.image : (API + ev.image);
+            toolHtml += '<img src="' + imgSrc + '" class="rounded-lg max-w-full max-h-80 mb-2 border border-zinc-700/30" alt="screenshot" loading="lazy">';
+          }
+          toolHtml += '<pre class="text-zinc-300 font-mono text-xs whitespace-pre-wrap break-all leading-relaxed">' + esc(ev.content || '') + '</pre>';
+          addMsg('tool', toolHtml);
+          break;
+        case 'done':
+          cur = null;
+          // Set active session for continuation
+          if (ev.session_id) activeSessionId = ev.session_id;
+          addIterBadge(ev.iterations, ev.session_id);
+          break;
+        case 'error':
+          addMsg('error', esc(ev.message || 'Unknown error'));
+          break;
+      }
+    }
+
     var dec = new TextDecoder();
     var cur = null, buf = '';
 
     while (true) {
       var chunk = await reader.read();
-      if (chunk.done) break;
+      if (chunk.done) {
+        // Process any remaining buffer
+        if (buf.trim()) {
+          buf.split('\n').forEach(function(line) {
+            if (!line.startsWith('data: ')) return;
+            var d = line.slice(6);
+            if (d === '[DONE]') return;
+            try { processSSE(JSON.parse(d)); } catch(e) {}
+          });
+        }
+        break;
+      }
       buf += dec.decode(chunk.value, { stream: true });
       var lines = buf.split('\n');
       buf = lines.pop() || '';
@@ -652,40 +702,7 @@ async function send() {
         if (!line.startsWith('data: ')) continue;
         var d = line.slice(6);
         if (d === '[DONE]') continue;
-        try {
-          var ev = JSON.parse(d);
-          switch (ev.type) {
-            case 'text_delta':
-              if (!cur) {
-                cur = addMsg('assistant', '');
-                cur._textEl = cur.querySelector('[data-text]');
-              }
-              if (cur._textEl) cur._textEl.textContent += ev.text;
-              scrollBottom();
-              break;
-            case 'thinking':
-              addMsg('thinking', esc(ev.text));
-              break;
-            case 'tool_start':
-              cur = null;
-              showTyping(true);
-              break;
-            case 'tool_result':
-              showTyping(false);
-              addMsg('tool',
-                '<div class="text-emerald-400 text-[11px] font-semibold font-mono mb-1.5">' + esc(ev.name || 'tool') + '</div>' +
-                '<pre class="text-zinc-300 font-mono text-xs whitespace-pre-wrap break-all leading-relaxed">' + esc(ev.content || '') + '</pre>'
-              );
-              break;
-            case 'done':
-              cur = null;
-              addIterBadge(ev.iterations, ev.session_id);
-              break;
-            case 'error':
-              addMsg('error', esc(ev.message || 'Unknown error'));
-              break;
-          }
-        } catch (parseErr) {}
+        try { processSSE(JSON.parse(d)); } catch (parseErr) {}
       }
     }
   } catch (e) {

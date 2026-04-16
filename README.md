@@ -215,7 +215,10 @@ notify = "telegram"
 
 ## License
 
-MIT
+This project is dual-licensed:
+
+- **Open source:** [AGPL-3.0-or-later](LICENSE-AGPL) — any use, modification, or distribution (including over a network) must comply with the AGPL.
+- **Commercial:** A separate commercial license is available for proprietary use. See [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL) or contact [tanuphat.chai@gmail.com](mailto:tanuphat.chai@gmail.com).
 
 ## Author
 

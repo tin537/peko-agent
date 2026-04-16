@@ -7,6 +7,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Max dimension for LLM — resize larger screenshots to save tokens and bandwidth.
+/// 720p is enough for UI element recognition while keeping base64 under ~100KB.
+const MAX_DIMENSION: u32 = 720;
+
 pub struct ScreenshotTool {
     device: Option<Arc<Mutex<FramebufferDevice>>>,
 }
@@ -29,23 +33,59 @@ impl ScreenshotTool {
             return Ok(ToolResult::error("screencap command failed"));
         }
 
-        let b64 = base64::Engine::encode(
-            &base64::engine::general_purpose::STANDARD,
-            &output.stdout,
-        );
+        // Decode PNG, resize, re-encode as JPEG
+        let img = image::load_from_memory(&output.stdout)?;
+        let (b64, w, h, size_kb) = resize_and_encode(&img);
+
         Ok(ToolResult::with_image(
-            "Screenshot captured via screencap".to_string(),
+            format!("Screenshot captured ({}x{}, {}KB). The image is attached.", w, h, size_kb),
             b64,
-            "image/png".to_string(),
+            "image/jpeg".to_string(),
         ))
     }
+}
+
+/// Resize image to fit within MAX_DIMENSION and encode as JPEG quality 80.
+/// Returns (base64, width, height, size_kb).
+fn resize_and_encode(img: &image::DynamicImage) -> (String, u32, u32, usize) {
+    let (orig_w, orig_h) = (img.width(), img.height());
+
+    let resized = if orig_w > MAX_DIMENSION || orig_h > MAX_DIMENSION {
+        img.resize(MAX_DIMENSION, MAX_DIMENSION, image::imageops::FilterType::Triangle)
+    } else {
+        img.clone()
+    };
+
+    let (w, h) = (resized.width(), resized.height());
+
+    // Encode as JPEG (much smaller than PNG, good enough for LLM vision)
+    let mut jpeg_bytes = Vec::new();
+    let mut cursor = Cursor::new(&mut jpeg_bytes);
+
+    // Try JPEG first, fall back to PNG if JPEG encoder not available
+    let format = if resized.write_to(&mut cursor, image::ImageFormat::Jpeg).is_ok() {
+        "image/jpeg"
+    } else {
+        jpeg_bytes.clear();
+        cursor = Cursor::new(&mut jpeg_bytes);
+        resized.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+        "image/png"
+    };
+
+    let size_kb = jpeg_bytes.len() / 1024;
+    let b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &jpeg_bytes,
+    );
+
+    (b64, w, h, size_kb)
 }
 
 impl Tool for ScreenshotTool {
     fn name(&self) -> &str { "screenshot" }
 
     fn description(&self) -> &str {
-        "Capture the current screen as a PNG image. Returns a base64-encoded screenshot."
+        "Capture the current screen. Returns a resized JPEG image (720p max) for efficient vision analysis."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -71,17 +111,13 @@ impl Tool for ScreenshotTool {
                     buffer.data,
                 ).ok_or_else(|| anyhow::anyhow!("failed to create image buffer"))?;
 
-                let mut png_bytes = Vec::new();
-                img.write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)?;
+                let dyn_img = image::DynamicImage::ImageRgba8(img);
+                let (b64, w, h, size_kb) = resize_and_encode(&dyn_img);
 
-                let b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &png_bytes,
-                );
                 Ok(ToolResult::with_image(
-                    format!("Screenshot captured ({}x{})", buffer.width, buffer.height),
+                    format!("Screenshot captured ({}x{}, {}KB). The image is attached.", w, h, size_kb),
                     b64,
-                    "image/png".to_string(),
+                    "image/jpeg".to_string(),
                 ))
             } else {
                 Self::capture_via_screencap()

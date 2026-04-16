@@ -61,6 +61,8 @@ impl Message {
         Message::ToolResult { tool_use_id, name, content, is_error, image: Some(image) }
     }
 
+    /// Convert to neutral transport messages.
+    /// Each provider converts these to its own wire format.
     pub fn to_transport_messages(&self) -> Vec<TransportMessage> {
         match self {
             Message::System(_) => vec![],
@@ -80,12 +82,24 @@ impl Message {
                         input: tc.input.clone(),
                     });
                 }
-                vec![TransportMessage {
-                    role: "assistant".to_string(),
-                    content: MessageContent::Blocks(blocks),
-                }]
+                if blocks.is_empty() {
+                    vec![TransportMessage {
+                        role: "assistant".to_string(),
+                        content: MessageContent::Text(String::new()),
+                    }]
+                } else if tool_calls.is_empty() {
+                    vec![TransportMessage {
+                        role: "assistant".to_string(),
+                        content: MessageContent::Text(text.clone().unwrap_or_default()),
+                    }]
+                } else {
+                    vec![TransportMessage {
+                        role: "assistant".to_string(),
+                        content: MessageContent::Blocks(blocks),
+                    }]
+                }
             }
-            Message::ToolResult { tool_use_id, content, is_error, image, .. } => {
+            Message::ToolResult { tool_use_id, name, content, is_error, image, .. } => {
                 let mut blocks = vec![ContentBlock::ToolResult {
                     tool_use_id: tool_use_id.clone(),
                     content: content.clone(),

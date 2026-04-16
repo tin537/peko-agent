@@ -9,6 +9,7 @@ use crate::budget::IterationBudget;
 use crate::compressor::ContextCompressor;
 use crate::memory::MemoryStore;
 use crate::skills::SkillStore;
+use crate::user_model::UserModel;
 use crate::message::{Message, ToolCall, ImageData};
 use crate::prompt::SystemPrompt;
 use crate::session::SessionStore;
@@ -23,11 +24,13 @@ pub struct AgentRuntime {
     tools: Arc<ToolRegistry>,
     budget: IterationBudget,
     compressor: ContextCompressor,
-    session: SessionStore,
+    pub session: SessionStore,
     provider: Box<dyn LlmProvider>,
     system_prompt: SystemPrompt,
     memory: Option<Arc<tokio::sync::Mutex<MemoryStore>>>,
     skills: Option<Arc<tokio::sync::Mutex<SkillStore>>>,
+    user_model: Option<Arc<tokio::sync::Mutex<UserModel>>>,
+    user_model_path: Option<std::path::PathBuf>,
     nudge_interval: usize,
 }
 
@@ -36,6 +39,16 @@ pub struct AgentResponse {
     pub text: String,
     pub iterations: usize,
     pub session_id: String,
+}
+
+/// Callback for streaming events to the UI
+pub enum StreamCallback {
+    TextDelta(String),
+    ToolStart { name: String },
+    ToolResult { name: String, content: String, is_error: bool, image: Option<(String, String)> },
+    Thinking(String),
+    Done { iterations: usize, session_id: String },
+    Error(String),
 }
 
 impl AgentRuntime {
@@ -54,6 +67,8 @@ impl AgentRuntime {
             system_prompt: SystemPrompt::new(),
             memory: None,
             skills: None,
+            user_model: None,
+            user_model_path: None,
             nudge_interval: 5,
         }
     }
@@ -70,6 +85,12 @@ impl AgentRuntime {
 
     pub fn with_skills(mut self, store: Arc<tokio::sync::Mutex<SkillStore>>) -> Self {
         self.skills = Some(store);
+        self
+    }
+
+    pub fn with_user_model(mut self, model: Arc<tokio::sync::Mutex<UserModel>>, path: std::path::PathBuf) -> Self {
+        self.user_model = Some(model);
+        self.user_model_path = Some(path);
         self
     }
 
@@ -129,6 +150,19 @@ impl AgentRuntime {
                             system_prompt_text.push_str("\n\n");
                             system_prompt_text.push_str(&ctx);
                             info!("injected skills into prompt");
+                        }
+                    }
+                }
+            }
+
+            // Inject user model context on first iteration
+            if total_iterations == 0 {
+                if let Some(ref user_model) = self.user_model {
+                    if let Ok(model) = user_model.try_lock() {
+                        let ctx = model.build_context();
+                        if !ctx.is_empty() {
+                            system_prompt_text.push_str("\n\n");
+                            system_prompt_text.push_str(&ctx);
                         }
                     }
                 }
@@ -195,6 +229,18 @@ impl AgentRuntime {
                     }
                     StreamEvent::MessageDelta { stop_reason: sr, .. } => {
                         stop_reason = sr;
+                        // Finalize pending tool call (OpenAI format)
+                        if !current_tool_name.is_empty() {
+                            let input: serde_json::Value = serde_json::from_str(&current_tool_input)
+                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                            tool_calls.push(ToolCall {
+                                id: current_tool_id.clone(),
+                                name: current_tool_name.clone(),
+                                input,
+                            });
+                            current_tool_name.clear();
+                            current_tool_input.clear();
+                        }
                     }
                     StreamEvent::ThinkingDelta(thought) => {
                         tracing::debug!(thought = %thought, "LLM thinking");
@@ -203,14 +249,32 @@ impl AgentRuntime {
                 }
             }
 
+            // Finalize any unclosed tool call
+            if !current_tool_name.is_empty() {
+                let input: serde_json::Value = serde_json::from_str(&current_tool_input)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                tool_calls.push(ToolCall {
+                    id: current_tool_id.clone(),
+                    name: current_tool_name.clone(),
+                    input,
+                });
+            }
+
             // Build assistant message
             let text = if text_buffer.is_empty() { None } else { Some(text_buffer.clone()) };
             let assistant_msg = Message::assistant_tool_calls(text, tool_calls.clone());
             conversation.push(assistant_msg.clone());
             self.session.append_message(&session_id, &assistant_msg)?;
 
-            if tool_calls.is_empty() || stop_reason == StopReason::EndTurn {
-                // No tool calls → final response
+            if tool_calls.is_empty() {
+                // No tool calls → final response (regardless of stop_reason)
+                final_text = text_buffer;
+                total_iterations += 1;
+                break;
+            }
+
+            if stop_reason == StopReason::EndTurn && !text_buffer.is_empty() {
+                // LLM said end_turn with text + tool calls — capture text as final
                 final_text = text_buffer;
                 total_iterations += 1;
                 break;
@@ -260,6 +324,16 @@ impl AgentRuntime {
         let status = if self.budget.is_interrupted() { "interrupted" } else { "completed" };
         self.session.update_status(&session_id, status, total_iterations)?;
 
+        // Update user model with this interaction
+        if let Some(ref user_model) = self.user_model {
+            if let Ok(mut model) = user_model.try_lock() {
+                model.record_task(user_input, total_iterations);
+                if let Some(ref path) = self.user_model_path {
+                    let _ = model.save(path);
+                }
+            }
+        }
+
         info!(
             session_id = %session_id,
             iterations = total_iterations,
@@ -271,6 +345,280 @@ impl AgentRuntime {
             text: final_text,
             iterations: total_iterations,
             session_id,
+        })
+    }
+
+    /// Run a turn within an existing conversation, streaming events via a channel.
+    /// This enables multi-turn conversations and real-time token streaming.
+    pub async fn run_turn(
+        &mut self,
+        session_id: &str,
+        conversation: &mut Vec<Message>,
+        user_input: &str,
+        tx: tokio::sync::mpsc::Sender<StreamCallback>,
+    ) -> anyhow::Result<AgentResponse> {
+        self.budget.reset();
+
+        // Append user message
+        let user_msg = Message::user(user_input.to_string());
+        conversation.push(user_msg.clone());
+        self.session.append_message(session_id, &user_msg)?;
+
+        let mut total_iterations: usize = 0;
+        let mut final_text = String::new();
+
+        loop {
+            if self.budget.should_stop() {
+                break;
+            }
+
+            self.compressor.check_and_compress(conversation);
+
+            let mut system_prompt_text = self.system_prompt.build(&self.tools);
+
+            // Inject memories
+            if total_iterations == 0 {
+                if let Some(ref memory) = self.memory {
+                    if let Ok(mem_store) = memory.try_lock() {
+                        if let Ok(ctx) = mem_store.build_context(user_input, 5) {
+                            if !ctx.is_empty() {
+                                system_prompt_text.push_str("\n\n");
+                                system_prompt_text.push_str(&ctx);
+                            }
+                        }
+                    }
+                }
+                if let Some(ref skills) = self.skills {
+                    if let Ok(skill_store) = skills.try_lock() {
+                        let ctx = skill_store.build_context(user_input);
+                        if !ctx.is_empty() {
+                            system_prompt_text.push_str("\n\n");
+                            system_prompt_text.push_str(&ctx);
+                        }
+                    }
+                }
+                if let Some(ref user_model) = self.user_model {
+                    if let Ok(model) = user_model.try_lock() {
+                        let ctx = model.build_context();
+                        if !ctx.is_empty() {
+                            system_prompt_text.push_str("\n\n");
+                            system_prompt_text.push_str(&ctx);
+                        }
+                    }
+                }
+            }
+
+            if self.memory.is_some()
+                && self.nudge_interval > 0
+                && total_iterations > 0
+                && total_iterations % self.nudge_interval == 0
+            {
+                system_prompt_text.push_str(MEMORY_NUDGE);
+            }
+
+            let transport_messages: Vec<peko_transport::provider::Message> = conversation
+                .iter()
+                .flat_map(|m| m.to_transport_messages())
+                .collect();
+
+            let tool_schemas = self.tools.schemas();
+
+            info!(iteration = total_iterations + 1, messages = transport_messages.len(), "run_turn: calling LLM");
+
+            let mut stream = match self.provider.stream_completion(
+                &system_prompt_text,
+                &transport_messages,
+                &tool_schemas,
+            ).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("run_turn: LLM call failed: {}", e);
+                    let _ = tx.send(StreamCallback::Error(format!("LLM error: {}", e))).await;
+                    break;
+                }
+            };
+
+            let mut text_buffer = String::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut current_tool_name = String::new();
+            let mut current_tool_id = String::new();
+            let mut current_tool_input = String::new();
+            let mut stop_reason = StopReason::EndTurn;
+
+            while let Some(event) = stream.next().await {
+                let event = match event {
+                    Ok(e) => e,
+                    Err(e) => {
+                        error!("run_turn: stream error: {}", e);
+                        let _ = tx.send(StreamCallback::Error(format!("LLM stream error: {}", e))).await;
+                        break;
+                    }
+                };
+                match event {
+                    StreamEvent::TextDelta(text) => {
+                        text_buffer.push_str(&text);
+                        let _ = tx.send(StreamCallback::TextDelta(text)).await;
+                    }
+                    StreamEvent::ToolUseStart { id, name } => {
+                        current_tool_id = id;
+                        current_tool_name = name.clone();
+                        current_tool_input.clear();
+                        let _ = tx.send(StreamCallback::ToolStart { name }).await;
+                    }
+                    StreamEvent::ToolInputDelta(json) => {
+                        current_tool_input.push_str(&json);
+                    }
+                    StreamEvent::ContentBlockStop { .. } => {
+                        if !current_tool_name.is_empty() {
+                            let input: serde_json::Value = serde_json::from_str(&current_tool_input)
+                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                            tool_calls.push(ToolCall {
+                                id: current_tool_id.clone(),
+                                name: current_tool_name.clone(),
+                                input,
+                            });
+                            current_tool_name.clear();
+                            current_tool_input.clear();
+                        }
+                    }
+                    StreamEvent::MessageDelta { stop_reason: sr, .. } => {
+                        stop_reason = sr;
+                        // Finalize any pending tool call (OpenAI format doesn't send ContentBlockStop)
+                        if !current_tool_name.is_empty() {
+                            let input: serde_json::Value = serde_json::from_str(&current_tool_input)
+                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                            tool_calls.push(ToolCall {
+                                id: current_tool_id.clone(),
+                                name: current_tool_name.clone(),
+                                input,
+                            });
+                            current_tool_name.clear();
+                            current_tool_input.clear();
+                        }
+                    }
+                    StreamEvent::ThinkingDelta(thought) => {
+                        let _ = tx.send(StreamCallback::Thinking(thought)).await;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Finalize any tool call that wasn't closed (safety net)
+            if !current_tool_name.is_empty() {
+                let input: serde_json::Value = serde_json::from_str(&current_tool_input)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                tool_calls.push(ToolCall {
+                    id: current_tool_id.clone(),
+                    name: current_tool_name.clone(),
+                    input,
+                });
+            }
+
+            let text = if text_buffer.is_empty() { None } else { Some(text_buffer.clone()) };
+            let assistant_msg = Message::assistant_tool_calls(text, tool_calls.clone());
+            conversation.push(assistant_msg.clone());
+            self.session.append_message(session_id, &assistant_msg)?;
+
+            info!(
+                text_len = text_buffer.len(),
+                tool_count = tool_calls.len(),
+                stop = ?stop_reason,
+                "run_turn: LLM response received"
+            );
+
+            if tool_calls.is_empty() {
+                final_text = text_buffer;
+                total_iterations += 1;
+                info!("run_turn: no tools, breaking with text");
+                break;
+            }
+
+            if stop_reason == StopReason::EndTurn && !text_buffer.is_empty() {
+                final_text = text_buffer;
+                total_iterations += 1;
+                info!("run_turn: end_turn with text, breaking");
+                break;
+            }
+
+            for tc in &tool_calls {
+                info!(tool = %tc.name, "run_turn: executing tool");
+                let result = match self.tools.execute(&tc.name, tc.input.clone()).await {
+                    Ok(r) => r,
+                    Err(e) => ToolResult::error(format!("Error: {}", e)),
+                };
+
+                // Save image to a temp file and send URL instead of inline base64
+                let img_for_ui = result.image.as_ref().and_then(|img| {
+                    let ext = if img.media_type.contains("jpeg") { "jpg" } else { "png" };
+                    let filename = format!("screenshot_{}.{}", chrono::Utc::now().timestamp_millis(), ext);
+                    let dir = std::path::Path::new("/data/peko/screenshots");
+                    let _ = std::fs::create_dir_all(dir);
+                    let path = dir.join(&filename);
+
+                    // Try data dir, fallback to /tmp
+                    let (save_path, url_path) = if let Ok(decoded) = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD, &img.base64
+                    ) {
+                        if std::fs::write(&path, &decoded).is_ok() {
+                            (path, format!("/api/screenshots/{}", filename))
+                        } else {
+                            let tmp = std::path::Path::new("/tmp").join(&filename);
+                            let _ = std::fs::write(&tmp, &decoded);
+                            (tmp, format!("/api/screenshots/{}", filename))
+                        }
+                    } else {
+                        return None;
+                    };
+
+                    Some((url_path, img.media_type.clone()))
+                });
+
+                let _ = tx.send(StreamCallback::ToolResult {
+                    name: tc.name.clone(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                    image: img_for_ui,
+                }).await;
+
+                let tool_msg = if let Some(img) = result.image {
+                    Message::tool_result_with_image(
+                        tc.id.clone(), tc.name.clone(), result.content, result.is_error, img,
+                    )
+                } else {
+                    Message::tool_result(
+                        tc.id.clone(), tc.name.clone(), result.content, result.is_error,
+                    )
+                };
+                conversation.push(tool_msg.clone());
+                self.session.append_message(session_id, &tool_msg)?;
+            }
+
+            total_iterations += 1;
+            if let Err(_) = self.budget.decrement() { break; }
+        }
+
+        let status = if self.budget.is_interrupted() { "interrupted" } else { "completed" };
+        self.session.update_status(session_id, status, total_iterations)?;
+
+        if let Some(ref user_model) = self.user_model {
+            if let Ok(mut model) = user_model.try_lock() {
+                model.record_task(user_input, total_iterations);
+                if let Some(ref path) = self.user_model_path {
+                    let _ = model.save(path);
+                }
+            }
+        }
+
+        let sid = session_id.to_string();
+        let _ = tx.send(StreamCallback::Done {
+            iterations: total_iterations,
+            session_id: sid.clone(),
+        }).await;
+
+        Ok(AgentResponse {
+            text: final_text,
+            iterations: total_iterations,
+            session_id: sid,
         })
     }
 }

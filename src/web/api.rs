@@ -27,6 +27,9 @@ pub struct AppState {
     pub memory: Arc<Mutex<peko_core::MemoryStore>>,
     pub skills: Arc<Mutex<peko_core::SkillStore>>,
     pub soul: Arc<Mutex<String>>,
+    pub user_model: Arc<Mutex<peko_core::UserModel>>,
+    pub user_model_path: std::path::PathBuf,
+    pub task_queue: peko_core::TaskQueue,
     pub scheduler_tasks: Option<Arc<Mutex<Vec<peko_core::ScheduledTask>>>>,
 }
 
@@ -58,6 +61,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/soul", get(get_soul).post(set_soul))
         // Scheduler
         .route("/api/schedule", get(list_schedule))
+        // User model
+        .route("/api/user", get(get_user_model).post(update_user_model))
+        // Queue status
+        .route("/api/queue", get(queue_status))
+        // Screenshots
+        .route("/api/screenshots/{filename}", get(serve_screenshot))
         .with_state(state)
 }
 
@@ -330,6 +339,8 @@ fn build_provider_from_json(config: &serde_json::Value) -> anyhow::Result<Box<dy
 #[derive(Deserialize)]
 struct RunRequest {
     input: String,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 async fn run_task(
@@ -340,83 +351,48 @@ async fn run_task(
         return (StatusCode::BAD_REQUEST, "empty input").into_response();
     }
 
-    info!(task = %req.input, "web UI task submitted");
+    info!(task = %req.input, session = ?req.session_id, "web UI task submitted");
 
-    let config = state.config.lock().await.clone();
-    let tools = state.tools.clone();
-    let db_path = state.session_db_path.clone();
-    let memory_store = state.memory.clone();
-    let skill_store = state.skills.clone();
-    let soul_text = state.soul.lock().await.clone();
-    let input = req.input.clone();
+    // Submit to the centralized task queue
+    let (mut rx, _result_rx) = state.task_queue.submit_and_wait(
+        req.input.clone(),
+        req.session_id.clone(),
+        peko_core::TaskSource::WebUI,
+    ).await;
 
+    // Stream channel events as SSE
     let stream = async_stream::stream! {
         yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", serde_json::json!({
             "type": "status",
             "message": "starting"
         })));
 
-        // Build provider from CURRENT config (picks up web UI changes)
-        let provider = match build_provider_from_json(&config) {
-            Ok(p) => p,
-            Err(e) => {
-                yield Ok(format!("data: {}\n\n", serde_json::json!({
-                    "type": "error",
-                    "message": format!("provider error: {}", e)
-                })));
-                yield Ok("data: [DONE]\n\n".to_string());
-                return;
-            }
-        };
-
-        let session = match SessionStore::open(&db_path) {
-            Ok(s) => s,
-            Err(e) => {
-                yield Ok(format!("data: {}\n\n", serde_json::json!({
-                    "type": "error",
-                    "message": format!("session store error: {}", e)
-                })));
-                yield Ok("data: [DONE]\n\n".to_string());
-                return;
-            }
-        };
-
-        let agent_config = AgentConfig {
-            max_iterations: config["agent"]["max_iterations"].as_u64().unwrap_or(50) as usize,
-            context_window: config["agent"]["context_window"].as_u64().unwrap_or(200000) as usize,
-            history_share: config["agent"]["history_share"].as_f64().unwrap_or(0.7) as f32,
-            data_dir: std::path::PathBuf::from(
-                config["agent"]["data_dir"].as_str().unwrap_or("/data/local/tmp/peko")
-            ),
-            log_level: config["agent"]["log_level"].as_str().unwrap_or("info").to_string(),
-        };
-
-        let prompt = peko_core::SystemPrompt::new().with_soul(soul_text.clone());
-        let mut runtime = AgentRuntime::new(&agent_config, tools, provider, session)
-            .with_system_prompt(prompt)
-            .with_memory(memory_store.clone())
-            .with_skills(skill_store.clone());
-
-        match runtime.run_task(&input).await {
-            Ok(response) => {
-                if !response.text.is_empty() {
-                    yield Ok(format!("data: {}\n\n", serde_json::json!({
-                        "type": "text_delta",
-                        "text": response.text
-                    })));
+        while let Some(event) = rx.recv().await {
+            let data = match event {
+                peko_core::runtime::StreamCallback::TextDelta(text) => {
+                    serde_json::json!({"type": "text_delta", "text": text})
                 }
-                yield Ok(format!("data: {}\n\n", serde_json::json!({
-                    "type": "done",
-                    "iterations": response.iterations,
-                    "session_id": response.session_id
-                })));
-            }
-            Err(e) => {
-                yield Ok(format!("data: {}\n\n", serde_json::json!({
-                    "type": "error",
-                    "message": format!("{}", e)
-                })));
-            }
+                peko_core::runtime::StreamCallback::ToolStart { name } => {
+                    serde_json::json!({"type": "tool_start", "name": name})
+                }
+                peko_core::runtime::StreamCallback::ToolResult { name, content, is_error, image } => {
+                    let mut ev = serde_json::json!({"type": "tool_result", "name": name, "content": content, "is_error": is_error});
+                    if let Some((data_uri, _)) = image {
+                        ev["image"] = serde_json::Value::String(data_uri);
+                    }
+                    ev
+                }
+                peko_core::runtime::StreamCallback::Thinking(text) => {
+                    serde_json::json!({"type": "thinking", "text": text})
+                }
+                peko_core::runtime::StreamCallback::Done { iterations, session_id } => {
+                    serde_json::json!({"type": "done", "iterations": iterations, "session_id": session_id})
+                }
+                peko_core::runtime::StreamCallback::Error(msg) => {
+                    serde_json::json!({"type": "error", "message": msg})
+                }
+            };
+            yield Ok(format!("data: {}\n\n", data));
         }
 
         yield Ok("data: [DONE]\n\n".to_string());
@@ -556,4 +532,92 @@ async fn list_schedule(State(state): State<AppState>) -> Json<serde_json::Value>
     } else {
         Json(serde_json::json!({"count": 0, "tasks": [], "note": "No scheduled tasks configured. Add [[schedule]] to config.toml"}))
     }
+}
+
+// ── User Model API ──
+
+async fn get_user_model(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let model = state.user_model.lock().await;
+    Json(serde_json::to_value(&*model).unwrap_or(serde_json::json!({})))
+}
+
+async fn update_user_model(
+    State(state): State<AppState>,
+    Json(updates): Json<serde_json::Value>,
+) -> StatusCode {
+    let mut model = state.user_model.lock().await;
+
+    // Apply updates
+    if let Some(name) = updates["name"].as_str() {
+        model.set_preference("name", name);
+    }
+    if let Some(expertise) = updates["expertise"].as_str() {
+        model.set_preference("expertise", expertise);
+    }
+    if let Some(style) = updates["response_style"].as_str() {
+        model.set_preference("response_style", style);
+    }
+    if let Some(v) = updates["verbose"].as_bool() {
+        model.set_preference("verbose", if v { "true" } else { "false" });
+    }
+    if let Some(v) = updates["confirm_dangerous"].as_bool() {
+        model.set_preference("confirm_dangerous", if v { "true" } else { "false" });
+    }
+    if let Some(obs) = updates["observation"].as_str() {
+        model.add_observation(obs);
+    }
+    if let Some(app) = updates["preferred_app"].as_str() {
+        if !model.patterns.preferred_apps.contains(&app.to_string()) {
+            model.patterns.preferred_apps.push(app.to_string());
+        }
+    }
+
+    // Save to disk
+    if let Err(e) = model.save(&state.user_model_path) {
+        tracing::error!(error = %e, "failed to save user model");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+
+    info!("user model updated");
+    StatusCode::OK
+}
+
+// ── Queue Status API ──
+
+async fn queue_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let status = state.task_queue.status().await;
+    Json(serde_json::to_value(&status).unwrap_or(serde_json::json!({})))
+}
+
+// ── Screenshot serving ──
+
+async fn serve_screenshot(
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Response {
+    // Sanitize filename
+    let safe_name = filename.replace("..", "").replace("/", "");
+
+    // Try /data/peko/screenshots first, then /tmp
+    let paths = [
+        std::path::PathBuf::from("/data/peko/screenshots").join(&safe_name),
+        std::path::PathBuf::from("/tmp").join(&safe_name),
+    ];
+
+    for path in &paths {
+        if let Ok(data) = std::fs::read(path) {
+            let content_type = if safe_name.ends_with(".jpg") || safe_name.ends_with(".jpeg") {
+                "image/jpeg"
+            } else {
+                "image/png"
+            };
+
+            return Response::builder()
+                .header("content-type", content_type)
+                .header("cache-control", "public, max-age=3600")
+                .body(axum::body::Body::from(data))
+                .unwrap();
+        }
+    }
+
+    (StatusCode::NOT_FOUND, "screenshot not found").into_response()
 }

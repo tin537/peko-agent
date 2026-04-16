@@ -10,6 +10,7 @@ pub mod ui_automation;
 pub mod package_manager_tool;
 pub mod memory_tool;
 pub mod skills_tool;
+pub mod delegate_tool;
 
 pub use screenshot::ScreenshotTool;
 pub use touch::TouchTool;
@@ -23,6 +24,7 @@ pub use ui_automation::UiAutomationTool;
 pub use package_manager_tool::PackageManagerTool;
 pub use memory_tool::MemoryTool;
 pub use skills_tool::SkillsTool;
+pub use delegate_tool::DelegateTool;
 
 #[cfg(test)]
 mod tests;

@@ -1,0 +1,17 @@
+Peko Agent Dual License
+=======================
+
+Copyright 2024-2026 Tanuphat Chainaloedwong / ftmstars
+
+This project is dual-licensed. You may choose either license depending on your
+use case:
+
+  - Open Source Use: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).
+    See LICENSE-AGPL for the full terms. Under this license, any software that
+    uses, modifies, or distributes Peko Agent — including over a network — must
+    also be released under the AGPL.
+
+  - Commercial Use: A separate commercial license is available for organizations
+    that cannot comply with the AGPL (e.g., proprietary products or SaaS without
+    source disclosure). See LICENSE-COMMERCIAL for details, or contact
+    tanuphat.chai@gmail.com to obtain a commercial license.
