@@ -169,6 +169,13 @@ async fn main() -> anyhow::Result<()> {
     let user_model = Arc::new(Mutex::new(UserModel::load(&user_model_path)));
     info!("user model loaded");
 
+    // Motivation drives (Phase D) — persisted between runs, default 0.5 each.
+    let motivation_path = config.agent.data_dir.join("motivation.json");
+    let motivation = Arc::new(Mutex::new(
+        peko_core::Motivation::load(&motivation_path)
+    ));
+    info!("motivation state loaded");
+
     // MCP servers — connect and register tools
     if !config.mcp.is_empty() {
         let mcp_configs: Vec<McpServerConfig> = config.mcp.iter().map(|c| McpServerConfig {
@@ -248,6 +255,20 @@ async fn main() -> anyhow::Result<()> {
         32, // max queue size
     );
 
+    // Life loop (Phase B) — spawned only when autonomy is enabled.
+    let life_loop_handle = {
+        let life = peko_core::LifeLoop::new(
+            config.autonomy.clone(),
+            motivation.clone(),
+            motivation_path.clone(),
+            memory_store.clone(),
+            user_model.clone(),
+            tools_arc.clone(),
+            task_queue.clone(),
+        );
+        life.spawn()
+    };
+
     let mut app_state = web::api::AppState {
         tools: tools_arc.clone(),
         config: config_arc.clone(),
@@ -260,6 +281,10 @@ async fn main() -> anyhow::Result<()> {
         user_model_path: user_model_path.clone(),
         task_queue: task_queue.clone(),
         brain: brain.clone(),
+        motivation: motivation.clone(),
+        motivation_path: motivation_path.clone(),
+        autonomy: config.autonomy.clone(),
+        life_loop: life_loop_handle,
         scheduler_tasks: None,
     };
 

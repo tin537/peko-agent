@@ -84,6 +84,7 @@ tailwind.config = {
         <button id="tabMsgs" onclick="showTab('messages')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Messages</button>
         <button id="tabMemory" onclick="showTab('memory')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Memory</button>
         <button id="tabSkills" onclick="showTab('skills')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Skills</button>
+        <button id="tabLife" onclick="showTab('life')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200" title="Autonomous mind — drives + proposals">Life</button>
         <button id="tabCfg" onclick="showTab('config')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Config</button>
       </nav>
     </div>
@@ -473,6 +474,52 @@ tailwind.config = {
         </div>
       </div>
 
+      <!-- Life Panel (autonomous behavior dashboard) -->
+      <div id="lifePanel" class="hidden flex-1 overflow-y-auto p-4">
+        <div class="max-w-4xl mx-auto space-y-4">
+
+          <!-- Header — status + pause -->
+          <div class="flex items-center justify-between">
+            <div>
+              <h2 class="text-sm font-bold text-zinc-300 uppercase tracking-wider">Autonomous Life</h2>
+              <p class="text-[11px] text-zinc-500" id="lifeStatus">Loading…</p>
+            </div>
+            <div class="flex gap-2">
+              <button id="lifePauseBtn" onclick="autonomyPause()"
+                class="px-3 py-1.5 bg-red-950/40 hover:bg-red-900/40 border border-red-800/40 text-red-300 text-xs font-semibold rounded-lg">Pause</button>
+              <button id="lifeResumeBtn" onclick="autonomyResume()"
+                class="px-3 py-1.5 bg-emerald-950/40 hover:bg-emerald-900/40 border border-emerald-800/40 text-emerald-300 text-xs font-semibold rounded-lg hidden">Resume</button>
+            </div>
+          </div>
+
+          <!-- Drives — the inner motivational state -->
+          <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+            <h3 class="text-[10px] text-zinc-500 uppercase mb-3 font-bold tracking-wider">Drives</h3>
+            <div class="grid grid-cols-2 gap-3" id="lifeDrives">
+              <!-- Injected by loadAutonomy() -->
+            </div>
+          </div>
+
+          <!-- Rate limit snapshot -->
+          <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+            <h3 class="text-[10px] text-zinc-500 uppercase mb-2 font-bold tracking-wider">Rate limits</h3>
+            <div class="flex gap-6 text-sm">
+              <span class="text-zinc-300"><span id="lifeRateHour" class="font-mono">0</span> <span class="text-zinc-500 text-xs">/ hour</span></span>
+              <span class="text-zinc-300"><span id="lifeRateDay" class="font-mono">0</span>  <span class="text-zinc-500 text-xs">/ day</span></span>
+            </div>
+          </div>
+
+          <!-- Pending proposals — user approves / rejects -->
+          <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+            <h3 class="text-[10px] text-zinc-500 uppercase mb-3 font-bold tracking-wider">Proposals</h3>
+            <div id="lifeProposals" class="space-y-2">
+              <p class="text-[11px] text-zinc-600 text-center py-4">No proposals yet.</p>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
     </main>
   </div>
 
@@ -524,8 +571,8 @@ let sidebarOpen = false;
 
 /* ── Tabs ── */
 function showTab(tab) {
-  const panels = {chat:'chatPanel',config:'cfgPanel',monitor:'monitorPanel',apps:'appsPanel',messages:'messagesPanel',memory:'memoryPanel',skills:'skillsPanel'};
-  const tabs = {chat:'tabChat',config:'tabCfg',monitor:'tabMonitor',apps:'tabApps',messages:'tabMsgs',memory:'tabMemory',skills:'tabSkills'};
+  const panels = {chat:'chatPanel',config:'cfgPanel',monitor:'monitorPanel',apps:'appsPanel',messages:'messagesPanel',memory:'memoryPanel',skills:'skillsPanel',life:'lifePanel'};
+  const tabs = {chat:'tabChat',config:'tabCfg',monitor:'tabMonitor',apps:'tabApps',messages:'tabMsgs',memory:'tabMemory',skills:'tabSkills',life:'tabLife'};
   const onClass = 'px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 bg-violet-600 text-white shadow-sm';
   const offClass = 'px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200';
 
@@ -556,6 +603,7 @@ function showTab(tab) {
   if (tab === 'messages') { if (!msgES) startMsgStream(); }
   if (tab === 'memory') loadMemories();
   if (tab === 'skills') loadSkills();
+  if (tab === 'life') loadAutonomy();
   // Stop streams when leaving tabs
   if (tab !== 'monitor') stopMonitorAutoRefresh();
   if (tab !== 'messages' && msgES) { msgES.close(); msgES = null; }
@@ -1497,6 +1545,106 @@ async function saveSoul() {
       if (msg) { msg.style.display = 'inline'; setTimeout(function(){msg.style.display='none'},2000); }
     }
   } catch(e) { alert('Failed: '+e.message); }
+}
+
+/* ── Autonomy / Life tab ── */
+async function loadAutonomy() {
+  try {
+    var r = await fetch(API+'/api/autonomy/status');
+    var s = await r.json();
+    var statusText = document.getElementById('lifeStatus');
+    var pauseBtn = document.getElementById('lifePauseBtn');
+    var resumeBtn = document.getElementById('lifeResumeBtn');
+
+    if (!s.enabled) {
+      if (statusText) statusText.textContent = 'Autonomy disabled — set [autonomy].enabled = true in config.toml';
+      if (pauseBtn)  pauseBtn.classList.add('hidden');
+      if (resumeBtn) resumeBtn.classList.add('hidden');
+      renderDrives({curiosity:0.5,competence:0.5,social:0.5,coherence:0.5,tick_count:0});
+      return;
+    }
+
+    if (statusText) {
+      statusText.textContent = s.paused
+        ? 'Paused — click Resume to continue'
+        : 'Active · ' + (s.motivation.tick_count || 0) + ' ticks';
+    }
+    if (pauseBtn)  pauseBtn.classList.toggle('hidden',  s.paused);
+    if (resumeBtn) resumeBtn.classList.toggle('hidden', !s.paused);
+
+    renderDrives(s.motivation);
+    document.getElementById('lifeRateHour').textContent = s.tasks_last_hour;
+    document.getElementById('lifeRateDay').textContent  = s.tasks_last_day;
+    renderProposals(s.recent_proposals || []);
+  } catch (e) { /* ignore */ }
+}
+
+function renderDrives(m) {
+  var drives = [
+    {key:'curiosity',  label:'Curiosity',  color:'violet',  desc:'drive to learn'},
+    {key:'competence', label:'Competence', color:'emerald', desc:'drive to succeed'},
+    {key:'social',     label:'Social',     color:'sky',     desc:'drive to help'},
+    {key:'coherence',  label:'Coherence',  color:'amber',   desc:'consistency'},
+  ];
+  var host = document.getElementById('lifeDrives');
+  if (!host) return;
+  host.innerHTML = drives.map(function(d) {
+    var v = (m[d.key] || 0.5);
+    var pct = Math.round(v * 100);
+    return '<div>' +
+      '<div class="flex justify-between text-[10px] mb-1">' +
+        '<span class="text-zinc-400 font-medium">' + d.label + '</span>' +
+        '<span class="text-zinc-500 font-mono">' + pct + '%</span>' +
+      '</div>' +
+      '<div class="h-2 bg-zinc-800 rounded-full overflow-hidden">' +
+        '<div class="h-full bg-' + d.color + '-500 rounded-full" style="width:' + pct + '%"></div>' +
+      '</div>' +
+      '<p class="text-[9px] text-zinc-600 mt-0.5">' + d.desc + '</p>' +
+    '</div>';
+  }).join('');
+}
+
+function renderProposals(list) {
+  var host = document.getElementById('lifeProposals');
+  if (!host) return;
+  var pending = list.filter(function(p) { return p.status === 'pending'; });
+  if (!pending.length) {
+    host.innerHTML = '<p class="text-[11px] text-zinc-600 text-center py-4">No pending proposals.</p>';
+    return;
+  }
+  host.innerHTML = pending.map(function(p) {
+    return '<div class="border border-zinc-800 rounded-lg p-3 bg-zinc-950/40">' +
+      '<div class="flex items-start justify-between gap-2 mb-2">' +
+        '<span class="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 bg-violet-900/30 text-violet-300 rounded">' + esc(p.action) + '</span>' +
+        '<span class="text-[9px] text-zinc-600 font-mono">' + (p.id || '').slice(0,8) + '</span>' +
+      '</div>' +
+      '<p class="text-xs text-zinc-200 leading-relaxed mb-1">' + esc(p.task_prompt) + '</p>' +
+      '<p class="text-[10px] text-zinc-500 italic mb-2.5">' + esc(p.reasoning) + '</p>' +
+      '<div class="flex gap-2">' +
+        '<button onclick="approveProposal(\'' + escAttr(p.id) + '\')" class="flex-1 text-[10px] px-2 py-1 bg-emerald-900/30 hover:bg-emerald-900/50 text-emerald-400 rounded font-semibold">Approve</button>' +
+        '<button onclick="rejectProposal(\'' + escAttr(p.id) + '\')" class="flex-1 text-[10px] px-2 py-1 bg-zinc-800 hover:bg-red-900/30 text-zinc-400 rounded font-semibold">Reject</button>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+async function approveProposal(id) {
+  try {
+    await fetch(API+'/api/autonomy/proposals/'+encodeURIComponent(id)+'/approve', {method:'POST'});
+    loadAutonomy();
+  } catch(e) {}
+}
+async function rejectProposal(id) {
+  try {
+    await fetch(API+'/api/autonomy/proposals/'+encodeURIComponent(id)+'/reject', {method:'POST'});
+    loadAutonomy();
+  } catch(e) {}
+}
+async function autonomyPause() {
+  try { await fetch(API+'/api/autonomy/pause', {method:'POST'}); loadAutonomy(); } catch(e) {}
+}
+async function autonomyResume() {
+  try { await fetch(API+'/api/autonomy/resume', {method:'POST'}); loadAutonomy(); } catch(e) {}
 }
 
 /* ── Cycling placeholder — helps new users discover capabilities ── */

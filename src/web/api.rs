@@ -31,6 +31,10 @@ pub struct AppState {
     pub user_model_path: std::path::PathBuf,
     pub task_queue: peko_core::TaskQueue,
     pub brain: Option<Arc<peko_core::DualBrain>>,
+    pub motivation: Arc<Mutex<peko_core::Motivation>>,
+    pub motivation_path: std::path::PathBuf,
+    pub autonomy: peko_config::AutonomyConfig,
+    pub life_loop: peko_core::life_loop::LifeLoopHandle,
     pub scheduler_tasks: Option<Arc<Mutex<Vec<peko_core::ScheduledTask>>>>,
 }
 
@@ -68,6 +72,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/queue", get(queue_status))
         // Brain status — mode + providers
         .route("/api/brain", get(brain_status))
+        // Autonomy / life loop
+        .route("/api/autonomy/status", get(autonomy_status))
+        .route("/api/autonomy/proposals", get(list_proposals))
+        .route("/api/autonomy/proposals/{id}/approve", post(approve_proposal))
+        .route("/api/autonomy/proposals/{id}/reject", post(reject_proposal))
+        .route("/api/autonomy/pause", post(pause_autonomy))
+        .route("/api/autonomy/resume", post(resume_autonomy))
         // Screenshots
         .route("/api/screenshots/{filename}", get(serve_screenshot))
         // AGPL §13 compliance — source offer + third-party licenses
@@ -762,4 +773,84 @@ SOFTWARE.</pre>
 <p><a href="/">← back to agent</a></p>
 </body></html>"#;
     Html(html).into_response()
+}
+
+// ── Autonomy / Life Loop API (Phase B/G) ───────────────────────
+//
+// Endpoints:
+//   GET  /api/autonomy/status                      — drives, proposals, rate-limit snapshot
+//   GET  /api/autonomy/proposals                   — all proposals (pending + history)
+//   POST /api/autonomy/proposals/{id}/approve      — execute a proposal
+//   POST /api/autonomy/proposals/{id}/reject       — mark rejected (feeds social drive)
+//   POST /api/autonomy/pause                       — kill switch
+//   POST /api/autonomy/resume                      — re-enable
+
+async fn autonomy_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let snap = state.life_loop.snapshot(state.autonomy.enabled).await;
+    Json(serde_json::to_value(&snap).unwrap_or(serde_json::json!({})))
+}
+
+async fn list_proposals(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let ps = state.life_loop.list_proposals().await;
+    Json(serde_json::json!({ "count": ps.len(), "proposals": ps }))
+}
+
+async fn approve_proposal(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+) -> StatusCode {
+    let Some(p) = state.life_loop.get_proposal(&id).await else {
+        return StatusCode::NOT_FOUND;
+    };
+    if p.status != peko_core::ProposalStatus::Pending {
+        return StatusCode::BAD_REQUEST;
+    }
+    state.life_loop.set_proposal_status(&id, peko_core::ProposalStatus::Approved).await;
+
+    // Fire the approved task into the queue (internal source)
+    let source = peko_core::TaskSource::Internal {
+        action: p.action.clone(),
+        reason: format!("approved: {}", p.reasoning),
+    };
+    let (_rx, _result) = state.task_queue
+        .submit_and_wait(p.task_prompt.clone(), None, source)
+        .await;
+
+    // Positive social feedback — user engaged with a proposal
+    {
+        let mut mot = state.motivation.lock().await;
+        mot.record(peko_core::DriveEvent::UserEngaged);
+        let _ = mot.save(&state.motivation_path);
+    }
+
+    state.life_loop.set_proposal_status(&id, peko_core::ProposalStatus::Executed).await;
+    StatusCode::OK
+}
+
+async fn reject_proposal(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(state): State<AppState>,
+) -> StatusCode {
+    if !state.life_loop.set_proposal_status(&id, peko_core::ProposalStatus::Rejected).await {
+        return StatusCode::NOT_FOUND;
+    }
+    // Rejection hurts social drive — makes the agent less likely to propose similar things
+    {
+        let mut mot = state.motivation.lock().await;
+        mot.record(peko_core::DriveEvent::UserRejected);
+        let _ = mot.save(&state.motivation_path);
+    }
+    StatusCode::OK
+}
+
+async fn pause_autonomy(State(state): State<AppState>) -> StatusCode {
+    state.life_loop.pause();
+    info!("autonomy paused by user");
+    StatusCode::OK
+}
+
+async fn resume_autonomy(State(state): State<AppState>) -> StatusCode {
+    state.life_loop.resume();
+    info!("autonomy resumed by user");
+    StatusCode::OK
 }

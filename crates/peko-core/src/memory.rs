@@ -25,6 +25,8 @@ pub enum MemoryCategory {
     Procedure,
     Observation,
     Skill,
+    /// Self-evaluation written by the Reflector after each task.
+    Reflection,
 }
 
 impl std::fmt::Display for MemoryCategory {
@@ -35,6 +37,7 @@ impl std::fmt::Display for MemoryCategory {
             Self::Procedure => write!(f, "procedure"),
             Self::Observation => write!(f, "observation"),
             Self::Skill => write!(f, "skill"),
+            Self::Reflection => write!(f, "reflection"),
         }
     }
 }
@@ -46,6 +49,7 @@ impl MemoryCategory {
             "procedure" => Self::Procedure,
             "observation" => Self::Observation,
             "skill" => Self::Skill,
+            "reflection" => Self::Reflection,
             _ => Self::Fact,
         }
     }
@@ -223,6 +227,49 @@ impl MemoryStore {
             "SELECT COUNT(*) FROM memories", [], |row| row.get(0)
         )?;
         Ok(count as usize)
+    }
+
+    // ── Gardener (Phase C) ─────────────────────────────────────
+    //
+    // Periodically called (daily via Scheduler) to prevent memory from growing
+    // without bound. Steps:
+    //   1. Delete low-importance, never-accessed, old memories
+    //   2. (future) Cluster + summarize — see docs/implementation/Autonomy.md
+
+    /// Prune memories that are:
+    ///   - older than `age_days`
+    ///   - never accessed since creation (access_count == 0)
+    ///   - importance below `min_importance`
+    ///
+    /// Returns count deleted.
+    pub fn prune(&self, age_days: i64, min_importance: f64) -> anyhow::Result<usize> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(age_days);
+        let cutoff_str = cutoff.to_rfc3339();
+        let affected = self.conn.execute(
+            "DELETE FROM memories
+             WHERE created_at < ?1
+               AND access_count = 0
+               AND importance < ?2
+               AND category != 'skill'",   // skills are managed separately
+            params![cutoff_str, min_importance],
+        )?;
+        Ok(affected)
+    }
+
+    /// Decay importance of un-accessed memories over time. Drops importance
+    /// by `factor` (e.g. 0.95) for any memory not touched in `age_days`.
+    /// Helps the prune step catch "was important once, but no longer" items.
+    pub fn decay_importance(&self, age_days: i64, factor: f64) -> anyhow::Result<usize> {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(age_days);
+        let cutoff_str = cutoff.to_rfc3339();
+        let affected = self.conn.execute(
+            "UPDATE memories
+             SET importance = importance * ?1
+             WHERE (accessed_at IS NULL OR accessed_at < ?2)
+               AND category != 'skill'",
+            params![factor, cutoff_str],
+        )?;
+        Ok(affected)
     }
 
     /// Build a text block of relevant memories for system prompt injection

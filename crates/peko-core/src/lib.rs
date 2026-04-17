@@ -14,6 +14,11 @@ pub mod user_model;
 pub mod mcp;
 pub mod task_queue;
 pub mod brain;
+pub mod motivation;
+pub mod reflector;
+pub mod life_loop;
+pub mod curiosity;
+pub mod goal;
 
 pub use message::{Message, ToolCall};
 pub use tool::{Tool, ToolRegistry, ToolResult};
@@ -32,6 +37,11 @@ pub use user_model::UserModel;
 pub use mcp::{McpClient, McpServerConfig, register_mcp_tools};
 pub use task_queue::{TaskQueue, TaskRequest, TaskSource, QueueStatus};
 pub use brain::{DualBrain, BrainChoice, BrainMode};
+pub use motivation::{Motivation, DriveEvent, LifeAction};
+pub use reflector::{Reflector, Reflection, ReflectionOutcome, CompletedTask};
+pub use life_loop::{LifeLoop, AutonomyState, Proposal, ProposalStatus};
+pub use curiosity::Curiosity;
+pub use goal::{GoalGenerator, Pattern, PatternKind};
 
 #[cfg(test)]
 mod runtime_tests;

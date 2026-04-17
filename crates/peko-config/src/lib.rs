@@ -22,6 +22,100 @@ pub struct PekoConfig {
     pub schedule: Vec<ScheduleEntry>,
     #[serde(default)]
     pub mcp: Vec<McpConfig>,
+    /// Autonomous behavior: reflections, heartbeat, curiosity, goal generation.
+    /// Default-disabled. See docs/implementation/Safety-Model.md.
+    #[serde(default)]
+    pub autonomy: AutonomyConfig,
+}
+
+/// Controls the "digital life" autonomous behavior stack.
+/// See docs/architecture/Full-Life-Roadmap.md + Safety-Model.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomyConfig {
+    /// Master switch. DEFAULT FALSE — no autonomy ships enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Heartbeat interval in seconds.
+    #[serde(default = "default_tick_secs")]
+    pub tick_interval_secs: u64,
+
+    /// Cap on internally-generated tasks per rolling hour.
+    #[serde(default = "default_max_per_hour")]
+    pub max_internal_tasks_per_hour: u32,
+
+    /// Cap on internally-generated tasks per UTC day.
+    #[serde(default = "default_max_per_day")]
+    pub max_internal_tasks_per_day: u32,
+
+    /// Cap on LLM tokens spent on autonomy per UTC day (best-effort estimate).
+    #[serde(default = "default_max_tokens_per_day")]
+    pub max_tokens_per_day: u64,
+
+    /// If true, internal tasks go into a proposal queue instead of executing.
+    /// DEFAULT TRUE — user approves each proposal via the Life UI.
+    #[serde(default = "bool_true")]
+    pub propose_only: bool,
+
+    /// Tool allowlist for internal tasks. Defaults are read-only.
+    /// Users opt-in to more via config.
+    #[serde(default = "default_allowed_tools")]
+    pub allowed_tools: Vec<String>,
+
+    /// Auto-run memory gardener (pruning + summarization) daily.
+    #[serde(default = "bool_true")]
+    pub memory_gardener: bool,
+
+    /// Cron expression for the gardener. Default 06:00 local daily.
+    #[serde(default = "default_gardener_cron")]
+    pub memory_gardener_cron: String,
+
+    /// Enable post-task reflections (Phase A).
+    #[serde(default = "bool_true")]
+    pub reflection: bool,
+
+    /// Curiosity probability per tick (0-1). Higher = more exploration.
+    #[serde(default = "default_curiosity")]
+    pub curiosity: f32,
+
+    /// Enable pattern-driven goal generation (Phase F).
+    #[serde(default = "bool_true")]
+    pub goal_generation: bool,
+}
+
+impl Default for AutonomyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tick_interval_secs: default_tick_secs(),
+            max_internal_tasks_per_hour: default_max_per_hour(),
+            max_internal_tasks_per_day: default_max_per_day(),
+            max_tokens_per_day: default_max_tokens_per_day(),
+            propose_only: true,
+            allowed_tools: default_allowed_tools(),
+            memory_gardener: true,
+            memory_gardener_cron: default_gardener_cron(),
+            reflection: true,
+            curiosity: default_curiosity(),
+            goal_generation: true,
+        }
+    }
+}
+
+fn default_tick_secs() -> u64 { 300 }           // 5 min
+fn default_max_per_hour() -> u32 { 4 }
+fn default_max_per_day() -> u32 { 20 }
+fn default_max_tokens_per_day() -> u64 { 50_000 }
+fn default_gardener_cron() -> String { "0 6 * * *".to_string() }
+fn default_curiosity() -> f32 { 0.10 }
+fn default_allowed_tools() -> Vec<String> {
+    vec![
+        "screenshot".to_string(),
+        "ui_inspect".to_string(),
+        "memory".to_string(),
+        "skills".to_string(),
+        "filesystem".to_string(),
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
