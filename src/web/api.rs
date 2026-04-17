@@ -68,6 +68,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/queue", get(queue_status))
         // Screenshots
         .route("/api/screenshots/{filename}", get(serve_screenshot))
+        // AGPL §13 compliance — source offer + third-party licenses
+        .route("/source", get(source_offer))
+        .route("/licenses", get(third_party_licenses))
         .with_state(state)
 }
 
@@ -657,4 +660,76 @@ async fn serve_screenshot(
     }
 
     (StatusCode::NOT_FOUND, "screenshot not found").into_response()
+}
+
+
+// ── AGPL §13 compliance ─────────────────────────────────────────
+
+// When peko-agent is deployed as a network-facing service, AGPL §13 requires
+// offering the Corresponding Source Code to every user interacting with it
+// remotely. These two endpoints satisfy that obligation — the web UI footer
+// links to /source and /licenses.
+
+/// Source offer: redirect to the canonical upstream repo. Fork operators should
+/// override this to point at their modified-version source.
+async fn source_offer() -> Response {
+    let html = r#"<!doctype html>
+<html><head><meta charset="utf-8"><title>Source — Peko Agent</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222}a{color:#4338ca}code{background:#f3f4f6;padding:2px 6px;border-radius:3px}</style>
+</head><body>
+<h1>Corresponding Source</h1>
+<p>Peko Agent is distributed under <a href="https://www.gnu.org/licenses/agpl-3.0.html">AGPL-3.0-or-later</a>. Under AGPL §13, the operator of this service must offer the Corresponding Source Code to every user who interacts with it remotely.</p>
+<h2>Unmodified upstream source</h2>
+<p><a href="https://github.com/ftmstars/peko-agent">https://github.com/ftmstars/peko-agent</a></p>
+<h2>If this is a modified version</h2>
+<p>The operator of this deployment is responsible for providing the exact source of the running version. If the link above does not correspond to the running code, please contact the operator of this service for the modified source tree.</p>
+<h2>Build instructions</h2>
+<p>See <code>README.md</code> in the source tree for build and deployment instructions.</p>
+<h2>Third-party licenses</h2>
+<p>This binary includes third-party code under compatible licenses (MIT). See <a href="/licenses">/licenses</a>.</p>
+<p><a href="/">← back to agent</a></p>
+</body></html>"#;
+    Html(html).into_response()
+}
+
+/// Third-party license notices (covers the MIT-licensed code statically linked
+/// into peko-llm-daemon and the Rust dependencies).
+async fn third_party_licenses() -> Response {
+    let html = r#"<!doctype html>
+<html><head><meta charset="utf-8"><title>Third-Party Licenses — Peko Agent</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222}a{color:#4338ca}pre{background:#f3f4f6;padding:12px;border-radius:4px;overflow:auto;font-size:12px;line-height:1.5}h2{margin-top:2em}</style>
+</head><body>
+<h1>Third-Party Licenses</h1>
+<p>Peko Agent incorporates the following third-party software:</p>
+<ul>
+<li><b>cpp-httplib</b> v0.18.7 — MIT — © 2025 Yuji Hirose — <a href="https://github.com/yhirose/cpp-httplib">source</a></li>
+<li><b>nlohmann/json</b> v3.11.3 — MIT — © 2013-2023 Niels Lohmann — <a href="https://github.com/nlohmann/json">source</a></li>
+<li><b>llama.cpp / ggml</b> — MIT — © 2023-2026 The ggml authors — <a href="https://github.com/ggml-org/llama.cpp">source</a> (statically linked into <code>peko-llm-daemon</code>)</li>
+<li><b>Rust crates</b> — various (mostly MIT / Apache-2.0) — see <code>Cargo.lock</code></li>
+</ul>
+<h2>MIT License text (applies to all MIT-licensed components above)</h2>
+<pre>Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.</pre>
+<p>Full license texts are reproduced in the source repository under <code>third_party/LICENSES/</code>.</p>
+<p>Peko Agent itself is licensed under AGPL-3.0-or-later. <a href="/source">Get source</a>.</p>
+<p><a href="/">← back to agent</a></p>
+</body></html>"#;
+    Html(html).into_response()
 }

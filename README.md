@@ -259,10 +259,20 @@ notify = "telegram"
 
 ## License
 
-This project is dual-licensed:
+Peko Agent is licensed under **[AGPL-3.0-or-later](LICENSE-AGPL)**.
 
-- **Open source:** [AGPL-3.0-or-later](LICENSE-AGPL) — any use, modification, or distribution (including over a network) must comply with the AGPL.
-- **Commercial:** A separate commercial license is available for proprietary use. See [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL) or contact [tanuphat.chai@gmail.com](mailto:tanuphat.chai@gmail.com).
+- Any use, modification, or distribution — including over a network (AGPL §13) — must comply with the AGPL, meaning Corresponding Source must be offered to all users of the service.
+- A **commercial license** is *planned* but not yet finalized. Until then, only the AGPL is available. See [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL) for status and contact info.
+- For the consolidated license summary, see [LICENSE](LICENSE).
+
+### Third-party software
+
+Peko Agent incorporates MIT-licensed code (cpp-httplib, nlohmann/json, llama.cpp, ggml). Full attributions and license texts:
+
+- [NOTICE.md](NOTICE.md) — consolidated attribution list
+- [third_party/LICENSES/](third_party/LICENSES/) — full MIT license texts
+
+When a built binary is deployed as a network service, the web UI exposes `/source` and `/licenses` endpoints to satisfy AGPL §13 + MIT redistribution requirements.
 
 ## Author
 

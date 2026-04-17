@@ -1,17 +1,28 @@
-Peko Agent Commercial License
-==============================
+Peko Agent Commercial License — STATUS: NOT YET AVAILABLE
+===========================================================
 
 Copyright 2024-2026 Tanuphat Chainaloedwong / ftmstars
 
-TODO: The full commercial license terms have not yet been finalized.
-These terms should be drafted and reviewed by a qualified lawyer before
-being offered to any commercial licensees.
+A commercial license for Peko Agent is PLANNED but has NOT been finalized
+or reviewed by counsel. Until then, no commercial license is available,
+and the project is effectively distributed under AGPL-3.0-or-later only.
 
-To inquire about a commercial license in the meantime, please contact:
+If you are interested in a commercial license for use cases that cannot
+comply with the AGPL (e.g., proprietary products or SaaS without source
+disclosure), please contact:
 
   tanuphat.chai@gmail.com
 
-A commercial license allows you to use, modify, and distribute Peko Agent
-in proprietary products or services without the source-disclosure requirements
-of the AGPL-3.0-or-later. Specific terms, pricing, and permitted use cases
-will be defined in the finalized commercial license agreement.
+We will maintain a list of interested parties and notify you once terms
+are drafted. No commercial rights are granted by this file until a signed
+commercial license agreement is in place.
+
+Planned terms (subject to change — NOT BINDING):
+
+  - Use, modify, and distribute Peko Agent in proprietary products or
+    services without the source-disclosure requirements of the AGPL.
+  - Pricing and permitted use cases will be defined in the finalized
+    agreement.
+
+Until that agreement exists, please use Peko Agent under AGPL-3.0-or-later
+(see LICENSE-AGPL).

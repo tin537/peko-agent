@@ -432,6 +432,16 @@ tailwind.config = {
 
     </main>
   </div>
+
+  <!-- AGPL §13 source offer — required for network deployments -->
+  <footer class="text-[10px] text-zinc-600 px-4 py-2 border-t border-zinc-800/60 flex justify-between items-center font-mono">
+    <span>Peko Agent · AGPL-3.0-or-later</span>
+    <span>
+      <a href="/source" class="text-zinc-500 hover:text-zinc-300 underline-offset-2 hover:underline">get source</a>
+      <span class="mx-1.5 text-zinc-700">·</span>
+      <a href="/licenses" class="text-zinc-500 hover:text-zinc-300 underline-offset-2 hover:underline">third-party licenses</a>
+    </span>
+  </footer>
 </div>
 
 <script>

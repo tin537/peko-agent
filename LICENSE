@@ -1,17 +1,45 @@
-Peko Agent Dual License
-=======================
+Peko Agent — License Summary
+=============================
 
 Copyright 2024-2026 Tanuphat Chainaloedwong / ftmstars
 
-This project is dual-licensed. You may choose either license depending on your
-use case:
+CURRENT LICENSE
+---------------
 
-  - Open Source Use: GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later).
-    See LICENSE-AGPL for the full terms. Under this license, any software that
-    uses, modifies, or distributes Peko Agent — including over a network — must
-    also be released under the AGPL.
+Peko Agent is licensed under the **GNU Affero General Public License v3.0 or
+later (AGPL-3.0-or-later)**. The full text is in `LICENSE-AGPL`.
 
-  - Commercial Use: A separate commercial license is available for organizations
-    that cannot comply with the AGPL (e.g., proprietary products or SaaS without
-    source disclosure). See LICENSE-COMMERCIAL for details, or contact
-    tanuphat.chai@gmail.com to obtain a commercial license.
+Under AGPL, any software that uses, modifies, or distributes Peko Agent —
+including over a network (see AGPL §13) — must also be released under the
+AGPL and make its Corresponding Source Code available to users.
+
+COMMERCIAL LICENSE (PLANNED, NOT YET AVAILABLE)
+-----------------------------------------------
+
+A commercial license allowing proprietary use without AGPL's source-disclosure
+requirements is planned but has not been finalized or reviewed by counsel.
+Until then, **no commercial license is available**, and the only way to use
+Peko Agent is under AGPL-3.0-or-later. See `LICENSE-COMMERCIAL` for status and
+contact information.
+
+THIRD-PARTY SOFTWARE
+--------------------
+
+This project incorporates third-party software licensed under other terms
+(notably MIT-licensed code from cpp-httplib, nlohmann/json, llama.cpp, and
+ggml). These licenses are preserved in source form and their full texts are
+reproduced in `third_party/LICENSES/`. See `NOTICE.md` for the consolidated
+attribution list.
+
+AGPL allows incorporation of MIT-licensed code; the combined work is governed
+by the AGPL, but the original MIT notices must remain with the third-party
+portions.
+
+AGPL §13 — NETWORK USE
+----------------------
+
+If you deploy Peko Agent as a network-accessible service (web UI, bot,
+scheduled agent, etc.), you must offer the Corresponding Source to every
+user interacting with it remotely, including users of any modifications
+you make. The built-in web UI exposes a link to the upstream source for
+this purpose.
