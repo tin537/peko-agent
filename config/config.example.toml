@@ -8,11 +8,18 @@ log_level = "info"
 [provider]
 priority = ["anthropic"]
 
-# Optional dual-brain routing. When set, `peko-agent` classifies each task:
-#   - simple / has matching skill  → local brain (fast, on-device, cheap)
-#   - complex / novel              → cloud brain (slow, smart, costs $)
-# The local brain can also call an `escalate` tool to hand off mid-task.
-# Format: "<local_name>:<cloud_name>"  e.g. "local:anthropic"
+# Optional brain routing. Three modes:
+#
+#   Dual       — brain = "local:anthropic"
+#                classify each task → local or cloud; local can `escalate`
+#
+#   LocalOnly  — brain = "local"    (or "embedded")
+#                every task uses the local brain; no cloud calls, no escalate
+#
+#   CloudOnly  — brain = "anthropic" (or "openrouter", ...)
+#                every task uses the cloud brain; no local brain loaded
+#
+# Colon = dual. No colon = single-brain mode.
 # brain = "local:anthropic"
 
 [provider.anthropic]

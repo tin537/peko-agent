@@ -31,7 +31,7 @@ pub use runtime::build_provider_helper;
 pub use user_model::UserModel;
 pub use mcp::{McpClient, McpServerConfig, register_mcp_tools};
 pub use task_queue::{TaskQueue, TaskRequest, TaskSource, QueueStatus};
-pub use brain::{DualBrain, BrainChoice};
+pub use brain::{DualBrain, BrainChoice, BrainMode};
 
 #[cfg(test)]
 mod runtime_tests;

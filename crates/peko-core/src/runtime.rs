@@ -225,9 +225,15 @@ impl AgentRuntime {
 
             let mut tool_schemas = self.tools.schemas();
 
-            // If using local brain, inject the escalate tool
+            // Inject the escalate tool ONLY when the brain's mode supports
+            // escalation (Dual mode) AND we're currently on the local side.
+            // LocalOnly / CloudOnly modes don't offer escalation because
+            // there's no other brain to hand off to.
             let using_local = matches!(&self.active_brain, Some(BrainChoice::Local));
-            if using_local {
+            let escalation_available = self.brain.as_ref()
+                .map(|b| b.mode().supports_escalation())
+                .unwrap_or(false);
+            if using_local && escalation_available {
                 tool_schemas.push(escalate_tool_schema());
             }
 
@@ -531,9 +537,13 @@ impl AgentRuntime {
 
             let mut tool_schemas = self.tools.schemas();
 
-            // If using local brain, inject the escalate tool so the local model can hand off to cloud
+            // Inject the escalate tool ONLY when the brain's mode supports
+            // escalation (Dual mode) AND we're currently on the local side.
             let using_local = matches!(&self.active_brain, Some(BrainChoice::Local));
-            if using_local {
+            let escalation_available = self.brain.as_ref()
+                .map(|b| b.mode().supports_escalation())
+                .unwrap_or(false);
+            if using_local && escalation_available {
                 tool_schemas.push(escalate_tool_schema());
             }
 
@@ -830,19 +840,49 @@ impl LlmProvider for NullProvider {
     }
 }
 
-/// Build a DualBrain from config. The `brain` field should be "local_name:cloud_name"
-/// e.g. "local:anthropic" or "local:openrouter".
-/// Returns None if brain config is not set or invalid.
+/// Build a brain router from config. Supports three modes:
+///
+/// | `provider.brain` value | Mode        | Behavior                          |
+/// |------------------------|-------------|-----------------------------------|
+/// | `"local:anthropic"`    | Dual        | classify + route + escalate tool  |
+/// | `"local"`              | LocalOnly   | always use `provider.local`       |
+/// | `"anthropic"`          | CloudOnly   | always use `provider.anthropic`   |
+///
+/// Returns None if `brain` is not set or the referenced provider can't be built.
 pub fn build_dual_brain(config: &serde_json::Value) -> Option<DualBrain> {
-    let brain_str = config["provider"]["brain"].as_str()?;
-    let parts: Vec<&str> = brain_str.split(':').collect();
-    if parts.len() != 2 {
-        warn!(brain = brain_str, "invalid brain config, expected 'local:cloud'");
-        return None;
-    }
+    use crate::brain::BrainMode;
 
-    let local_name = parts[0].trim();
-    let cloud_name = parts[1].trim();
+    let brain_str = config["provider"]["brain"].as_str()?;
+
+    // Parse mode + provider names
+    let parts: Vec<&str> = brain_str.split(':').collect();
+    let (mode, local_name, cloud_name) = match parts.as_slice() {
+        // "name"           → single-brain (mode decided by whether there's a cloud fallback,
+        //                    but we just treat it as LocalOnly when the only name is a local-like
+        //                    provider, else CloudOnly)
+        [single] => {
+            let single = single.trim();
+            // Heuristic: providers named "local", "embedded", or whose base_url uses unix://
+            // or points at localhost → LocalOnly. Anything else → CloudOnly.
+            let entry = &config["provider"][single];
+            let base_url = entry["base_url"].as_str().unwrap_or("");
+            let looks_local = matches!(single, "local" | "embedded")
+                || base_url.starts_with("unix://")
+                || base_url.starts_with("http://localhost")
+                || base_url.starts_with("http://127.");
+            if looks_local {
+                (BrainMode::LocalOnly, single, single)
+            } else {
+                (BrainMode::CloudOnly, single, single)
+            }
+        }
+        // "local:cloud" → Dual
+        [l, c] => (BrainMode::Dual, l.trim(), c.trim()),
+        _ => {
+            warn!(brain = brain_str, "invalid brain config, expected 'local:cloud' or 'name'");
+            return None;
+        }
+    };
 
     fn build_single(config: &serde_json::Value, name: &str) -> Option<Box<dyn LlmProvider>> {
         use peko_transport::{AnthropicProvider, OpenAICompatProvider, UnixSocketProvider};
@@ -919,10 +959,11 @@ pub fn build_dual_brain(config: &serde_json::Value) -> Option<DualBrain> {
     };
 
     info!(
+        mode = %mode,
         local = local.model_name(),
         cloud = cloud.model_name(),
-        "dual-brain initialized"
+        "brain initialized"
     );
 
-    Some(DualBrain::new(local, cloud))
+    Some(DualBrain::with_mode(mode, local, cloud))
 }

@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -5,7 +6,7 @@ use tracing::{info, warn};
 use peko_transport::LlmProvider;
 use crate::skills::SkillStore;
 
-/// Which brain should handle this task.
+/// Which brain handled (or should handle) this task.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BrainChoice {
     Local,
@@ -21,18 +22,55 @@ impl std::fmt::Display for BrainChoice {
     }
 }
 
-/// Dual-brain architecture: lightweight local LLM for simple/skill-based tasks,
-/// powerful cloud provider for complex reasoning.
+/// How the brain router behaves:
 ///
-/// Routing rules:
+/// - `Dual`       — classify each task and route to local or cloud; local
+///                  can call `escalate` to hand off to cloud mid-task.
+/// - `LocalOnly`  — every task goes to the local provider. No routing, no
+///                  escalate tool injected. Cloud side is unused (typically
+///                  the same provider instance is stored for API symmetry).
+/// - `CloudOnly`  — every task goes to the cloud provider. No routing, no
+///                  escalate tool injected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrainMode {
+    Dual,
+    LocalOnly,
+    CloudOnly,
+}
+
+impl std::fmt::Display for BrainMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Dual      => write!(f, "dual"),
+            Self::LocalOnly => write!(f, "local-only"),
+            Self::CloudOnly => write!(f, "cloud-only"),
+        }
+    }
+}
+
+impl BrainMode {
+    /// Does this mode support mid-task escalation from local to cloud?
+    pub fn supports_escalation(&self) -> bool {
+        matches!(self, Self::Dual)
+    }
+}
+
+/// Brain router with three operating modes (see [`BrainMode`]).
+///
+/// Originally named `DualBrain`; the name is kept for API stability even
+/// though it now covers single-brain configurations too. Think of it as
+/// "the brain" — which may internally route between one or two providers.
+///
+/// Routing rules when in `Dual` mode:
 /// 1. If a matching skill exists with good success rate → Local
 /// 2. If the task looks simple (short, imperative, known patterns) → Local
 /// 3. Otherwise → Cloud
 ///
-/// The local LLM gets an `escalate` tool. If it calls it, the runtime
-/// restarts the task with the cloud provider, forwarding the local LLM's
-/// analysis as additional context.
+/// The local side receives the `escalate` tool when in `Dual` mode. If it
+/// calls it, the runtime restarts the task on the cloud provider, forwarding
+/// the local model's analysis as additional context.
 pub struct DualBrain {
+    mode:  BrainMode,
     local: Box<dyn LlmProvider>,
     cloud: Box<dyn LlmProvider>,
     /// Minimum skill success rate to trust for local routing (0.0–1.0)
@@ -42,14 +80,46 @@ pub struct DualBrain {
 }
 
 impl DualBrain {
+    /// Dual-brain: classify + route + local can escalate.
     pub fn new(local: Box<dyn LlmProvider>, cloud: Box<dyn LlmProvider>) -> Self {
         Self {
+            mode: BrainMode::Dual,
             local,
             cloud,
             skill_threshold: 0.6,
             simple_max_len: 200,
         }
     }
+
+    /// Dual-brain with explicit mode (escape hatch for single-mode configs).
+    pub fn with_mode(
+        mode: BrainMode,
+        local: Box<dyn LlmProvider>,
+        cloud: Box<dyn LlmProvider>,
+    ) -> Self {
+        Self {
+            mode,
+            local,
+            cloud,
+            skill_threshold: 0.6,
+            simple_max_len: 200,
+        }
+    }
+
+    /// Local-only mode: wraps a single provider; both `local()` and `cloud()`
+    /// return the same instance (`local`). No routing, no escalate tool.
+    /// The `cloud_fallback` provider is used only if the runtime falls back to
+    /// its default `provider` for some reason — in practice it's a clone of local.
+    pub fn new_local_only(local: Box<dyn LlmProvider>, cloud_fallback: Box<dyn LlmProvider>) -> Self {
+        Self::with_mode(BrainMode::LocalOnly, local, cloud_fallback)
+    }
+
+    /// Cloud-only mode: wraps a single cloud provider.
+    pub fn new_cloud_only(cloud: Box<dyn LlmProvider>, local_fallback: Box<dyn LlmProvider>) -> Self {
+        Self::with_mode(BrainMode::CloudOnly, local_fallback, cloud)
+    }
+
+    pub fn mode(&self) -> BrainMode { self.mode }
 
     pub fn with_skill_threshold(mut self, threshold: f32) -> Self {
         self.skill_threshold = threshold;
@@ -62,11 +132,29 @@ impl DualBrain {
     }
 
     /// Classify a task to determine which brain handles it.
+    ///
+    /// - `LocalOnly` / `CloudOnly` modes short-circuit and always return their
+    ///   single target.
+    /// - `Dual` mode consults skills + heuristics.
     pub fn classify(
         &self,
         input: &str,
         skills: Option<&SkillStore>,
     ) -> BrainChoice {
+        // Single-mode brains: no classification needed
+        match self.mode {
+            BrainMode::LocalOnly => {
+                info!(task = %truncate(input, 60), "brain: LOCAL-ONLY mode");
+                return BrainChoice::Local;
+            }
+            BrainMode::CloudOnly => {
+                info!(task = %truncate(input, 60), "brain: CLOUD-ONLY mode");
+                return BrainChoice::Cloud;
+            }
+            BrainMode::Dual => {}
+        }
+
+        // Dual mode — classify:
         // 1. Check for matching skills with good success rate
         if let Some(skill_store) = skills {
             let matches = skill_store.search(input);
@@ -237,6 +325,7 @@ mod tests {
     #[test]
     fn test_simple_task_detection() {
         let brain = DualBrain {
+            mode: BrainMode::Dual,
             local: Box::new(DummyProvider),
             cloud: Box::new(DummyProvider),
             skill_threshold: 0.6,
@@ -263,6 +352,7 @@ mod tests {
     #[test]
     fn test_classify_defaults_to_cloud() {
         let brain = DualBrain {
+            mode: BrainMode::Dual,
             local: Box::new(DummyProvider),
             cloud: Box::new(DummyProvider),
             skill_threshold: 0.6,
@@ -278,6 +368,7 @@ mod tests {
     #[test]
     fn test_classify_simple_to_local() {
         let brain = DualBrain {
+            mode: BrainMode::Dual,
             local: Box::new(DummyProvider),
             cloud: Box::new(DummyProvider),
             skill_threshold: 0.6,
@@ -302,6 +393,63 @@ mod tests {
         assert!(ctx.contains("Escalated from local model"));
         assert!(ctx.contains("qwen-2.5-7b"));
         assert!(ctx.contains("DHCP lease"));
+    }
+
+    #[test]
+    fn test_local_only_mode_always_routes_local() {
+        let brain = DualBrain::new_local_only(
+            Box::new(DummyProvider),
+            Box::new(DummyProvider),
+        );
+        assert_eq!(brain.mode(), BrainMode::LocalOnly);
+
+        // Even a very complex task goes to local
+        assert_eq!(
+            brain.classify(
+                "explain how the Android activity lifecycle works and compare it to iOS in detail",
+                None,
+            ),
+            BrainChoice::Local
+        );
+        // Simple task: still local (trivially)
+        assert_eq!(brain.classify("open youtube", None), BrainChoice::Local);
+    }
+
+    #[test]
+    fn test_cloud_only_mode_always_routes_cloud() {
+        let brain = DualBrain::new_cloud_only(
+            Box::new(DummyProvider),
+            Box::new(DummyProvider),
+        );
+        assert_eq!(brain.mode(), BrainMode::CloudOnly);
+
+        // Even a trivially-simple task goes to cloud
+        assert_eq!(brain.classify("open youtube", None), BrainChoice::Cloud);
+        assert_eq!(
+            brain.classify("explain the theory of relativity", None),
+            BrainChoice::Cloud
+        );
+    }
+
+    #[test]
+    fn test_dual_mode_still_classifies() {
+        let brain = DualBrain::new(
+            Box::new(DummyProvider),
+            Box::new(DummyProvider),
+        );
+        assert_eq!(brain.mode(), BrainMode::Dual);
+        assert_eq!(brain.classify("open youtube", None), BrainChoice::Local);
+        assert_eq!(
+            brain.classify("analyze the bug and propose multiple fixes step by step", None),
+            BrainChoice::Cloud
+        );
+    }
+
+    #[test]
+    fn test_escalation_support_by_mode() {
+        assert!(BrainMode::Dual.supports_escalation());
+        assert!(!BrainMode::LocalOnly.supports_escalation());
+        assert!(!BrainMode::CloudOnly.supports_escalation());
     }
 
     // Dummy provider for tests

@@ -1,7 +1,28 @@
-# Dual-Brain Architecture
+# Brain Router (Dual / Local-Only / Cloud-Only)
 
-> Route cheap tasks to an on-device model, reserve cloud calls for hard reasoning.
-> Local model can escalate to cloud mid-task when it knows it's over its head.
+> Three operating modes for the LLM backend:
+>
+> - **Dual** — route each task per heuristic; local can escalate to cloud
+> - **LocalOnly** — every task uses the on-device model; offline-capable
+> - **CloudOnly** — every task uses the cloud model; max capability
+
+The class is still named `DualBrain` for API stability; it now covers all three
+modes internally via a `BrainMode` enum.
+
+---
+
+## Mode summary
+
+| Mode | `provider.brain` value | Escalate tool? | Classifier runs? | Typical use |
+|------|------------------------|---------------|------------------|-------------|
+| **Dual** | `"local:anthropic"` | Yes (Local side only) | Yes | Default — best speed/cost/capability trade-off |
+| **LocalOnly** | `"local"`, `"embedded"` | No | No (always Local) | Offline / privacy-first / no-API-key deployments |
+| **CloudOnly** | `"anthropic"`, `"openrouter"` | No | No (always Cloud) | Max capability / when local HW can't keep up |
+
+Rule of thumb: if the `brain` string contains a colon, you get Dual. Otherwise
+it's interpreted as a single provider name, and the mode is chosen by whether
+that provider looks local (name in `{local, embedded}` or `base_url` starts
+with `unix://`, `http://localhost`, `http://127.`) or cloud.
 
 ---
 
@@ -30,16 +51,19 @@ A single local-only model is:
 │     └─ active_brain: Option<BrainChoice>     (per-task)     │
 │                                                             │
 │   DualBrain                                                 │
+│     ├─ mode:   BrainMode { Dual | LocalOnly | CloudOnly }   │
 │     ├─ local:  Box<dyn LlmProvider>  (small, fast)          │
 │     ├─ cloud:  Box<dyn LlmProvider>  (big, smart)           │
 │     └─ classify(task, skills) → Local | Cloud               │
+│           short-circuits in LocalOnly / CloudOnly           │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-- `peko-core::brain::DualBrain` — holds two providers + routing heuristic
-- `peko-core::brain::BrainChoice` — enum { Local, Cloud }
-- `peko-core::brain::escalate_tool_schema()` — the `escalate` tool injected when running on local
+- `peko-core::brain::DualBrain` — holds mode + two providers + routing heuristic
+- `peko-core::brain::BrainMode` — `Dual | LocalOnly | CloudOnly`
+- `peko-core::brain::BrainChoice` — `Local | Cloud` (per-task routing result)
+- `peko-core::brain::escalate_tool_schema()` — injected only in Dual mode when on Local
 
 ---
 
@@ -150,13 +174,15 @@ with `active_brain = Cloud` and the next `stream_completion` goes to Anthropic i
 
 ## Configuration
 
+### Dual mode (default recommendation)
+
 ```toml
 [provider]
-brain = "local:anthropic"        # "<local_name>:<cloud_name>"
+brain = "local:anthropic"         # colon = Dual
 
 [provider.local]
 model    = "qwen3"
-base_url = "unix://@peko-llm"     # UDS path or abstract name
+base_url = "unix://@peko-llm"     # routes to peko-llm-daemon
 max_tokens = 512
 
 [provider.anthropic]
@@ -164,9 +190,56 @@ model      = "claude-sonnet-4-20250514"
 max_tokens = 4096
 ```
 
-If the cloud side fails to build (e.g. no API key set), the runtime automatically
-falls back to using the local side for both brains — the agent still works, escalation
-is just a no-op until a key is provided.
+If the cloud side fails to build (no API key, etc.), the runtime falls back to
+**LocalOnly** automatically — the agent still works, escalation is just disabled
+until a key is provided.
+
+### LocalOnly mode (offline / privacy)
+
+```toml
+[provider]
+brain = "local"                   # single name, treated as local
+
+[provider.local]
+model    = "qwen3"
+base_url = "unix://@peko-llm"
+max_tokens = 512
+
+# No cloud provider needed.
+```
+
+No `escalate` tool is injected. Every task runs against the local model,
+including complex ones. Useful when the device has no network, or for
+maximum privacy / predictable cost.
+
+### CloudOnly mode
+
+```toml
+[provider]
+brain = "anthropic"               # single name, treated as cloud
+
+[provider.anthropic]
+model      = "claude-sonnet-4-20250514"
+max_tokens = 4096
+
+# No local provider / daemon needed.
+```
+
+Every task hits the cloud API. No local classifier runs. Fine for desktop
+development or when you don't care about offline capability.
+
+### Embedded candle variant
+
+```toml
+[provider]
+brain = "embedded:anthropic"      # Dual with candle GGUF as local
+# or
+brain = "embedded"                # LocalOnly with candle GGUF
+```
+
+Uses the experimental `peko-llm` Rust crate to load GGUF in-process via
+candle (pure Rust, no C++ daemon). Slower than the llama.cpp daemon but
+no IPC overhead. `provider.embedded` entry configures the model path.
 
 ---
 

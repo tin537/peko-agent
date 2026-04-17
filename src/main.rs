@@ -184,39 +184,48 @@ async fn main() -> anyhow::Result<()> {
 
     let config_json = serde_json::to_value(&config)?;
 
-    // Dual-brain: build if configured
-    // Supports "embedded:cloud" (in-process GGUF) or "local:cloud" (HTTP provider)
+    // Brain router: three modes, selected by `provider.brain` string
+    //   "local:anthropic"       → Dual (classify + route + escalate tool)
+    //   "local"  / "embedded"   → LocalOnly (no routing, no escalate)
+    //   "anthropic" / "openrouter" → CloudOnly
+    //
+    // Two backend paths:
+    //   "embedded..."           → load GGUF model in-process via candle
+    //   anything else           → UDS/HTTP provider via build_dual_brain()
     let brain: Option<Arc<DualBrain>> = {
         let brain_str = config_json["provider"]["brain"].as_str().unwrap_or("");
-        if brain_str.starts_with("embedded:") {
-            // Embedded local brain — load GGUF model into process
-            let cloud_name = brain_str.strip_prefix("embedded:").unwrap_or("anthropic");
+        if brain_str.is_empty() {
+            None
+        } else if brain_str == "embedded" || brain_str.starts_with("embedded:") {
+            // In-process candle GGUF path.
+            let cloud_name: Option<&str> = brain_str.strip_prefix("embedded:")
+                .filter(|s| !s.is_empty());
             match build_embedded_brain(&config_json, cloud_name) {
                 Ok(b) => {
                     info!(
+                        mode = %b.mode(),
                         local = b.local_model_name(),
                         cloud = b.cloud_model_name(),
-                        "dual-brain EMBEDDED: GGUF model loaded in-process"
+                        "brain EMBEDDED: GGUF model loaded in-process"
                     );
                     Some(Arc::new(b))
                 }
                 Err(e) => {
-                    warn!(error = %e, "embedded brain failed to load, falling back to single provider");
+                    warn!(error = %e, "embedded brain failed to load");
                     None
                 }
             }
-        } else if !brain_str.is_empty() {
-            // HTTP-based local brain (e.g. "local:anthropic")
+        } else {
+            // UDS/HTTP path covers all three modes based on brain_str parsing.
             build_dual_brain(&config_json).map(|b| {
                 info!(
+                    mode = %b.mode(),
                     local = b.local_model_name(),
                     cloud = b.cloud_model_name(),
-                    "dual-brain enabled: local for simple/skill tasks, cloud for complex"
+                    "brain enabled"
                 );
                 Arc::new(b)
             })
-        } else {
-            None
         }
     };
 
@@ -318,9 +327,16 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build a DualBrain with an embedded GGUF model as the local brain.
-fn build_embedded_brain(config: &serde_json::Value, cloud_name: &str) -> anyhow::Result<DualBrain> {
+/// Build a brain with an embedded GGUF model as the local side.
+/// If `cloud_name` is None → LocalOnly mode (no cloud provider required).
+/// If `cloud_name` is Some → Dual mode; falls back to LocalOnly if the cloud
+/// provider can't be built (e.g. missing API key).
+fn build_embedded_brain(
+    config: &serde_json::Value,
+    cloud_name: Option<&str>,
+) -> anyhow::Result<DualBrain> {
     use peko_transport::{AnthropicProvider, OpenAICompatProvider};
+    use peko_core::BrainMode;
 
     let entry = &config["provider"]["embedded"];
     let model_path = entry["model"].as_str()
@@ -365,11 +381,18 @@ fn build_embedded_brain(config: &serde_json::Value, cloud_name: &str) -> anyhow:
 
     let local = build_embedded();
 
-    // Try to build cloud provider — fall back to local if not configured
+    // No cloud requested → LocalOnly mode. We still need a "cloud" slot on the
+    // DualBrain struct, so hand it a second instance pointing at the same engine.
+    let Some(cloud_name) = cloud_name else {
+        info!("brain LOCAL-ONLY (embedded): no cloud provider, no escalation");
+        return Ok(DualBrain::new_local_only(local, build_embedded()));
+    };
+
+    // Cloud requested — try to build it; fall back to LocalOnly if unavailable.
     let cloud_entry = &config["provider"][cloud_name];
-    let cloud: Box<dyn peko_transport::LlmProvider> = if cloud_entry.is_null() {
-        warn!(cloud = %cloud_name, "cloud brain not configured — using embedded for both brains (no escalation)");
-        build_embedded()
+    let cloud_result: Option<Box<dyn peko_transport::LlmProvider>> = if cloud_entry.is_null() {
+        warn!(cloud = %cloud_name, "cloud brain not configured");
+        None
     } else {
         let api_key = cloud_entry["api_key"].as_str().unwrap_or("").to_string();
         let model = cloud_entry["model"].as_str().unwrap_or("").to_string();
@@ -381,34 +404,34 @@ fn build_embedded_brain(config: &serde_json::Value, cloud_name: &str) -> anyhow:
                 let key = if api_key.is_empty() {
                     std::env::var("ANTHROPIC_API_KEY").unwrap_or_default()
                 } else { api_key };
-                if key.is_empty() {
-                    warn!("anthropic API key not set — using embedded for both brains (no escalation)");
-                    build_embedded()
-                } else {
-                    Box::new(AnthropicProvider::new(
+                if key.is_empty() { None } else {
+                    Some(Box::new(AnthropicProvider::new(
                         key, model, max_tokens,
                         if base_url.is_empty() { None } else { Some(base_url) },
-                    ))
+                    )))
                 }
             }
             "openrouter" => {
                 let key = if api_key.is_empty() {
                     std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
                 } else { api_key };
-                if key.is_empty() {
-                    warn!("openrouter API key not set — using embedded for both brains");
-                    build_embedded()
-                } else {
+                if key.is_empty() { None } else {
                     let url = if base_url.is_empty() { "https://openrouter.ai/api/v1".to_string() } else { base_url };
-                    Box::new(OpenAICompatProvider::new(key, model, url, max_tokens))
+                    Some(Box::new(OpenAICompatProvider::new(key, model, url, max_tokens)))
                 }
             }
             _ => {
                 let url = if base_url.is_empty() { "http://localhost:11434/v1".to_string() } else { base_url };
-                Box::new(OpenAICompatProvider::new(api_key, model, url, max_tokens))
+                Some(Box::new(OpenAICompatProvider::new(api_key, model, url, max_tokens)))
             }
         }
     };
 
-    Ok(DualBrain::new(local, cloud))
+    match cloud_result {
+        Some(cloud) => Ok(DualBrain::with_mode(BrainMode::Dual, local, cloud)),
+        None => {
+            warn!(cloud = %cloud_name, "cloud provider unavailable — falling back to LOCAL-ONLY mode");
+            Ok(DualBrain::new_local_only(local, build_embedded()))
+        }
+    }
 }
