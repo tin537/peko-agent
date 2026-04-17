@@ -9,8 +9,8 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use peko_config::PekoConfig;
-use peko_core::{ToolRegistry, MemoryStore, SkillStore, SystemPrompt, Scheduler, ScheduledTask, TelegramSender, UserModel, McpServerConfig, register_mcp_tools, TaskQueue, DualBrain};
-use peko_core::runtime::build_dual_brain;
+use peko_core::{ToolRegistry, MemoryStore, SkillStore, SystemPrompt, Scheduler, ScheduledTask, TelegramSender, UserModel, McpServerConfig, register_mcp_tools, TaskQueue, DualBrain, Reflector};
+use peko_core::runtime::{build_dual_brain, build_provider_helper};
 use peko_llm::{EmbeddedProvider, LlmEngineConfig};
 use peko_hal::{FramebufferDevice, InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
@@ -241,6 +241,26 @@ async fn main() -> anyhow::Result<()> {
 
     let tools_arc = Arc::new(registry);
 
+    // Reflector (Phase A) — only wired when autonomy.reflection is on.
+    // Uses a provider built from config. Reflection runs in the background
+    // per task; failures are logged at warn and don't affect the user.
+    let reflector: Option<Arc<Reflector>> = if config.autonomy.reflection {
+        let cfg_val = config_arc.lock().await.clone();
+        match build_provider_helper(&cfg_val) {
+            Ok(p) => {
+                let provider_arc: Arc<dyn peko_transport::LlmProvider> = Arc::from(p);
+                Some(Arc::new(Reflector::new(provider_arc, memory_store.clone())))
+            }
+            Err(e) => {
+                warn!(error = %e, "reflector: no provider available, disabling reflection");
+                None
+            }
+        }
+    } else {
+        info!("autonomy.reflection=false — reflector disabled");
+        None
+    };
+
     // Create the centralized task queue — all callers submit here
     let task_queue = TaskQueue::new(
         tools_arc.clone(),
@@ -252,8 +272,25 @@ async fn main() -> anyhow::Result<()> {
         user_model.clone(),
         user_model_path.clone(),
         brain.clone(),
+        reflector.clone(),
+        Some(motivation.clone()),
+        Some(motivation_path.clone()),
         32, // max queue size
     );
+
+    // Memory gardener (Phase C) — daily prune + decay pass on the memory store.
+    // Independent of the life loop; runs whether autonomy is enabled or not,
+    // as long as autonomy.memory_gardener is true.
+    if config.autonomy.memory_gardener {
+        let gcfg = peko_core::GardenerConfig {
+            cron: config.autonomy.memory_gardener_cron.clone(),
+            ..Default::default()
+        };
+        let _ = peko_core::spawn_gardener(memory_store.clone(), gcfg);
+        info!(cron = %config.autonomy.memory_gardener_cron, "memory gardener started");
+    } else {
+        info!("autonomy.memory_gardener=false — gardener disabled");
+    }
 
     // Life loop (Phase B) — spawned only when autonomy is enabled.
     let life_loop_handle = {

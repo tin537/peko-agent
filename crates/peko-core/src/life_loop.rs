@@ -64,6 +64,12 @@ pub struct AutonomyState {
     pub motivation:    Motivation,
     pub tasks_last_hour: u32,
     pub tasks_last_day:  u32,
+    /// Estimated LLM tokens charged to autonomy in the last 24h.
+    #[serde(default)]
+    pub tokens_last_day: u64,
+    /// Daily cap for autonomy-attributed tokens (matches config).
+    #[serde(default)]
+    pub tokens_max_per_day: u64,
     pub recent_proposals: Vec<Proposal>,
 }
 
@@ -109,6 +115,53 @@ impl RateLimiter {
     }
 }
 
+/// Sliding 24h token budget. Tracks (timestamp, cost) entries and sums
+/// those within the last day. Estimates are deliberately coarse — we don't
+/// have provider-accurate tokenization, so we charge per task from input
+/// length plus a flat output estimate.
+#[derive(Debug)]
+struct TokenBudget {
+    max_per_day: u64,
+    window:      VecDeque<(Instant, u64)>,
+}
+
+impl TokenBudget {
+    fn new(max_per_day: u64) -> Self {
+        Self { max_per_day, window: VecDeque::new() }
+    }
+
+    fn trim(&mut self) {
+        let cutoff = Instant::now() - Duration::from_secs(24 * 3600);
+        while self.window.front().map_or(false, |(t, _)| *t < cutoff) {
+            self.window.pop_front();
+        }
+    }
+
+    fn spent_today(&mut self) -> u64 {
+        self.trim();
+        self.window.iter().map(|(_, c)| *c).sum()
+    }
+
+    fn has_budget(&mut self, cost: u64) -> bool {
+        if self.max_per_day == 0 { return true; } // 0 = disabled guard
+        self.spent_today().saturating_add(cost) <= self.max_per_day
+    }
+
+    fn consume(&mut self, cost: u64) {
+        self.window.push_back((Instant::now(), cost));
+    }
+}
+
+/// Rough token estimate for a prompt. 4 chars/token is the usual default for
+/// English-ish text across GPT/Claude; close enough for budgeting.
+fn estimate_prompt_tokens(prompt: &str) -> u64 {
+    (prompt.len() as u64 + 3) / 4
+}
+
+/// Flat estimate for autonomous task output. Conservative upper bound —
+/// prevents burst spend from a single chatty task.
+const OUTPUT_TOKEN_ESTIMATE: u64 = 1_000;
+
 /// The life loop runtime. Construct one, call `.spawn()`, and it drives itself.
 pub struct LifeLoop {
     config:       AutonomyConfig,
@@ -119,6 +172,7 @@ pub struct LifeLoop {
     tools:        Arc<ToolRegistry>,
     task_queue:   TaskQueue,
     rate_limiter: Arc<Mutex<RateLimiter>>,
+    token_budget: Arc<Mutex<TokenBudget>>,
     proposals:    Arc<Mutex<Vec<Proposal>>>,
     paused:       Arc<std::sync::atomic::AtomicBool>,
 }
@@ -137,6 +191,7 @@ impl LifeLoop {
             config.max_internal_tasks_per_hour,
             config.max_internal_tasks_per_day,
         );
+        let budget = TokenBudget::new(config.max_tokens_per_day);
         Self {
             config,
             motivation,
@@ -146,6 +201,7 @@ impl LifeLoop {
             tools,
             task_queue,
             rate_limiter: Arc::new(Mutex::new(limiter)),
+            token_budget: Arc::new(Mutex::new(budget)),
             proposals:    Arc::new(Mutex::new(Vec::new())),
             paused:       Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -158,6 +214,8 @@ impl LifeLoop {
             paused:       self.paused.clone(),
             proposals:    self.proposals.clone(),
             rate_limiter: self.rate_limiter.clone(),
+            token_budget: self.token_budget.clone(),
+            max_tokens_per_day: self.config.max_tokens_per_day,
             motivation:   self.motivation.clone(),
         };
 
@@ -174,6 +232,7 @@ impl LifeLoop {
         let queue = self.task_queue.clone();
         let mot_path = self.motivation_path.clone();
         let rl = self.rate_limiter.clone();
+        let tb = self.token_budget.clone();
         let pa = self.paused.clone();
         let pr = self.proposals.clone();
         let motivation = self.motivation.clone();
@@ -183,6 +242,7 @@ impl LifeLoop {
             propose_only = cfg.propose_only,
             max_per_hour = cfg.max_internal_tasks_per_hour,
             max_per_day  = cfg.max_internal_tasks_per_day,
+            max_tokens_per_day = cfg.max_tokens_per_day,
             "life loop starting"
         );
 
@@ -259,7 +319,23 @@ impl LifeLoop {
                     continue;
                 };
 
+                // Token budget gate — estimate cost and skip if over cap.
+                let est_cost = estimate_prompt_tokens(&prompt) + OUTPUT_TOKEN_ESTIMATE;
+                {
+                    let mut budget = tb.lock().await;
+                    if !budget.has_budget(est_cost) {
+                        info!(
+                            spent = budget.spent_today(),
+                            cap = cfg.max_tokens_per_day,
+                            est_cost,
+                            "daily token budget exhausted, skipping tick"
+                        );
+                        continue;
+                    }
+                }
+
                 rl.lock().await.consume();
+                tb.lock().await.consume(est_cost);
 
                 if cfg.propose_only {
                     let proposal = Proposal {
@@ -296,6 +372,8 @@ pub struct LifeLoopHandle {
     paused:       Arc<std::sync::atomic::AtomicBool>,
     proposals:    Arc<Mutex<Vec<Proposal>>>,
     rate_limiter: Arc<Mutex<RateLimiter>>,
+    token_budget: Arc<Mutex<TokenBudget>>,
+    max_tokens_per_day: u64,
     motivation:   Arc<Mutex<Motivation>>,
 }
 
@@ -339,6 +417,7 @@ impl LifeLoopHandle {
     pub async fn snapshot(&self, enabled: bool) -> AutonomyState {
         let mot = self.motivation.lock().await.clone();
         let (last_hour, last_day) = self.rate_limiter.lock().await.snapshot();
+        let tokens_last_day = self.token_budget.lock().await.spent_today();
         let proposals = self.proposals.lock().await.clone();
         // Return only the 20 most recent for UI rendering
         let recent: Vec<Proposal> = proposals.into_iter().rev().take(20).collect();
@@ -348,6 +427,8 @@ impl LifeLoopHandle {
             motivation: mot,
             tasks_last_hour: last_hour,
             tasks_last_day:  last_day,
+            tokens_last_day,
+            tokens_max_per_day: self.max_tokens_per_day,
             recent_proposals: recent,
         }
     }
@@ -363,5 +444,33 @@ mod tests {
         assert!(rl.has_budget());
         for _ in 0..3 { rl.consume(); }
         assert!(!rl.has_budget()); // hit hourly cap
+    }
+
+    #[test]
+    fn token_budget_respects_daily_cap() {
+        let mut tb = TokenBudget::new(1000);
+        assert!(tb.has_budget(400));
+        tb.consume(400);
+        assert_eq!(tb.spent_today(), 400);
+        assert!(tb.has_budget(600));  // exactly at cap
+        tb.consume(600);
+        assert!(!tb.has_budget(1));   // exceeded
+    }
+
+    #[test]
+    fn token_budget_zero_cap_is_disabled() {
+        // max=0 means "don't gate" — used when autonomy is off.
+        let mut tb = TokenBudget::new(0);
+        assert!(tb.has_budget(100_000));
+    }
+
+    #[test]
+    fn estimate_prompt_tokens_is_reasonable() {
+        // 12 chars / 4 = 3 tokens
+        assert_eq!(estimate_prompt_tokens("abcdefghijkl"), 3);
+        // Empty prompt = 0 tokens
+        assert_eq!(estimate_prompt_tokens(""), 0);
+        // Round up — 5 chars becomes 2 tokens (ceil of 5/4)
+        assert_eq!(estimate_prompt_tokens("abcde"), 2);
     }
 }

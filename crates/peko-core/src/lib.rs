@@ -19,6 +19,7 @@ pub mod reflector;
 pub mod life_loop;
 pub mod curiosity;
 pub mod goal;
+pub mod gardener;
 
 pub use message::{Message, ToolCall};
 pub use tool::{Tool, ToolRegistry, ToolResult};
@@ -42,6 +43,7 @@ pub use reflector::{Reflector, Reflection, ReflectionOutcome, CompletedTask};
 pub use life_loop::{LifeLoop, AutonomyState, Proposal, ProposalStatus};
 pub use curiosity::Curiosity;
 pub use goal::{GoalGenerator, Pattern, PatternKind};
+pub use gardener::{GardenerConfig, spawn as spawn_gardener};
 
 #[cfg(test)]
 mod runtime_tests;

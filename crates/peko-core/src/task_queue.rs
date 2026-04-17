@@ -1,10 +1,12 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, oneshot};
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 use crate::brain::DualBrain;
 use crate::runtime::{AgentRuntime, AgentResponse, StreamCallback};
 use crate::message::Message;
+use crate::motivation::{Motivation, DriveEvent};
+use crate::reflector::{Reflector, CompletedTask};
 use crate::session::SessionStore;
 use crate::memory::MemoryStore;
 use crate::skills::SkillStore;
@@ -74,6 +76,12 @@ pub struct TaskQueue {
 impl TaskQueue {
     /// Create a new task queue and spawn the executor loop.
     /// All shared state is passed here — the executor owns the runtime.
+    ///
+    /// `reflector` + `motivation` are optional Phase-A/D hooks. When set:
+    ///   - after each non-internal task completes, a background reflection
+    ///     spawns and writes a Reflection memory,
+    ///   - a DriveEvent is recorded (TaskSucceeded / TaskFailed).
+    /// Internal (life-loop) tasks are skipped to avoid reflection loops.
     pub fn new(
         tools: Arc<ToolRegistry>,
         config: Arc<Mutex<serde_json::Value>>,
@@ -84,6 +92,9 @@ impl TaskQueue {
         user_model: Arc<Mutex<UserModel>>,
         user_model_path: std::path::PathBuf,
         brain: Option<Arc<DualBrain>>,
+        reflector: Option<Arc<Reflector>>,
+        motivation: Option<Arc<Mutex<Motivation>>>,
+        motivation_path: Option<std::path::PathBuf>,
         max_queue_size: usize,
     ) -> Self {
         let (submit_tx, submit_rx) = mpsc::channel::<TaskRequest>(max_queue_size);
@@ -111,6 +122,9 @@ impl TaskQueue {
             user_model,
             user_model_path,
             brain,
+            reflector,
+            motivation,
+            motivation_path,
         ));
 
         info!("task queue started (max queue: {})", max_queue_size);
@@ -181,6 +195,9 @@ impl TaskQueue {
         user_model: Arc<Mutex<UserModel>>,
         user_model_path: std::path::PathBuf,
         brain: Option<Arc<DualBrain>>,
+        reflector: Option<Arc<Reflector>>,
+        motivation: Option<Arc<Mutex<Motivation>>>,
+        motivation_path: Option<std::path::PathBuf>,
     ) {
         info!("task queue executor started");
 
@@ -200,8 +217,11 @@ impl TaskQueue {
                 "executing queued task"
             );
 
+            let is_internal = task.source.is_internal();
+            let user_input = task.input.clone();
+
             // Build runtime for this task
-            let result = Self::execute_task(
+            let exec = Self::execute_task(
                 &task,
                 tools.clone(),
                 config.clone(),
@@ -214,8 +234,58 @@ impl TaskQueue {
                 brain.clone(),
             ).await;
 
+            // Unpack (response, conversation) for reflector; send only response back
+            let (send_result, reflect_input): (Result<AgentResponse, String>, Option<(AgentResponse, Vec<Message>)>) = match exec {
+                Ok((resp, conv)) => {
+                    // Clone lightweight fields for the reflector path
+                    let resp_copy = AgentResponse {
+                        text:       resp.text.clone(),
+                        iterations: resp.iterations,
+                        session_id: resp.session_id.clone(),
+                    };
+                    (Ok(resp), Some((resp_copy, conv)))
+                }
+                Err(e) => (Err(e), None),
+            };
+
+            let ok = send_result.is_ok();
+
+            // Record motivation drive event
+            if let Some(ref mot) = motivation {
+                let event = if ok { DriveEvent::TaskSucceeded } else { DriveEvent::TaskFailed };
+                let mot_cloned = mot.clone();
+                let path_cloned = motivation_path.clone();
+                tokio::spawn(async move {
+                    let mut m = mot_cloned.lock().await;
+                    m.record(event);
+                    if let Some(ref p) = path_cloned {
+                        if let Err(e) = m.save(p) {
+                            warn!(error = %e, "motivation save failed");
+                        }
+                    }
+                });
+            }
+
+            // Spawn reflection in background for non-internal, successful tasks
+            if ok && !is_internal {
+                if let (Some(ref refl), Some((resp, conv))) = (&reflector, reflect_input) {
+                    let refl = refl.clone();
+                    let completed = CompletedTask {
+                        session_id: resp.session_id.clone(),
+                        user_input: user_input.clone(),
+                        conversation: conv,
+                        iterations: resp.iterations,
+                    };
+                    tokio::spawn(async move {
+                        if let Err(e) = refl.reflect(&completed).await {
+                            warn!(error = %e, "reflection failed");
+                        }
+                    });
+                }
+            }
+
             // Send result
-            let _ = task.result_tx.send(result);
+            let _ = task.result_tx.send(send_result);
 
             // Update status
             {
@@ -241,7 +311,7 @@ impl TaskQueue {
         user_model: Arc<Mutex<UserModel>>,
         user_model_path: std::path::PathBuf,
         brain: Option<Arc<DualBrain>>,
-    ) -> Result<AgentResponse, String> {
+    ) -> Result<(AgentResponse, Vec<Message>), String> {
         let config_val = config.lock().await.clone();
 
         let provider = build_provider_helper(&config_val)
@@ -305,9 +375,12 @@ impl TaskQueue {
             (sid, Vec::new())
         };
 
-        runtime.run_turn(&session_id, &mut conversation, &task.input, task.stream_tx.clone())
+        let response = runtime
+            .run_turn(&session_id, &mut conversation, &task.input, task.stream_tx.clone())
             .await
-            .map_err(|e| format!("{}", e))
+            .map_err(|e| format!("{}", e))?;
+
+        Ok((response, conversation))
     }
 }
 

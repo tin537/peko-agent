@@ -503,9 +503,10 @@ tailwind.config = {
           <!-- Rate limit snapshot -->
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
             <h3 class="text-[10px] text-zinc-500 uppercase mb-2 font-bold tracking-wider">Rate limits</h3>
-            <div class="flex gap-6 text-sm">
+            <div class="flex flex-wrap gap-x-6 gap-y-2 text-sm">
               <span class="text-zinc-300"><span id="lifeRateHour" class="font-mono">0</span> <span class="text-zinc-500 text-xs">/ hour</span></span>
               <span class="text-zinc-300"><span id="lifeRateDay" class="font-mono">0</span>  <span class="text-zinc-500 text-xs">/ day</span></span>
+              <span class="text-zinc-300"><span id="lifeTokenSpent" class="font-mono">0</span><span class="text-zinc-500 text-xs">/</span><span id="lifeTokenCap" class="font-mono text-zinc-500">0</span> <span class="text-zinc-500 text-xs">tokens / day</span></span>
             </div>
           </div>
 
@@ -1575,6 +1576,10 @@ async function loadAutonomy() {
     renderDrives(s.motivation);
     document.getElementById('lifeRateHour').textContent = s.tasks_last_hour;
     document.getElementById('lifeRateDay').textContent  = s.tasks_last_day;
+    var ts = document.getElementById('lifeTokenSpent');
+    var tc = document.getElementById('lifeTokenCap');
+    if (ts) ts.textContent = s.tokens_last_day || 0;
+    if (tc) tc.textContent = s.tokens_max_per_day || 0;
     renderProposals(s.recent_proposals || []);
   } catch (e) { /* ignore */ }
 }
