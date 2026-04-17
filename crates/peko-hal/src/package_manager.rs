@@ -93,13 +93,14 @@ impl PackageManager {
         let session_id = extract_session_id(&create_str)
             .ok_or_else(|| anyhow::anyhow!("failed to get session ID: {}", create_str))?;
 
-        // Write APK to session
-        let write_output = Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "cat {} | pm install-write -S {} {} base.apk",
-                apk_path.display(), file_size, session_id
-            ))
+        // Write APK to session — pipe file content directly, no shell interpolation
+        let write_output = Command::new("pm")
+            .arg("install-write")
+            .arg("-S")
+            .arg(file_size.to_string())
+            .arg(&session_id)
+            .arg("base.apk")
+            .stdin(std::process::Stdio::from(fs::File::open(apk_path)?))
             .output()?;
 
         if !write_output.status.success() {
@@ -322,6 +323,13 @@ impl PackageManager {
 
     /// Request dex optimization via installd
     pub fn installd_dexopt(apk_path: &str, package_name: &str) -> anyhow::Result<String> {
+        // Validate package name: only allow alphanumeric, dots, underscores, hyphens
+        if !package_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+            anyhow::bail!("invalid package name: {}", package_name);
+        }
+        if !apk_path.chars().all(|c| c.is_ascii_alphanumeric() || c == '/' || c == '.' || c == '_' || c == '-') {
+            anyhow::bail!("invalid apk path: {}", apk_path);
+        }
         let cmd = format!("dexopt {} {} 0 * speed ! 0", apk_path, package_name);
         Self::installd_command(&cmd)
     }

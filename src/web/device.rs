@@ -150,15 +150,32 @@ fn get_hardware() -> HardwareInfo {
         l.contains("touch") || l.contains("ts") || l.contains("virtio") || l.contains("goldfish")
     });
 
+    // Framebuffer: legacy fb0 OR modern DRM/KMS OR screencap available
+    let has_fb = std::path::Path::new("/dev/graphics/fb0").exists()
+        || std::path::Path::new("/dev/fb0").exists()
+        || std::path::Path::new("/dev/dri/card0").exists()
+        || !shell("which screencap 2>/dev/null").is_empty();
+
+    // Modem: serial devices OR RIL (Radio Interface Layer) running
+    let has_modem = [
+        "/dev/ttyACM0", "/dev/ttyACM1",
+        "/dev/ttyUSB0", "/dev/ttyUSB2",
+        "/dev/ttyGF0", "/dev/ttyGF1",
+        "/dev/ttyMSM0",
+        "/dev/ttyS0", "/dev/ttyS1",
+    ].iter().any(|p| std::path::Path::new(p).exists())
+        || shell("getprop gsm.version.ril-impl 2>/dev/null").len() > 0;
+
     HardwareInfo {
         cpu_abi: prop("ro.product.cpu.abi"),
         cpu_cores: cores,
         ram_total_mb: ram_kb / 1024,
         soc: prop("ro.hardware"),
         has_touchscreen: has_touch,
-        has_framebuffer: std::path::Path::new("/dev/graphics/fb0").exists() || std::path::Path::new("/dev/fb0").exists(),
-        has_modem: ["/dev/ttyACM0","/dev/ttyUSB0","/dev/ttyGF0"].iter().any(|p| std::path::Path::new(p).exists()),
-        has_wifi: shell("ip link show wlan0 2>/dev/null").contains("wlan0"),
+        has_framebuffer: has_fb,
+        has_modem,
+        has_wifi: shell("ip link show wlan0 2>/dev/null").contains("wlan0")
+            || shell("ip link show eth0 2>/dev/null").contains("eth0"),
         has_camera: !shell("ls /dev/video* 2>/dev/null").is_empty() || prop("ro.camera.notify_nfc") != "",
         input_devices: input_devs,
     }

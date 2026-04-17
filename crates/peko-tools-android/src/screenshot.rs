@@ -51,7 +51,11 @@ fn resize_and_encode(img: &image::DynamicImage) -> (String, u32, u32, usize) {
     let (orig_w, orig_h) = (img.width(), img.height());
 
     let resized = if orig_w > MAX_DIMENSION || orig_h > MAX_DIMENSION {
-        img.resize(MAX_DIMENSION, MAX_DIMENSION, image::imageops::FilterType::Triangle)
+        // Preserve aspect ratio: scale so the largest dimension fits MAX_DIMENSION
+        let scale = MAX_DIMENSION as f32 / orig_w.max(orig_h) as f32;
+        let new_w = (orig_w as f32 * scale) as u32;
+        let new_h = (orig_h as f32 * scale) as u32;
+        img.resize_exact(new_w, new_h, image::imageops::FilterType::Triangle)
     } else {
         img.clone()
     };
@@ -63,7 +67,7 @@ fn resize_and_encode(img: &image::DynamicImage) -> (String, u32, u32, usize) {
     let mut cursor = Cursor::new(&mut jpeg_bytes);
 
     // Try JPEG first, fall back to PNG if JPEG encoder not available
-    let format = if resized.write_to(&mut cursor, image::ImageFormat::Jpeg).is_ok() {
+    let _format = if resized.write_to(&mut cursor, image::ImageFormat::Jpeg).is_ok() {
         "image/jpeg"
     } else {
         jpeg_bytes.clear();

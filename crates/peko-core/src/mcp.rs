@@ -221,6 +221,15 @@ impl McpClient {
     }
 }
 
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        if let McpTransport::Stdio { ref mut child, .. } = self.transport {
+            // Kill child process to avoid zombies
+            let _ = child.start_kill();
+        }
+    }
+}
+
 /// Wrapper that makes an MCP tool usable as a peko Tool
 pub struct McpToolAdapter {
     server_name: String,

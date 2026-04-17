@@ -659,7 +659,7 @@ async function send() {
           var toolHtml = '<div class="text-emerald-400 text-[11px] font-semibold font-mono mb-1.5">' + esc(ev.name || 'tool') + '</div>';
           if (ev.image) {
             var imgSrc = ev.image.startsWith('data:') ? ev.image : (API + ev.image);
-            toolHtml += '<img src="' + imgSrc + '" class="rounded-lg max-w-full max-h-80 mb-2 border border-zinc-700/30" alt="screenshot" loading="lazy">';
+            toolHtml += '<img src="' + escAttr(imgSrc) + '" class="rounded-lg max-w-full max-h-80 mb-2 border border-zinc-700/30" alt="screenshot" loading="lazy">';
           }
           toolHtml += '<pre class="text-zinc-300 font-mono text-xs whitespace-pre-wrap break-all leading-relaxed">' + esc(ev.content || '') + '</pre>';
           addMsg('tool', toolHtml);
@@ -744,11 +744,11 @@ async function loadSessions() {
       var time = (s.started_at || '').slice(11, 16);
       return '<div class="group px-3 py-3 cursor-pointer border-b border-zinc-800/50 transition-colors ' +
         (isActive ? 'bg-violet-600/10 border-l-2 border-l-violet-500' : 'hover:bg-zinc-800/30') +
-        '" onclick="loadSession(\'' + s.id + '\')">' +
+        '" onclick="loadSession(\'' + escAttr(s.id) + '\')">' +
         '<div class="flex items-start justify-between gap-2">' +
           '<p class="text-sm text-zinc-300 truncate flex-1 leading-snug">' + esc(s.task) + '</p>' +
           '<button class="opacity-0 group-hover:opacity-100 p-0.5 text-zinc-600 hover:text-red-400 transition-all shrink-0" ' +
-            'onclick="event.stopPropagation();delSession(\'' + s.id + '\')" title="Delete">' +
+            'onclick="event.stopPropagation();delSession(\'' + escAttr(s.id) + '\')" title="Delete">' +
             '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>' +
           '</button>' +
         '</div>' +
@@ -953,6 +953,9 @@ function esc(s) {
   d.textContent = s;
   return d.innerHTML;
 }
+function escAttr(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 
 /* ── Device Profile ── */
 var profileLoaded = false;
@@ -1097,7 +1100,7 @@ function renderApps(apps) {
   if (!apps.length) { el.innerHTML = '<p class="text-zinc-600 text-xs py-4 text-center">No apps found</p>'; return; }
   el.innerHTML = apps.map(function(a) {
     var icon = a.icon
-      ? '<img src="'+a.icon+'" class="w-8 h-8 rounded-lg flex-shrink-0" onerror="this.style.display=\'none\'">'
+      ? '<img src="'+escAttr(a.icon)+'" class="w-8 h-8 rounded-lg flex-shrink-0" onerror="this.style.display=\'none\'">'
       : '<div class="w-8 h-8 rounded-lg bg-zinc-800 border border-zinc-700/50 flex items-center justify-center flex-shrink-0"><span class="text-zinc-500 text-[10px] font-bold">'+esc((a.label||a.package)[0].toUpperCase())+'</span></div>';
     var badge = a.app_type === 'user'
       ? '<span class="px-1.5 py-0.5 bg-violet-900/30 text-violet-400 rounded text-[9px]">USER</span>'
@@ -1110,9 +1113,9 @@ function renderApps(apps) {
         '<div class="text-[10px] text-zinc-500 font-mono truncate">'+esc(a.package)+(a.version ? ' v'+esc(a.version) : '')+'</div>' +
       '</div>' +
       '<div class="flex gap-1 flex-shrink-0">' +
-      '<button onclick="appAct(\''+a.package+'\',\'launch\')" class="text-[10px] px-2 py-1 bg-emerald-900/30 hover:bg-emerald-900/50 text-emerald-400 rounded">Launch</button>' +
-      '<button onclick="appAct(\''+a.package+'\',\'stop\')" class="text-[10px] px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 rounded">Stop</button>' +
-      (a.app_type==='user' ? '<button onclick="appAct(\''+a.package+'\',\'uninstall\')" class="text-[10px] px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded">Del</button>' : '') +
+      '<button onclick="appAct(\''+escAttr(a.package)+'\',\'launch\')" class="text-[10px] px-2 py-1 bg-emerald-900/30 hover:bg-emerald-900/50 text-emerald-400 rounded">Launch</button>' +
+      '<button onclick="appAct(\''+escAttr(a.package)+'\',\'stop\')" class="text-[10px] px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 rounded">Stop</button>' +
+      (a.app_type==='user' ? '<button onclick="appAct(\''+escAttr(a.package)+'\',\'uninstall\')" class="text-[10px] px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded">Del</button>' : '') +
       '</div></div>';
   }).join('');
 }
@@ -1240,7 +1243,7 @@ function renderMemories(mems) {
             '<span>'+esc((m.created_at||'').slice(0,10))+'</span>' +
           '</div>' +
         '</div>' +
-        '<button onclick="delMemory(\''+m.id+'\')" class="text-zinc-600 hover:text-red-400 p-1 flex-shrink-0" title="Delete">' +
+        '<button onclick="delMemory(\''+escAttr(m.id)+'\')" class="text-zinc-600 hover:text-red-400 p-1 flex-shrink-0" title="Delete">' +
           '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>' +
         '</button>' +
       '</div>' +
@@ -1290,7 +1293,7 @@ function renderSkills(skills) {
           '</div>' +
           '<div class="flex gap-1 flex-shrink-0">' +
             '<button onclick="toggleSkillSteps(this)" class="text-[10px] px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 rounded">Steps</button>' +
-            '<button onclick="delSkill(\''+s.name+'\')" class="text-[10px] px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded">Del</button>' +
+            '<button onclick="delSkill(\''+escAttr(s.name)+'\')" class="text-[10px] px-2 py-1 bg-red-900/30 hover:bg-red-900/50 text-red-400 rounded">Del</button>' +
           '</div>' +
         '</div>' +
       '</div>' +

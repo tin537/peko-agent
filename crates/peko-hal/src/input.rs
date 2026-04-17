@@ -24,6 +24,8 @@ const ABS_MT_POSITION_Y: u16 = 0x36;
 const ABS_MT_PRESSURE: u16 = 0x3a;
 const ABS_MT_TOUCH_MAJOR: u16 = 0x30;
 
+const BTN_TOUCH: u16 = 0x14a;
+
 const KEY_HOME: u16 = 102;
 const KEY_BACK: u16 = 158;
 const KEY_POWER: u16 = 116;
@@ -167,6 +169,7 @@ impl InputDevice {
             )
         };
         self.file.write_all(bytes)?;
+        self.file.flush()?;
         Ok(())
     }
 
@@ -180,13 +183,15 @@ impl InputDevice {
         self.write_event(EV_ABS, ABS_MT_POSITION_X, x)?;
         self.write_event(EV_ABS, ABS_MT_POSITION_Y, y)?;
         self.write_event(EV_ABS, ABS_MT_PRESSURE, 50)?;
-        self.write_event(EV_ABS, ABS_MT_TOUCH_MAJOR, 5)?;
+        self.write_event(EV_ABS, ABS_MT_TOUCH_MAJOR, 6)?;
+        self.write_event(EV_KEY, BTN_TOUCH, 1)?;
         self.syn_report()?;
 
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(20));
 
         // Finger up
         self.write_event(EV_ABS, ABS_MT_TRACKING_ID, -1)?;
+        self.write_event(EV_KEY, BTN_TOUCH, 0)?;
         self.syn_report()?;
         Ok(())
     }
@@ -202,6 +207,8 @@ impl InputDevice {
         self.write_event(EV_ABS, ABS_MT_POSITION_X, x1)?;
         self.write_event(EV_ABS, ABS_MT_POSITION_Y, y1)?;
         self.write_event(EV_ABS, ABS_MT_PRESSURE, 50)?;
+        self.write_event(EV_ABS, ABS_MT_TOUCH_MAJOR, 6)?;
+        self.write_event(EV_KEY, BTN_TOUCH, 1)?;
         self.syn_report()?;
 
         for i in 1..=steps {
@@ -216,6 +223,7 @@ impl InputDevice {
 
         // Finger up
         self.write_event(EV_ABS, ABS_MT_TRACKING_ID, -1)?;
+        self.write_event(EV_KEY, BTN_TOUCH, 0)?;
         self.syn_report()?;
         Ok(())
     }

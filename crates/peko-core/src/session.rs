@@ -15,6 +15,7 @@ pub struct StoredMessage {
     pub content: String,
     pub tool_name: Option<String>,
     pub tool_args: Option<String>,
+    pub tool_use_id: Option<String>,
     pub is_error: bool,
     pub created_at: String,
 }
@@ -133,7 +134,7 @@ impl SessionStore {
 
     pub fn load_messages(&self, session_id: &str) -> anyhow::Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
-            "SELECT role, content, tool_name, tool_args, is_error, created_at \
+            "SELECT role, content, tool_name, tool_args, tool_use_id, is_error, created_at \
              FROM messages WHERE session_id = ?1 ORDER BY created_at ASC"
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
@@ -142,8 +143,9 @@ impl SessionStore {
                 content: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 tool_name: row.get(2)?,
                 tool_args: row.get(3)?,
-                is_error: row.get::<_, i32>(4).unwrap_or(0) != 0,
-                created_at: row.get(5)?,
+                tool_use_id: row.get(4)?,
+                is_error: row.get::<_, i32>(5).unwrap_or(0) != 0,
+                created_at: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)

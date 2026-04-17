@@ -14,16 +14,31 @@ impl FileSystemTool {
     }
 
     fn is_path_allowed(&self, path: &Path) -> bool {
-        let canonical = std::fs::canonicalize(path)
+        // Resolve the real path, following symlinks
+        let canonical: Result<PathBuf, std::io::Error> = std::fs::canonicalize(path)
             .or_else(|_| {
-                // path might not exist yet (for write), check parent
-                path.parent()
-                    .and_then(|p| std::fs::canonicalize(p).ok())
-                    .ok_or(std::io::Error::new(std::io::ErrorKind::NotFound, ""))
-            })
-            .unwrap_or_else(|_| path.to_path_buf());
+                // Path might not exist yet (for write). Canonicalize parent, then
+                // re-append the filename so we still validate the target directory.
+                let parent = path.parent()
+                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no parent"))?;
+                let file_name = path.file_name()
+                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no filename"))?;
+                let canon_parent = std::fs::canonicalize(parent)?;
+                Ok(canon_parent.join(file_name))
+            });
 
-        self.allowed_paths.iter().any(|allowed| canonical.starts_with(allowed))
+        // If we can't resolve the path at all, deny access
+        let canonical = match canonical {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+
+        self.allowed_paths.iter().any(|allowed| {
+            // Canonicalize the allowed path too, to handle symlinks in config
+            let allowed_canonical = std::fs::canonicalize(allowed)
+                .unwrap_or_else(|_| allowed.clone());
+            canonical.starts_with(&allowed_canonical)
+        })
     }
 }
 

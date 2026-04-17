@@ -124,6 +124,28 @@ async fn set_config(
     let mut config = state.config.lock().await;
 
     if let Some(agent) = new_config.get("agent") {
+        // Validate critical agent parameters
+        if let Some(max_iter) = agent.get("max_iterations").and_then(|v| v.as_u64()) {
+            if max_iter > 500 {
+                return StatusCode::BAD_REQUEST;
+            }
+        }
+        if let Some(ctx) = agent.get("context_window").and_then(|v| v.as_u64()) {
+            if ctx == 0 || ctx > 2_000_000 {
+                return StatusCode::BAD_REQUEST;
+            }
+        }
+        if let Some(share) = agent.get("history_share").and_then(|v| v.as_f64()) {
+            if share <= 0.0 || share > 1.0 {
+                return StatusCode::BAD_REQUEST;
+            }
+        }
+        if let Some(data_dir) = agent.get("data_dir").and_then(|v| v.as_str()) {
+            // Block obviously dangerous paths
+            if data_dir == "/" || data_dir.starts_with("/proc") || data_dir.starts_with("/sys") {
+                return StatusCode::BAD_REQUEST;
+            }
+        }
         config["agent"] = agent.clone();
     }
     if let Some(provider) = new_config.get("provider") {
@@ -594,28 +616,42 @@ async fn queue_status(State(state): State<AppState>) -> Json<serde_json::Value> 
 async fn serve_screenshot(
     axum::extract::Path(filename): axum::extract::Path<String>,
 ) -> Response {
-    // Sanitize filename
-    let safe_name = filename.replace("..", "").replace("/", "");
+    // Strict filename validation: only allow alphanumeric, underscores, hyphens, dots
+    // Must end with .jpg, .jpeg, or .png
+    let is_safe = filename.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        && !filename.contains("..")
+        && (filename.ends_with(".jpg") || filename.ends_with(".jpeg") || filename.ends_with(".png"));
 
-    // Try /data/peko/screenshots first, then /tmp
-    let paths = [
-        std::path::PathBuf::from("/data/peko/screenshots").join(&safe_name),
-        std::path::PathBuf::from("/tmp").join(&safe_name),
+    if !is_safe || filename.is_empty() {
+        return (StatusCode::BAD_REQUEST, "invalid filename").into_response();
+    }
+
+    // Try allowed directories only
+    let allowed_dirs = [
+        std::path::PathBuf::from("/data/peko/screenshots"),
+        std::path::PathBuf::from("/tmp"),
     ];
 
-    for path in &paths {
-        if let Ok(data) = std::fs::read(path) {
-            let content_type = if safe_name.ends_with(".jpg") || safe_name.ends_with(".jpeg") {
-                "image/jpeg"
-            } else {
-                "image/png"
-            };
+    for dir in &allowed_dirs {
+        let path = dir.join(&filename);
+        // Verify resolved path stays within allowed directory
+        if let Ok(canonical) = std::fs::canonicalize(&path) {
+            if !canonical.starts_with(dir) {
+                continue; // symlink escape attempt
+            }
+            if let Ok(data) = std::fs::read(&canonical) {
+                let content_type = if filename.ends_with(".jpg") || filename.ends_with(".jpeg") {
+                    "image/jpeg"
+                } else {
+                    "image/png"
+                };
 
-            return Response::builder()
-                .header("content-type", content_type)
-                .header("cache-control", "public, max-age=3600")
-                .body(axum::body::Body::from(data))
-                .unwrap();
+                return Response::builder()
+                    .header("content-type", content_type)
+                    .header("cache-control", "public, max-age=3600")
+                    .body(axum::body::Body::from(data))
+                    .unwrap();
+            }
         }
     }
 

@@ -167,6 +167,7 @@ impl UInputDevice {
             )
         };
         self.file.write_all(bytes)?;
+        self.file.flush()?;
         Ok(())
     }
 

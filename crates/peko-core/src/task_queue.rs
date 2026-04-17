@@ -260,7 +260,7 @@ impl TaskQueue {
                     }
                     "tool_result" => {
                         conv.push(Message::tool_result(
-                            String::new(),
+                            m.tool_use_id.clone().unwrap_or_default(),
                             m.tool_name.clone().unwrap_or_default(),
                             m.content.clone(),
                             m.is_error,

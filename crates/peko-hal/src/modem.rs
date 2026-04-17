@@ -104,6 +104,9 @@ impl SerialModem {
                 }
                 Ok(n) => {
                     response.push_str(&String::from_utf8_lossy(&buf[..n]));
+                    if response.len() > 16384 {
+                        anyhow::bail!("modem response too large (>16KB) for '{}'", cmd);
+                    }
                     if response.contains("OK") || response.contains("ERROR")
                         || response.contains("+CME ERROR")
                     {

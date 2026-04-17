@@ -128,15 +128,18 @@ impl AgentRuntime {
             // Inject relevant memories on first iteration
             if total_iterations == 0 {
                 if let Some(ref memory) = self.memory {
-                    if let Ok(mem_store) = memory.try_lock() {
-                        match mem_store.build_context(user_input, 5) {
-                            Ok(ctx) if !ctx.is_empty() => {
-                                system_prompt_text.push_str("\n\n");
-                                system_prompt_text.push_str(&ctx);
-                                info!(memories = ctx.lines().count() - 2, "injected memories into prompt");
+                    match memory.try_lock() {
+                        Ok(mem_store) => {
+                            match mem_store.build_context(user_input, 5) {
+                                Ok(ctx) if !ctx.is_empty() => {
+                                    system_prompt_text.push_str("\n\n");
+                                    system_prompt_text.push_str(&ctx);
+                                    info!(memories = ctx.lines().count() - 2, "injected memories into prompt");
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
+                        Err(_) => warn!("memory store locked, skipping memory injection"),
                     }
                 }
             }
@@ -144,13 +147,16 @@ impl AgentRuntime {
             // Inject relevant skills on first iteration
             if total_iterations == 0 {
                 if let Some(ref skills) = self.skills {
-                    if let Ok(skill_store) = skills.try_lock() {
-                        let ctx = skill_store.build_context(user_input);
-                        if !ctx.is_empty() {
-                            system_prompt_text.push_str("\n\n");
-                            system_prompt_text.push_str(&ctx);
-                            info!("injected skills into prompt");
+                    match skills.try_lock() {
+                        Ok(skill_store) => {
+                            let ctx = skill_store.build_context(user_input);
+                            if !ctx.is_empty() {
+                                system_prompt_text.push_str("\n\n");
+                                system_prompt_text.push_str(&ctx);
+                                info!("injected skills into prompt");
+                            }
                         }
+                        Err(_) => warn!("skill store locked, skipping skill injection"),
                     }
                 }
             }
@@ -158,12 +164,15 @@ impl AgentRuntime {
             // Inject user model context on first iteration
             if total_iterations == 0 {
                 if let Some(ref user_model) = self.user_model {
-                    if let Ok(model) = user_model.try_lock() {
-                        let ctx = model.build_context();
-                        if !ctx.is_empty() {
-                            system_prompt_text.push_str("\n\n");
-                            system_prompt_text.push_str(&ctx);
+                    match user_model.try_lock() {
+                        Ok(model) => {
+                            let ctx = model.build_context();
+                            if !ctx.is_empty() {
+                                system_prompt_text.push_str("\n\n");
+                                system_prompt_text.push_str(&ctx);
+                            }
                         }
+                        Err(_) => warn!("user model locked, skipping user context injection"),
                     }
                 }
             }

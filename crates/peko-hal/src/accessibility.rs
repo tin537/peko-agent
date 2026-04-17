@@ -167,8 +167,19 @@ impl UiHierarchy {
 fn extract_attr(segment: &str, name: &str) -> Option<String> {
     let prefix = format!("{}=\"", name);
     let start = segment.find(&prefix)? + prefix.len();
-    let end = segment[start..].find('"')? + start;
-    Some(segment[start..end].to_string())
+    // Find the closing quote — skip escaped quotes (&quot;)
+    // uiautomator XML uses XML entities, not backslash escapes
+    let rest = &segment[start..];
+    let end = rest.find('"')? + start;
+    let raw = &segment[start..end];
+    // Decode common XML entities
+    let decoded = raw
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'");
+    Some(decoded)
 }
 
 fn parse_bounds(bounds_str: &str) -> Option<Bounds> {
