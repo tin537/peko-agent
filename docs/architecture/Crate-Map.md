@@ -8,73 +8,78 @@
 
 ```
 peko-agent/
-├── Cargo.toml                  # Workspace root
+├── Cargo.toml                  # Workspace root (Rust)
 ├── .cargo/
 │   └── config.toml             # Cross-compilation settings
 ├── crates/
-│   ├── peko-core/            # Agent brain
-│   │   ├── Cargo.toml
+│   ├── peko-core/              # Agent brain + DualBrain router
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── runtime.rs      # AgentRuntime
+│   │       ├── runtime.rs      # AgentRuntime, run_task, run_turn
+│   │       ├── brain.rs        # DualBrain, BrainChoice, escalate tool
+│   │       ├── task_queue.rs   # TaskQueue (serialized executor)
 │   │       ├── tool.rs         # Tool trait + ToolRegistry
 │   │       ├── budget.rs       # IterationBudget
 │   │       ├── compressor.rs   # ContextCompressor
 │   │       ├── session.rs      # SessionStore (SQLite)
+│   │       ├── memory.rs       # MemoryStore (FTS5)
+│   │       ├── skills.rs       # SkillStore (markdown frontmatter)
+│   │       ├── user_model.rs   # UserModel (prefs, patterns)
+│   │       ├── scheduler.rs    # Cron scheduler
+│   │       ├── mcp.rs          # MCP client
 │   │       ├── prompt.rs       # SystemPrompt builder
 │   │       └── message.rs      # Message types
 │   │
-│   ├── peko-transport/       # Network layer
-│   │   ├── Cargo.toml
+│   ├── peko-transport/         # Network + IPC layer
 │   │   └── src/
-│   │       ├── lib.rs
 │   │       ├── provider.rs     # LlmProvider trait
-│   │       ├── anthropic.rs    # AnthropicProvider
-│   │       ├── openai.rs       # OpenAICompatProvider
-│   │       ├── peko_local.rs # PekoLocalProvider
+│   │       ├── anthropic.rs    # AnthropicProvider (HTTPS)
+│   │       ├── openai_compat.rs# OpenAICompatProvider (HTTPS/HTTP)
+│   │       ├── unix_socket.rs  # UnixSocketProvider (HTTP over UDS)
 │   │       ├── chain.rs        # ProviderChain (failover)
 │   │       ├── sse.rs          # SseParser
 │   │       └── stream.rs       # StreamEvent types
 │   │
-│   ├── peko-tools-android/   # Android tools
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── screenshot.rs   # ScreenshotTool
-│   │       ├── touch.rs        # TouchTool
-│   │       ├── key_event.rs    # KeyEventTool
-│   │       ├── text_input.rs   # TextInputTool
-│   │       ├── sms.rs          # SmsTool
-│   │       ├── call.rs         # CallTool
-│   │       ├── ui_dump.rs      # UiDumpTool
-│   │       ├── notification.rs # NotificationTool
-│   │       ├── filesystem.rs   # FileSystemTool
-│   │       └── shell.rs        # ShellTool
+│   ├── peko-tools-android/     # 13 tools
+│   │   └── src/ …
 │   │
-│   ├── peko-hal/             # Hardware abstraction
-│   │   ├── Cargo.toml
+│   ├── peko-hal/               # Hardware abstraction
 │   │   └── src/
-│   │       ├── lib.rs
 │   │       ├── input.rs        # InputDevice (evdev)
 │   │       ├── framebuffer.rs  # Framebuffer (/dev/fb0)
-│   │       ├── drm.rs          # DrmDisplay (/dev/dri/*)
-│   │       ├── modem.rs        # SerialModem (AT cmds)
-│   │       └── uinput.rs       # UInputDevice (virtual)
+│   │       ├── uinput.rs       # UInputDevice (virtual)
+│   │       ├── modem.rs        # SerialModem (AT)
+│   │       ├── accessibility.rs# uiautomator XML parser
+│   │       └── package_manager.rs
 │   │
-│   └── peko-config/          # Configuration
-│       ├── Cargo.toml
-│       └── src/
-│           └── lib.rs          # Config structs + parsing
+│   ├── peko-config/            # TOML config
+│   │
+│   ├── peko-llm/               # (experimental) Rust-embedded LLM via candle
+│   │   └── src/
+│   │       ├── engine.rs       # LlmEngine trait
+│   │       ├── candle_backend.rs  # candle GGUF quantized
+│   │       └── provider.rs     # EmbeddedProvider (impl LlmProvider)
+│   │
+│   └── peko-llm-daemon/        # C++ LLM daemon — llama.cpp over UDS
+│       ├── CMakeLists.txt
+│       ├── build-android.sh    # NDK cross-compile
+│       ├── src/
+│       │   ├── main.cpp
+│       │   ├── http_server.cpp # cpp-httplib on UDS
+│       │   ├── llm_session.cpp # llama.cpp wrapper
+│       │   ├── chat_template.cpp
+│       │   └── openai_api.cpp
+│       └── third_party/        # httplib.h, json.hpp (single-header)
 │
-├── src/                        # Binary crate
-│   └── main.rs                 # Entry point
+├── src/                        # peko-agent binary (Rust)
+│   ├── main.rs                 # Entry point
+│   ├── web/                    # axum Web UI + API
+│   └── telegram/               # Telegram bot
 │
-├── config/
-│   └── config.example.toml     # Example configuration
-│
+├── config/                     # Example configs (TCP + UDS variants)
 └── selinux/
-    ├── peko_agent.te        # Type enforcement
-    └── file_contexts           # File labels
+    ├── peko_agent.te
+    └── file_contexts
 ```
 
 ## Dependency Graph
@@ -112,11 +117,13 @@ peko-agent (binary)
 
 | From | Can depend on | Cannot depend on |
 |---|---|---|
-| `peko-core` | `peko-transport`, `peko-config` | `peko-hal`, `peko-tools-android` |
-| `peko-transport` | (external crates only) | any `peko-*` crate |
-| `peko-tools-android` | `peko-core` (for `Tool` trait), `peko-hal` | `peko-transport` |
+| `peko-core` | `peko-transport`, `peko-config` | `peko-hal`, `peko-tools-android`, `peko-llm` |
+| `peko-transport` | (external + `libc` for UDS abstract namespace) | any other `peko-*` crate |
+| `peko-tools-android` | `peko-core` (for `Tool` trait), `peko-hal`, `peko-config` | `peko-transport` |
 | `peko-hal` | (external crates only) | any `peko-*` crate |
 | `peko-config` | (external crates only) | any `peko-*` crate |
+| `peko-llm` | `peko-transport` (impl `LlmProvider`) | `peko-core` |
+| `peko-llm-daemon` | — (C++, separate build) | — (distinct process) |
 | `peko-agent` | everything | — |
 
 This ensures:

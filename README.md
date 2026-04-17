@@ -22,60 +22,68 @@ The agent sees the screen (framebuffer/screencap), touches it (evdev injection),
 
 ## Architecture
 
+Two cooperating processes on the device, linked by a Unix Domain Socket. The agent is pure Rust; the inference engine is C++ with llama.cpp. No HTTP over TCP between them.
+
 ```
-┌──────────────────────────────────────────────────────────┐
-│  peko-agent (single binary, 4.1MB)                    │
-│                                                          │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────────┐ │
-│  │ Agent Loop   │  │ Web UI :8080 │  │ Telegram Bot    │ │
-│  │ (ReAct)      │  │ 8 tabs       │  │ long-polling    │ │
-│  └──────┬───────┘  └──────────────┘  └─────────────────┘ │
-│         │                                                 │
-│  ┌──────▼───────────────────────────────────────────────┐ │
-│  │ Learning Loop                                         │ │
-│  │ Memory (SQLite+FTS5) | Skills (md files) | SOUL.md   │ │
-│  └──────────────────────────────────────────────────────┘ │
-│                                                          │
-│  ┌──────────────────────────────────────────────────────┐ │
-│  │ 13 Tools                                              │ │
-│  │ screenshot | touch | key | text_input | shell | fs   │ │
-│  │ sms | call | ui_inspect | package_manager            │ │
-│  │ memory | skills                                       │ │
-│  └──────────────────────────────────────────────────────┘ │
-│                                                          │
-│  ┌──────────────────────────────────────────────────────┐ │
-│  │ Hardware Abstraction Layer                            │ │
-│  │ /dev/input/event* (evdev)  | /dev/graphics/fb0 (fb)  │ │
-│  │ /dev/uinput (virtual)     | /dev/ttyACM* (modem)     │ │
-│  │ screencap + uiautomator   | pm + am + installd       │ │
-│  └──────────────────────────────────────────────────────┘ │
-│                                                          │
-│  ┌──────────────────────────────────────────────────────┐ │
-│  │ LLM Transport (SSE streaming)                        │ │
-│  │ Anthropic | OpenAI-compatible | Provider failover    │ │
-│  └──────────────────────────────────────────────────────┘ │
-│                                                          │
-│  ┌────────────────┐                                      │
-│  │ Cron Scheduler │ ── autonomous recurring tasks        │
-│  └────────────────┘                                      │
-└──────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌──────────────────┐
-│  Linux Kernel    │
-│  (Android ACK)   │
-└──────────────────┘
+┌───────────────────────────────────────────────────────────────┐
+│ Android device                                                │
+│                                                               │
+│  peko-agent (Rust, ~7 MB)                                     │
+│    ├─ Web UI :8080  ·  Telegram bot  ·  Cron scheduler        │
+│    │                                                           │
+│    ├─ Agent Loop (ReAct) + Dual-Brain router                  │
+│    │     classifies each task → local brain or cloud brain    │
+│    │     local brain can escalate to cloud mid-task           │
+│    │                                                           │
+│    ├─ Learning Loop: Memory (SQLite+FTS5), Skills, SOUL.md    │
+│    │                                                           │
+│    ├─ 13 Tools (screenshot/touch/shell/sms/…)                 │
+│    │                                                           │
+│    └─ LLM Transport                                            │
+│        ├─ AnthropicProvider     (cloud, HTTPS)                │
+│        ├─ OpenAICompatProvider  (cloud or local HTTP)         │
+│        └─ UnixSocketProvider    ── HTTP/1.1 over UDS ──┐      │
+│                                                         │      │
+│                   @peko-llm (abstract socket namespace) │      │
+│                                                         ▼      │
+│  peko-llm-daemon (C++, ~3 MB)                                  │
+│    ├─ cpp-httplib — HTTP/1.1 + SSE bound to UDS               │
+│    ├─ OpenAI-compat routes (/v1/chat/completions, /v1/models) │
+│    ├─ Chat templates: Gemma / Qwen / Llama3 / Generic         │
+│    │                                                           │
+│    └─ LlmSession → llama.cpp                                   │
+│          ├─ ggml CPU backend (ARM NEON)                       │
+│          └─ (optional) ggml-vulkan — Adreno/Mali GPU          │
+│                                                                │
+│  Hardware Abstraction Layer (Rust, called from peko-agent)    │
+│    /dev/input/event* · /dev/graphics/fb0 · /dev/uinput         │
+│    /dev/ttyACM* (modem) · screencap · uiautomator · pm/am      │
+└───────────────────────────────────────────────────────────────┘
+           │
+           ▼
+   ┌──────────────────┐
+   │  Linux Kernel    │
+   │  (Android ACK)   │
+   └──────────────────┘
 ```
+
+### Why two processes?
+
+- **Isolation** — GPU driver crash in llama.cpp doesn't kill the agent
+- **Language fit** — llama.cpp is C++; agent logic is Rust. No FFI pain.
+- **Hot-swap** — update the inference binary without touching the agent
+- **Zero network stack** — abstract-namespace UDS is faster than localhost TCP and SELinux-safe on Android `shell` user
 
 ## Features
 
 ### Agent Core
 - **ReAct loop** with streaming LLM calls (SSE)
+- **Dual-Brain router** — routes simple/skill-matched tasks to an on-device model, complex tasks to cloud; local brain can escalate
 - **13 tools** for full device control
 - **Context compression** for long-running tasks
 - **Iteration budget** with atomic interrupt
 - **Session persistence** (SQLite)
-- **Provider failover** chain (Anthropic, OpenAI-compatible, local)
+- **Provider failover** chain (Anthropic, OpenAI-compatible, UDS-local)
 
 ### Learning Loop
 - **Memory system** — FTS5 full-text search across persistent memories, auto-injected into prompts, periodic nudge to save important facts
@@ -153,20 +161,27 @@ adb shell su -c setprop sys.peko.start 1
 ```
 peko-agent/
 ├── crates/
-│   ├── peko-config/       # TOML config + env overrides
-│   ├── peko-transport/    # SSE parser, LLM providers
-│   ├── peko-core/         # Agent runtime, memory, skills, scheduler, cron
-│   ├── peko-hal/          # Kernel device wrappers (evdev, fb, modem, uinput)
-│   └── peko-tools-android/ # 13 tool implementations
+│   ├── peko-config/         # TOML config + env overrides
+│   ├── peko-transport/      # SSE parser, LLM providers (incl. UDS)
+│   ├── peko-core/           # Agent runtime, memory, skills, scheduler, brain router
+│   ├── peko-hal/            # Kernel device wrappers (evdev, fb, modem, uinput)
+│   ├── peko-tools-android/  # 13 tool implementations
+│   ├── peko-llm/            # (experimental) pure-Rust embedded LLM via candle
+│   └── peko-llm-daemon/     # C++ inference daemon — llama.cpp over UDS
+│       ├── src/             # main.cpp, http_server.cpp, llm_session.cpp, …
+│       ├── third_party/     # cpp-httplib, nlohmann/json (single-header)
+│       ├── CMakeLists.txt   # FetchContent llama.cpp, optional Vulkan
+│       ├── build-android.sh # NDK cross-compile script
+│       └── deploy-test.sh   # deploy + smoke-test over adb
 ├── src/
-│   ├── main.rs              # Binary entry point
+│   ├── main.rs              # Binary entry point (peko-agent)
 │   ├── web/                 # Web UI + REST API (axum)
 │   └── telegram/            # Telegram bot gateway
 ├── rom/                     # ROM integration (init.rc, SELinux, build files)
 ├── emulator/                # AVD setup + deploy scripts
 ├── scripts/                 # Deploy, boot test, SELinux tools
-├── config/                  # Example configuration
-└── docs/                    # Obsidian knowledge base (48 docs)
+├── config/                  # Example configuration (TCP + UDS variants)
+└── docs/                    # Architecture + implementation notes
 ```
 
 ## Stats
@@ -185,23 +200,52 @@ peko-agent/
 
 ## Configuration
 
-Edit `config.toml` or use the web UI Config tab:
+Edit `config.toml` or use the web UI Config tab.
+
+### Cloud-only (simplest)
 
 ```toml
-[agent]
-max_iterations = 50
-context_window = 200000
-data_dir = "/data/peko"
-
 [provider]
-priority = ["local"]
+priority = ["anthropic"]
+
+[provider.anthropic]
+# reads ANTHROPIC_API_KEY env var if api_key is empty
+model = "claude-sonnet-4-20250514"
+max_tokens = 4096
+```
+
+### Dual-brain (on-device llama.cpp + cloud escalation)
+
+Start the daemon first:
+```bash
+./peko-llm-daemon --model /data/local/tmp/peko/models/qwen3-0.6b-q4_k_m.gguf \
+    --socket "@peko-llm" --template qwen --context 2048 &
+```
+
+Then configure the agent:
+```toml
+[provider]
+brain    = "local:anthropic"        # route simple tasks to local, escalate to cloud
+priority = ["anthropic"]
 
 [provider.local]
-model = "mimo-v2-omni"
-base_url = "https://api.xiaomimimo.com/v1"
-api_key = "your-key"
-max_tokens = 4096
+model    = "qwen3"
+base_url = "unix://@peko-llm"        # abstract-namespace Unix Domain Socket
+max_tokens = 512
 
+[provider.anthropic]
+model      = "claude-sonnet-4-20250514"
+max_tokens = 4096
+```
+
+The `unix://` scheme routes through `UnixSocketProvider` which speaks HTTP/1.1 over the
+abstract UDS — no TCP, no ports, no SELinux pain. The C++ daemon implements the OpenAI
+Chat Completions protocol, so it's trivial to swap for any other OpenAI-compatible local
+server (Ollama, llama.cpp server, vLLM).
+
+### Telegram + scheduler
+
+```toml
 [telegram]
 bot_token = "123456:ABC..."
 allowed_users = [your_user_id]

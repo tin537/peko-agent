@@ -166,6 +166,59 @@ Tool calls are parsed from `<tool_call>` XML tags in the model output. Tool defi
 
 Connects to local inference server (vLLM, llama.cpp) via the same OpenAI-compatible API, but with custom prompt formatting.
 
+## UnixSocketProvider
+
+OpenAI-compatible, but speaks HTTP/1.1 over a **Unix Domain Socket** instead of TCP. Designed for on-device inference where the LLM runs in a sibling process — typically [[../../crates/peko-llm-daemon/README|peko-llm-daemon]] with llama.cpp.
+
+### Why UDS instead of localhost TCP?
+
+- No network stack overhead (~5-10 μs per message vs ~50-100 μs for TCP)
+- No port conflicts / TIME_WAIT / port allocation
+- File permissions or abstract namespace give automatic access control
+- SELinux-friendly on Android: `shell` user can't create AF_UNIX socket **files** in `/data/local/tmp/`, but **abstract namespace** sockets live in kernel space and bypass filesystem ACLs entirely.
+
+### Base URL scheme
+
+```toml
+[provider.local]
+base_url = "unix:///tmp/peko.sock"   # filesystem path
+# or
+base_url = "unix://@peko-llm"         # Linux abstract namespace (prefix '@' → \0 in kernel)
+```
+
+When `OpenAICompatProvider` / the brain builder sees a `unix://` prefix, it instantiates `UnixSocketProvider` instead of a TCP HTTP client.
+
+### Connection
+
+`UnixSocketProvider::connect()` uses libc directly to handle abstract namespace (`std::os::linux::net::SocketAddrExt` only exists under `target_os = "linux"`, not `"android"`):
+
+```rust
+// Abstract namespace: first byte of sun_path is NUL
+let fd = libc::socket(AF_UNIX, SOCK_STREAM, 0);
+let mut addr: sockaddr_un = zeroed();
+addr.sun_family = AF_UNIX;
+addr.sun_path[0] = 0;                 // the NUL prefix
+for (i, b) in name.bytes().enumerate() {
+    addr.sun_path[i+1] = b as _;
+}
+libc::connect(fd, &addr, addrlen);
+UnixStream::from_std(UnixStream::from_raw_fd(fd))
+```
+
+### Wire protocol
+
+Plain HTTP/1.1 POST to `/v1/chat/completions` with `Transfer-Encoding: chunked` response. Body is OpenAI-compatible Chat Completions format — identical to `OpenAICompatProvider` for TCP. Each chunk contains SSE `data: {...}\n\n` frames.
+
+Response parsing reuses the same `SseParser` + `OpenAICompatProvider::parse_openai_delta` helpers, so tool-call reconstruction and delta handling match the TCP path exactly.
+
+### Stream lifecycle gotcha
+
+The provider splits the stream into `(read_half, write_half)` but **keeps the write half alive** in the unfold state. Dropping it would send FIN, which cpp-httplib on the other side interprets as client disconnect and aborts the response mid-generation.
+
+### Related daemon
+
+See [[../../crates/peko-llm-daemon/README|peko-llm-daemon]] — the C++ process that serves the other end of the socket and runs llama.cpp inference.
+
 ## ProviderChain (Failover)
 
 ```rust

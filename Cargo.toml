@@ -6,6 +6,7 @@ members = [
     "crates/peko-core",
     "crates/peko-hal",
     "crates/peko-tools-android",
+    "crates/peko-llm",
     ".",
 ]
 
@@ -33,6 +34,7 @@ peko-transport = { path = "crates/peko-transport" }
 peko-core = { path = "crates/peko-core" }
 peko-hal = { path = "crates/peko-hal" }
 peko-tools-android = { path = "crates/peko-tools-android" }
+peko-llm = { path = "crates/peko-llm" }
 
 [package]
 name = "peko-agent"
@@ -45,6 +47,7 @@ peko-transport.workspace = true
 peko-core.workspace = true
 peko-hal.workspace = true
 peko-tools-android.workspace = true
+peko-llm.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

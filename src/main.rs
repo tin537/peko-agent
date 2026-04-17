@@ -9,7 +9,9 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use peko_config::PekoConfig;
-use peko_core::{ToolRegistry, MemoryStore, SkillStore, SystemPrompt, Scheduler, ScheduledTask, TelegramSender, UserModel, McpServerConfig, register_mcp_tools, TaskQueue};
+use peko_core::{ToolRegistry, MemoryStore, SkillStore, SystemPrompt, Scheduler, ScheduledTask, TelegramSender, UserModel, McpServerConfig, register_mcp_tools, TaskQueue, DualBrain};
+use peko_core::runtime::build_dual_brain;
+use peko_llm::{EmbeddedProvider, LlmEngineConfig};
 use peko_hal::{FramebufferDevice, InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
     CallTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool, ScreenshotTool,
@@ -181,6 +183,43 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let config_json = serde_json::to_value(&config)?;
+
+    // Dual-brain: build if configured
+    // Supports "embedded:cloud" (in-process GGUF) or "local:cloud" (HTTP provider)
+    let brain: Option<Arc<DualBrain>> = {
+        let brain_str = config_json["provider"]["brain"].as_str().unwrap_or("");
+        if brain_str.starts_with("embedded:") {
+            // Embedded local brain — load GGUF model into process
+            let cloud_name = brain_str.strip_prefix("embedded:").unwrap_or("anthropic");
+            match build_embedded_brain(&config_json, cloud_name) {
+                Ok(b) => {
+                    info!(
+                        local = b.local_model_name(),
+                        cloud = b.cloud_model_name(),
+                        "dual-brain EMBEDDED: GGUF model loaded in-process"
+                    );
+                    Some(Arc::new(b))
+                }
+                Err(e) => {
+                    warn!(error = %e, "embedded brain failed to load, falling back to single provider");
+                    None
+                }
+            }
+        } else if !brain_str.is_empty() {
+            // HTTP-based local brain (e.g. "local:anthropic")
+            build_dual_brain(&config_json).map(|b| {
+                info!(
+                    local = b.local_model_name(),
+                    cloud = b.cloud_model_name(),
+                    "dual-brain enabled: local for simple/skill tasks, cloud for complex"
+                );
+                Arc::new(b)
+            })
+        } else {
+            None
+        }
+    };
+
     let config_arc = Arc::new(Mutex::new(config_json));
     let soul_arc = Arc::new(Mutex::new(system_prompt.soul_text().to_string()));
 
@@ -196,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
         soul_arc.clone(),
         user_model.clone(),
         user_model_path.clone(),
+        brain.clone(),
         32, // max queue size
     );
 
@@ -210,6 +250,7 @@ async fn main() -> anyhow::Result<()> {
         user_model: user_model.clone(),
         user_model_path: user_model_path.clone(),
         task_queue: task_queue.clone(),
+        brain: brain.clone(),
         scheduler_tasks: None,
     };
 
@@ -275,4 +316,99 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Build a DualBrain with an embedded GGUF model as the local brain.
+fn build_embedded_brain(config: &serde_json::Value, cloud_name: &str) -> anyhow::Result<DualBrain> {
+    use peko_transport::{AnthropicProvider, OpenAICompatProvider};
+
+    let entry = &config["provider"]["embedded"];
+    let model_path = entry["model"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("provider.embedded.model (GGUF path) is required"))?;
+
+    let engine_config = LlmEngineConfig {
+        model_path: PathBuf::from(model_path),
+        tokenizer_path: entry["tokenizer"].as_str().map(PathBuf::from),
+        hf_model_id: entry["hf_model_id"].as_str().map(String::from),
+        context_size: entry["context_window"].as_u64().unwrap_or(2048) as u32,
+        temperature: entry["temperature"].as_f64().unwrap_or(0.7) as f32,
+        top_p: entry["top_p"].as_f64().unwrap_or(0.9) as f32,
+        repeat_penalty: entry["repeat_penalty"].as_f64().unwrap_or(1.1) as f32,
+        max_tokens: entry["max_tokens"].as_u64().unwrap_or(1024) as u32,
+        model_name: PathBuf::from(model_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("embedded")
+            .to_string(),
+        threads: entry["threads"].as_u64().unwrap_or(4) as u32,
+    };
+
+    info!(
+        model = %engine_config.model_name,
+        path = model_path,
+        ctx = engine_config.context_size,
+        "loading embedded GGUF model..."
+    );
+
+    let engine = peko_llm::load_gguf(engine_config)?;
+    let engine = Arc::new(tokio::sync::Mutex::new(engine));
+
+    let build_embedded = || -> Box<dyn peko_transport::LlmProvider> {
+        Box::new(
+            EmbeddedProvider::new(engine.clone())
+                .with_model_name(
+                    entry["model"].as_str().unwrap_or("embedded").to_string()
+                )
+                .with_max_context(entry["context_window"].as_u64().unwrap_or(2048) as usize),
+        )
+    };
+
+    let local = build_embedded();
+
+    // Try to build cloud provider — fall back to local if not configured
+    let cloud_entry = &config["provider"][cloud_name];
+    let cloud: Box<dyn peko_transport::LlmProvider> = if cloud_entry.is_null() {
+        warn!(cloud = %cloud_name, "cloud brain not configured — using embedded for both brains (no escalation)");
+        build_embedded()
+    } else {
+        let api_key = cloud_entry["api_key"].as_str().unwrap_or("").to_string();
+        let model = cloud_entry["model"].as_str().unwrap_or("").to_string();
+        let base_url = cloud_entry["base_url"].as_str().unwrap_or("").to_string();
+        let max_tokens = cloud_entry["max_tokens"].as_u64().unwrap_or(4096) as usize;
+
+        match cloud_name {
+            "anthropic" => {
+                let key = if api_key.is_empty() {
+                    std::env::var("ANTHROPIC_API_KEY").unwrap_or_default()
+                } else { api_key };
+                if key.is_empty() {
+                    warn!("anthropic API key not set — using embedded for both brains (no escalation)");
+                    build_embedded()
+                } else {
+                    Box::new(AnthropicProvider::new(
+                        key, model, max_tokens,
+                        if base_url.is_empty() { None } else { Some(base_url) },
+                    ))
+                }
+            }
+            "openrouter" => {
+                let key = if api_key.is_empty() {
+                    std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
+                } else { api_key };
+                if key.is_empty() {
+                    warn!("openrouter API key not set — using embedded for both brains");
+                    build_embedded()
+                } else {
+                    let url = if base_url.is_empty() { "https://openrouter.ai/api/v1".to_string() } else { base_url };
+                    Box::new(OpenAICompatProvider::new(key, model, url, max_tokens))
+                }
+            }
+            _ => {
+                let url = if base_url.is_empty() { "http://localhost:11434/v1".to_string() } else { base_url };
+                Box::new(OpenAICompatProvider::new(api_key, model, url, max_tokens))
+            }
+        }
+    };
+
+    Ok(DualBrain::new(local, cloud))
 }

@@ -1,0 +1,42 @@
+[agent]
+max_iterations = 20
+context_window = 32768
+history_share = 0.7
+data_dir = "/data/local/tmp/peko"
+log_level = "info"
+
+[provider]
+# Dual-brain: local = peko-llm-daemon over UDS, cloud = Anthropic for escalation.
+brain    = "local:anthropic"
+priority = ["anthropic"]
+
+# Local brain — connects to peko-llm-daemon over Unix Domain Socket (abstract namespace).
+# The daemon must be running and bound to @peko-llm:
+#   ./peko-llm-daemon --model <path> --socket @peko-llm &
+[provider.local]
+model    = "embedded"
+base_url = "unix://@peko-llm"
+max_tokens = 512
+
+# Cloud brain — escalation target (requires ANTHROPIC_API_KEY env var).
+[provider.anthropic]
+model      = "claude-sonnet-4-20250514"
+max_tokens = 4096
+
+[tools]
+screenshot      = true
+touch           = true
+key_event       = true
+text_input      = true
+ui_inspect      = true
+shell           = true
+filesystem      = true
+package_manager = true
+memory          = true
+skills          = true
+
+[tools.filesystem_config]
+allowed_paths = ["/data/local/tmp/peko", "/sdcard"]
+
+[tools.shell_config]
+timeout_seconds = 30

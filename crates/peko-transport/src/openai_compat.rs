@@ -33,7 +33,7 @@ impl OpenAICompatProvider {
 
     /// Convert a neutral TransportMessage to OpenAI wire format.
     /// Handles: assistant tool_calls, role:tool results, vision images.
-    fn to_openai_message(msg: &Message) -> serde_json::Value {
+    pub(crate) fn to_openai_message(msg: &Message) -> serde_json::Value {
         use crate::provider::{MessageContent, ContentBlock};
 
         match (&msg.role as &str, &msg.content) {
@@ -133,7 +133,7 @@ impl OpenAICompatProvider {
         }
     }
 
-    fn parse_openai_delta(
+    pub(crate) fn parse_openai_delta(
         data: &serde_json::Value,
         tool_buffers: &mut HashMap<usize, (String, String, String)>,
     ) -> Vec<StreamEvent> {

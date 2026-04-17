@@ -1,0 +1,34 @@
+[agent]
+max_iterations = 20
+context_window = 32768
+history_share = 0.7
+data_dir = "./data-mac"
+log_level = "info"
+
+[provider]
+brain = "embedded:anthropic"
+priority = ["anthropic"]
+
+[provider.embedded]
+model = "./models/qwen3-1.7b-q4_k_m.gguf"
+tokenizer = "./models/tokenizer.json"
+context_window = 2048
+temperature = 0.7
+top_p = 0.9
+repeat_penalty = 1.1
+max_tokens = 256
+threads = 8
+
+[provider.anthropic]
+model = "claude-sonnet-4-20250514"
+max_tokens = 4096
+
+[tools]
+shell = true
+filesystem = true
+
+[tools.filesystem_config]
+allowed_paths = ["./data-mac", "/tmp"]
+
+[tools.shell_config]
+timeout_seconds = 30

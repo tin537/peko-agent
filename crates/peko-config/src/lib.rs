@@ -82,8 +82,15 @@ pub struct ProviderConfig {
     pub anthropic: Option<ProviderEntry>,
     pub openrouter: Option<ProviderEntry>,
     pub local: Option<ProviderEntry>,
+    /// Embedded local brain — GGUF model loaded in-process via candle
+    pub embedded: Option<EmbeddedProviderEntry>,
     #[serde(default = "default_priority")]
     pub priority: Vec<String>,
+    /// Dual-brain config: "local_name:cloud_name" (e.g. "embedded:anthropic").
+    /// When set, the agent routes simple/skill-based tasks to the local brain
+    /// and complex tasks to the cloud brain. The local brain can escalate.
+    #[serde(default)]
+    pub brain: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +102,37 @@ pub struct ProviderEntry {
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmbeddedProviderEntry {
+    /// Path to GGUF model file
+    pub model: String,
+    /// Path to tokenizer.json (optional — will look next to model file)
+    #[serde(default)]
+    pub tokenizer: Option<String>,
+    /// HuggingFace model ID for auto-downloading tokenizer
+    #[serde(default)]
+    pub hf_model_id: Option<String>,
+    #[serde(default = "default_embedded_ctx")]
+    pub context_window: u32,
+    #[serde(default = "default_embedded_temp")]
+    pub temperature: f32,
+    #[serde(default = "default_embedded_top_p")]
+    pub top_p: f32,
+    #[serde(default = "default_embedded_repeat_penalty")]
+    pub repeat_penalty: f32,
+    #[serde(default = "default_embedded_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_embedded_threads")]
+    pub threads: u32,
+}
+
+fn default_embedded_ctx() -> u32 { 2048 }
+fn default_embedded_temp() -> f32 { 0.7 }
+fn default_embedded_top_p() -> f32 { 0.9 }
+fn default_embedded_repeat_penalty() -> f32 { 1.1 }
+fn default_embedded_max_tokens() -> u32 { 512 }
+fn default_embedded_threads() -> u32 { 4 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolsConfig {

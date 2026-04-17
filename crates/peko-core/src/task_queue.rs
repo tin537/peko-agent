@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, oneshot};
 use tracing::{info, warn, error};
 
+use crate::brain::DualBrain;
 use crate::runtime::{AgentRuntime, AgentResponse, StreamCallback};
 use crate::message::Message;
 use crate::session::SessionStore;
@@ -71,6 +72,7 @@ impl TaskQueue {
         soul: Arc<Mutex<String>>,
         user_model: Arc<Mutex<UserModel>>,
         user_model_path: std::path::PathBuf,
+        brain: Option<Arc<DualBrain>>,
         max_queue_size: usize,
     ) -> Self {
         let (submit_tx, submit_rx) = mpsc::channel::<TaskRequest>(max_queue_size);
@@ -97,6 +99,7 @@ impl TaskQueue {
             soul,
             user_model,
             user_model_path,
+            brain,
         ));
 
         info!("task queue started (max queue: {})", max_queue_size);
@@ -158,6 +161,7 @@ impl TaskQueue {
         soul: Arc<Mutex<String>>,
         user_model: Arc<Mutex<UserModel>>,
         user_model_path: std::path::PathBuf,
+        brain: Option<Arc<DualBrain>>,
     ) {
         info!("task queue executor started");
 
@@ -188,6 +192,7 @@ impl TaskQueue {
                 soul.clone(),
                 user_model.clone(),
                 user_model_path.clone(),
+                brain.clone(),
             ).await;
 
             // Send result
@@ -216,6 +221,7 @@ impl TaskQueue {
         soul: Arc<Mutex<String>>,
         user_model: Arc<Mutex<UserModel>>,
         user_model_path: std::path::PathBuf,
+        brain: Option<Arc<DualBrain>>,
     ) -> Result<AgentResponse, String> {
         let config_val = config.lock().await.clone();
 
@@ -243,6 +249,10 @@ impl TaskQueue {
             .with_memory(memory)
             .with_skills(skills)
             .with_user_model(user_model, user_model_path);
+
+        if let Some(b) = brain {
+            runtime = runtime.with_brain(b);
+        }
 
         // Load or create session + conversation
         let (session_id, mut conversation) = if let Some(ref sid) = task.session_id {

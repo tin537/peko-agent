@@ -30,6 +30,7 @@ pub struct AppState {
     pub user_model: Arc<Mutex<peko_core::UserModel>>,
     pub user_model_path: std::path::PathBuf,
     pub task_queue: peko_core::TaskQueue,
+    pub brain: Option<Arc<peko_core::DualBrain>>,
     pub scheduler_tasks: Option<Arc<Mutex<Vec<peko_core::ScheduledTask>>>>,
 }
 

@@ -5,6 +5,7 @@ use tracing::{info, warn, error};
 use peko_config::AgentConfig;
 use peko_transport::{LlmProvider, StreamEvent, StopReason};
 
+use crate::brain::{DualBrain, BrainChoice, ESCALATE_TOOL_NAME, escalate_tool_schema, build_escalation_context};
 use crate::budget::IterationBudget;
 use crate::compressor::ContextCompressor;
 use crate::memory::MemoryStore;
@@ -32,6 +33,10 @@ pub struct AgentRuntime {
     user_model: Option<Arc<tokio::sync::Mutex<UserModel>>>,
     user_model_path: Option<std::path::PathBuf>,
     nudge_interval: usize,
+    /// Dual-brain: if set, enables local/cloud routing with escalation.
+    brain: Option<Arc<DualBrain>>,
+    /// Which brain is currently active for this task.
+    active_brain: Option<BrainChoice>,
 }
 
 #[derive(Debug)]
@@ -70,6 +75,8 @@ impl AgentRuntime {
             user_model: None,
             user_model_path: None,
             nudge_interval: 5,
+            brain: None,
+            active_brain: None,
         }
     }
 
@@ -99,11 +106,35 @@ impl AgentRuntime {
         self
     }
 
+    pub fn with_brain(mut self, brain: Arc<DualBrain>) -> Self {
+        self.brain = Some(brain);
+        self
+    }
+
     pub fn budget_handle(&self) -> IterationBudget {
         self.budget.clone()
     }
 
     pub async fn run_task(&mut self, user_input: &str) -> anyhow::Result<AgentResponse> {
+        // Dual-brain classification
+        let brain_choice = if let Some(ref brain) = self.brain {
+            let skills_guard = match &self.skills {
+                Some(s) => s.try_lock().ok(),
+                None => None,
+            };
+            let choice = brain.classify(user_input, skills_guard.as_deref());
+            self.active_brain = Some(choice.clone());
+            info!(
+                brain = %choice,
+                local_model = brain.local_model_name(),
+                cloud_model = brain.cloud_model_name(),
+                "dual-brain task classification"
+            );
+            Some(choice)
+        } else {
+            None
+        };
+
         self.budget.reset();
 
         let session_id = self.session.create_session(user_input)?;
@@ -192,11 +223,24 @@ impl AgentRuntime {
                 .flat_map(|m| m.to_transport_messages())
                 .collect();
 
-            let tool_schemas = self.tools.schemas();
+            let mut tool_schemas = self.tools.schemas();
+
+            // If using local brain, inject the escalate tool
+            let using_local = matches!(&self.active_brain, Some(BrainChoice::Local));
+            if using_local {
+                tool_schemas.push(escalate_tool_schema());
+            }
+
+            // Select provider: brain-routed or default
+            let active_provider: &dyn LlmProvider = match (&self.brain, &self.active_brain) {
+                (Some(brain), Some(choice)) => brain.provider(choice),
+                _ => self.provider.as_ref(),
+            };
 
             // Stream completion
-            info!(iteration = total_iterations + 1, "calling LLM");
-            let mut stream = self.provider.stream_completion(
+            let brain_label = self.active_brain.as_ref().map(|b| b.to_string()).unwrap_or_else(|| "default".to_string());
+            info!(iteration = total_iterations + 1, brain = %brain_label, model = active_provider.model_name(), "calling LLM");
+            let mut stream = active_provider.stream_completion(
                 &system_prompt_text,
                 &transport_messages,
                 &tool_schemas,
@@ -290,7 +334,36 @@ impl AgentRuntime {
             }
 
             // Execute each tool call
+            let mut escalated = false;
             for tc in &tool_calls {
+                // Intercept escalate tool — switch to cloud brain
+                if tc.name == ESCALATE_TOOL_NAME {
+                    if let Some(ref brain) = self.brain {
+                        let reason = tc.input["reason"].as_str().unwrap_or("local model requested escalation");
+                        let analysis = tc.input["analysis"].as_str();
+                        let local_model = brain.local_model_name().to_string();
+
+                        info!(
+                            reason = reason,
+                            local_model = %local_model,
+                            cloud_model = brain.cloud_model_name(),
+                            "ESCALATING to cloud brain"
+                        );
+
+                        // Build escalation context and restart conversation with cloud
+                        let esc_context = build_escalation_context(
+                            user_input, reason, analysis, &local_model,
+                        );
+                        conversation.clear();
+                        conversation.push(Message::user(esc_context));
+                        self.active_brain = Some(BrainChoice::Cloud);
+                        self.budget.reset();
+                        total_iterations = 0;
+                        escalated = true;
+                        break;
+                    }
+                }
+
                 info!(tool = %tc.name, id = %tc.id, "executing tool");
 
                 let result = match self.tools.execute(&tc.name, tc.input.clone()).await {
@@ -320,6 +393,10 @@ impl AgentRuntime {
 
                 conversation.push(tool_msg.clone());
                 self.session.append_message(&session_id, &tool_msg)?;
+            }
+
+            if escalated {
+                continue; // restart loop with cloud provider
             }
 
             total_iterations += 1;
@@ -366,6 +443,22 @@ impl AgentRuntime {
         user_input: &str,
         tx: tokio::sync::mpsc::Sender<StreamCallback>,
     ) -> anyhow::Result<AgentResponse> {
+        // Dual-brain classification (same as run_task)
+        if let Some(ref brain) = self.brain {
+            let skills_guard = match &self.skills {
+                Some(s) => s.try_lock().ok(),
+                None => None,
+            };
+            let choice = brain.classify(user_input, skills_guard.as_deref());
+            self.active_brain = Some(choice.clone());
+            info!(
+                brain = %choice,
+                local_model = brain.local_model_name(),
+                cloud_model = brain.cloud_model_name(),
+                "run_turn: dual-brain classification"
+            );
+        }
+
         self.budget.reset();
 
         // Append user message
@@ -383,7 +476,13 @@ impl AgentRuntime {
 
             self.compressor.check_and_compress(conversation);
 
+            let using_local_embedded = matches!(&self.active_brain, Some(BrainChoice::Local));
             let mut system_prompt_text = self.system_prompt.build(&self.tools);
+
+            // For Qwen3 local brain, disable thinking mode to save tokens
+            if using_local_embedded {
+                system_prompt_text.push_str("\n\n/no_think");
+            }
 
             // Inject memories
             if total_iterations == 0 {
@@ -430,11 +529,24 @@ impl AgentRuntime {
                 .flat_map(|m| m.to_transport_messages())
                 .collect();
 
-            let tool_schemas = self.tools.schemas();
+            let mut tool_schemas = self.tools.schemas();
 
-            info!(iteration = total_iterations + 1, messages = transport_messages.len(), "run_turn: calling LLM");
+            // If using local brain, inject the escalate tool so the local model can hand off to cloud
+            let using_local = matches!(&self.active_brain, Some(BrainChoice::Local));
+            if using_local {
+                tool_schemas.push(escalate_tool_schema());
+            }
 
-            let mut stream = match self.provider.stream_completion(
+            // Select provider: brain-routed or default
+            let active_provider: &dyn LlmProvider = match (&self.brain, &self.active_brain) {
+                (Some(brain), Some(choice)) => brain.provider(choice),
+                _ => self.provider.as_ref(),
+            };
+
+            let brain_label = self.active_brain.as_ref().map(|b| b.to_string()).unwrap_or_else(|| "default".to_string());
+            info!(iteration = total_iterations + 1, messages = transport_messages.len(), brain = %brain_label, model = active_provider.model_name(), "run_turn: calling LLM");
+
+            let mut stream = match active_provider.stream_completion(
                 &system_prompt_text,
                 &transport_messages,
                 &tool_schemas,
@@ -681,7 +793,10 @@ pub fn build_provider_helper(config: &serde_json::Value) -> anyhow::Result<Box<d
     }
 
     if providers.is_empty() {
-        anyhow::bail!("no LLM providers configured");
+        // No HTTP providers configured — return a null provider that errors if called.
+        // Useful when the agent uses an embedded LLM (via DualBrain) and no cloud key is set.
+        warn!("no HTTP LLM providers configured — using null fallback (embedded brain required)");
+        return Ok(Box::new(NullProvider));
     }
 
     if providers.len() == 1 {
@@ -689,4 +804,125 @@ pub fn build_provider_helper(config: &serde_json::Value) -> anyhow::Result<Box<d
     } else {
         Ok(Box::new(ProviderChain::new(providers)))
     }
+}
+
+/// Null provider that always errors. Used as a placeholder when the agent
+/// relies entirely on an embedded/dual-brain setup and no cloud API is configured.
+struct NullProvider;
+
+#[async_trait::async_trait]
+impl LlmProvider for NullProvider {
+    async fn stream_completion(
+        &self,
+        _system_prompt: &str,
+        _messages: &[peko_transport::provider::Message],
+        _tools: &[serde_json::Value],
+    ) -> anyhow::Result<futures::stream::BoxStream<'static, anyhow::Result<StreamEvent>>> {
+        anyhow::bail!("no LLM provider available — embedded brain may have failed to load")
+    }
+
+    fn model_name(&self) -> &str {
+        "null-provider"
+    }
+
+    fn max_context_tokens(&self) -> usize {
+        0
+    }
+}
+
+/// Build a DualBrain from config. The `brain` field should be "local_name:cloud_name"
+/// e.g. "local:anthropic" or "local:openrouter".
+/// Returns None if brain config is not set or invalid.
+pub fn build_dual_brain(config: &serde_json::Value) -> Option<DualBrain> {
+    let brain_str = config["provider"]["brain"].as_str()?;
+    let parts: Vec<&str> = brain_str.split(':').collect();
+    if parts.len() != 2 {
+        warn!(brain = brain_str, "invalid brain config, expected 'local:cloud'");
+        return None;
+    }
+
+    let local_name = parts[0].trim();
+    let cloud_name = parts[1].trim();
+
+    fn build_single(config: &serde_json::Value, name: &str) -> Option<Box<dyn LlmProvider>> {
+        use peko_transport::{AnthropicProvider, OpenAICompatProvider, UnixSocketProvider};
+
+        let entry = &config["provider"][name];
+        if entry.is_null() { return None; }
+
+        let api_key = entry["api_key"].as_str().unwrap_or("").to_string();
+        let model = entry["model"].as_str().unwrap_or("").to_string();
+        let base_url = entry["base_url"].as_str().unwrap_or("").to_string();
+        let max_tokens = entry["max_tokens"].as_u64().unwrap_or(4096) as usize;
+
+        if model.is_empty() { return None; }
+
+        // `unix://` scheme routes to the local peko-llm-daemon over a UDS.
+        // Examples:
+        //   unix:///data/local/tmp/peko/llm.sock    — filesystem
+        //   unix://@peko-llm                        — Linux abstract namespace
+        if let Some(rest) = base_url.strip_prefix("unix://") {
+            let path = rest.to_string();
+            info!(name = %name, socket = %path, "building UnixSocketProvider for local daemon");
+            return Some(Box::new(UnixSocketProvider::new(path, model, max_tokens)));
+        }
+
+        match name {
+            "anthropic" => {
+                let key = if api_key.is_empty() {
+                    std::env::var("ANTHROPIC_API_KEY").unwrap_or_default()
+                } else { api_key };
+                if key.is_empty() { return None; }
+                Some(Box::new(AnthropicProvider::new(
+                    key, model, max_tokens,
+                    if base_url.is_empty() { None } else { Some(base_url) },
+                )))
+            }
+            "openrouter" => {
+                let key = if api_key.is_empty() {
+                    std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
+                } else { api_key };
+                if key.is_empty() { return None; }
+                let url = if base_url.is_empty() { "https://openrouter.ai/api/v1".to_string() } else { base_url };
+                Some(Box::new(OpenAICompatProvider::new(key, model, url, max_tokens)))
+            }
+            _ => {
+                let url = if base_url.is_empty() { "http://localhost:11434/v1".to_string() } else { base_url };
+                Some(Box::new(OpenAICompatProvider::new(api_key, model, url, max_tokens)))
+            }
+        }
+    }
+
+    let local = match build_single(config, local_name) {
+        Some(p) => p,
+        None => {
+            warn!(name = local_name, "failed to build local brain provider");
+            return None;
+        }
+    };
+    let cloud = match build_single(config, cloud_name) {
+        Some(p) => p,
+        None => {
+            warn!(
+                name = cloud_name,
+                "cloud brain unavailable — using local for both brains (escalation disabled)"
+            );
+            // Rebuild local so both sides have their own provider instance
+            match build_single(config, local_name) {
+                Some(fallback) => fallback,
+                None => {
+                    warn!("local fallback also failed, aborting dual-brain");
+                    return None;
+                }
+            }
+        }
+    };
+
+    info!(
+        local = local.model_name(),
+        cloud = cloud.model_name(),
+        "dual-brain initialized"
+    );
+
+    Some(DualBrain::new(local, cloud))
 }

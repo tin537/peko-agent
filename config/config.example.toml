@@ -8,6 +8,13 @@ log_level = "info"
 [provider]
 priority = ["anthropic"]
 
+# Optional dual-brain routing. When set, `peko-agent` classifies each task:
+#   - simple / has matching skill  → local brain (fast, on-device, cheap)
+#   - complex / novel              → cloud brain (slow, smart, costs $)
+# The local brain can also call an `escalate` tool to hand off mid-task.
+# Format: "<local_name>:<cloud_name>"  e.g. "local:anthropic"
+# brain = "local:anthropic"
+
 [provider.anthropic]
 # api_key = "sk-ant-..."    # Or set ANTHROPIC_API_KEY env var
 model = "claude-sonnet-4-20250514"
@@ -15,14 +22,28 @@ max_tokens = 8192
 
 # [provider.openrouter]
 # api_key = "sk-or-..."     # Or set OPENROUTER_API_KEY env var
-# model = "ftmstars/peko-3-llama-3.1-405b"
+# model = "anthropic/claude-3.5-sonnet"
 # base_url = "https://openrouter.ai/api/v1"
 # max_tokens = 4096
 
+# ── Local brain options ──
+
+# (A) Another OpenAI-compatible server over HTTP (Ollama, vLLM, llama.cpp server)
 # [provider.local]
-# model = "peko-3-8b"
-# base_url = "http://localhost:8080/v1"
-# max_tokens = 4096
+# model    = "qwen2.5:1.5b"
+# base_url = "http://127.0.0.1:11434/v1"
+# max_tokens = 512
+
+# (B) On-device peko-llm-daemon over a Unix Domain Socket (recommended on Android)
+# Launch the daemon first:
+#   peko-llm-daemon --model qwen3-0.6b-q4_k_m.gguf --socket "@peko-llm" --template qwen &
+# [provider.local]
+# model    = "qwen3"
+# base_url = "unix://@peko-llm"     # abstract namespace — SELinux-safe on Android
+# max_tokens = 512
+#
+# For filesystem UDS (works on host, fails on Android stock SELinux):
+# base_url = "unix:///tmp/peko-llm.sock"
 
 [tools]
 screenshot = true

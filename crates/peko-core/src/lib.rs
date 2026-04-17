@@ -13,6 +13,7 @@ pub mod scheduler;
 pub mod user_model;
 pub mod mcp;
 pub mod task_queue;
+pub mod brain;
 
 pub use message::{Message, ToolCall};
 pub use tool::{Tool, ToolRegistry, ToolResult};
@@ -30,6 +31,7 @@ pub use runtime::build_provider_helper;
 pub use user_model::UserModel;
 pub use mcp::{McpClient, McpServerConfig, register_mcp_tools};
 pub use task_queue::{TaskQueue, TaskRequest, TaskSource, QueueStatus};
+pub use brain::{DualBrain, BrainChoice};
 
 #[cfg(test)]
 mod runtime_tests;
