@@ -64,11 +64,11 @@ tailwind.config = {
           <span class="text-zinc-100">Peko</span><span class="text-zinc-500 font-normal ml-0.5">Agent</span>
         </h1>
       </div>
-      <div class="hidden sm:flex items-center gap-2 ml-1">
-        <div class="h-4 w-px bg-zinc-800"></div>
-        <span id="modelInfo" class="inline-flex items-center px-2 py-0.5 bg-zinc-800 rounded-md text-[11px] font-mono text-zinc-400 truncate max-w-[200px]">...</span>
-        <!-- Brain mode badge: hidden until /api/brain confirms a brain is configured -->
-        <span id="brainBadge" class="hidden inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide" title="Brain routing mode">
+      <div class="flex items-center gap-2 ml-1">
+        <div class="hidden sm:block h-4 w-px bg-zinc-800"></div>
+        <span id="modelInfo" class="hidden sm:inline-flex items-center px-2 py-0.5 bg-zinc-800 rounded-md text-[11px] font-mono text-zinc-400 truncate max-w-[200px]">...</span>
+        <!-- Brain mode badge — visible on all screen sizes when a brain is configured -->
+        <span id="brainBadge" class="hidden items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide" title="Brain routing mode">
           <svg class="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2a7 7 0 00-7 7c0 2.38 1.19 4.47 3 5.74V17a1 1 0 001 1h6a1 1 0 001-1v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 00-7-7zM9 21a1 1 0 001 1h4a1 1 0 001-1v-1H9v1z"/></svg>
           <span id="brainBadgeText">…</span>
         </span>
@@ -76,7 +76,8 @@ tailwind.config = {
     </div>
     <div class="flex items-center gap-3">
       <span id="memInfo" class="hidden sm:inline text-[11px] text-zinc-500 font-mono"></span>
-      <nav class="flex bg-zinc-800/60 rounded-lg p-0.5 border border-zinc-700/40" role="tablist">
+      <!-- Desktop tab bar (hidden on mobile; mobile gets a bottom nav instead) -->
+      <nav class="hidden md:flex bg-zinc-800/60 rounded-lg p-0.5 border border-zinc-700/40" role="tablist">
         <button id="tabChat" onclick="showTab('chat')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 bg-violet-600 text-white shadow-sm">Chat</button>
         <button id="tabMonitor" onclick="showTab('monitor')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Monitor</button>
         <button id="tabApps" onclick="showTab('apps')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Apps</button>
@@ -122,12 +123,39 @@ tailwind.config = {
         <!-- Messages -->
         <div id="msgs" class="flex-1 overflow-y-auto">
           <!-- Empty state -->
-          <div id="emptyChat" class="flex flex-col items-center justify-center h-full px-8 text-center select-none">
+          <div id="emptyChat" class="flex flex-col items-center justify-center h-full px-6 text-center select-none">
             <div class="w-14 h-14 rounded-2xl bg-violet-600/10 border border-violet-500/20 flex items-center justify-center mb-5">
               <svg class="w-7 h-7 text-violet-400" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 1.5H8.25A2.25 2.25 0 006 3.75v16.5a2.25 2.25 0 002.25 2.25h7.5A2.25 2.25 0 0018 20.25V3.75a2.25 2.25 0 00-2.25-2.25H13.5m-3 0V3h3V1.5m-3 0h3m-3 18.75h3"/></svg>
             </div>
-            <h2 class="text-lg font-semibold text-zinc-200 mb-1.5">Peko Agent</h2>
-            <p class="text-sm text-zinc-500 max-w-sm leading-relaxed">Send a task to control the Android device. The agent will see the screen, tap, type, and navigate to complete your request.</p>
+            <h2 class="text-lg font-semibold text-zinc-200 mb-1.5">Hi, I'm Peko 👋</h2>
+            <p class="text-sm text-zinc-500 max-w-sm leading-relaxed mb-6">I can see your screen, tap, type, send messages, and manage apps — just tell me what to do.</p>
+
+            <!-- Quick-action suggestions (tap to send) -->
+            <div class="w-full max-w-md">
+              <p class="text-[10px] uppercase tracking-widest text-zinc-600 font-bold mb-2.5">Try one</p>
+              <div class="grid grid-cols-2 gap-2">
+                <button onclick="sendSuggested(this)" data-task="Take a screenshot and describe what's on the screen"
+                  class="group flex items-start gap-2.5 text-left bg-zinc-900 hover:bg-zinc-800/80 border border-zinc-800 hover:border-violet-500/40 rounded-xl p-3 transition-all">
+                  <span class="text-lg">📸</span>
+                  <span class="text-xs text-zinc-300 leading-snug">What's on my screen?</span>
+                </button>
+                <button onclick="sendSuggested(this)" data-task="List all the apps installed on this device"
+                  class="group flex items-start gap-2.5 text-left bg-zinc-900 hover:bg-zinc-800/80 border border-zinc-800 hover:border-violet-500/40 rounded-xl p-3 transition-all">
+                  <span class="text-lg">📱</span>
+                  <span class="text-xs text-zinc-300 leading-snug">List my apps</span>
+                </button>
+                <button onclick="sendSuggested(this)" data-task="Open the Settings app"
+                  class="group flex items-start gap-2.5 text-left bg-zinc-900 hover:bg-zinc-800/80 border border-zinc-800 hover:border-violet-500/40 rounded-xl p-3 transition-all">
+                  <span class="text-lg">⚙️</span>
+                  <span class="text-xs text-zinc-300 leading-snug">Open settings</span>
+                </button>
+                <button onclick="sendSuggested(this)" data-task="Check battery level and remaining time"
+                  class="group flex items-start gap-2.5 text-left bg-zinc-900 hover:bg-zinc-800/80 border border-zinc-800 hover:border-violet-500/40 rounded-xl p-3 transition-all">
+                  <span class="text-lg">🔋</span>
+                  <span class="text-xs text-zinc-300 leading-snug">Check battery</span>
+                </button>
+              </div>
+            </div>
           </div>
           <!-- Messages list -->
           <div id="msgsList" class="hidden px-4 py-6 space-y-4 max-w-4xl mx-auto w-full"></div>
@@ -153,7 +181,7 @@ tailwind.config = {
                 Stop
               </button>
             </div>
-            <p class="text-[10px] text-zinc-600 mt-1.5 ml-1">Press Enter to send &middot; Shift+Enter for new line</p>
+            <p class="hidden sm:block text-[10px] text-zinc-600 mt-1.5 ml-1">Press Enter to send &middot; Shift+Enter for new line</p>
           </div>
         </div>
       </div>
@@ -448,6 +476,35 @@ tailwind.config = {
     </main>
   </div>
 
+  <!-- Mobile bottom tab bar (hidden on md+) — thumb-reach navigation -->
+  <nav id="mobileNav" class="md:hidden bg-zinc-900/95 backdrop-blur-md border-t border-zinc-800/80 flex items-center justify-around px-1 py-1 shrink-0">
+    <button onclick="showTab('chat')" data-mtab="chat"
+      class="mtab flex flex-col items-center gap-0.5 flex-1 py-1.5 rounded-lg transition-colors text-violet-400">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 12h8M8 8h8M8 16h5M4 4h16v12H5.5l-1.5 3V4z"/></svg>
+      <span class="text-[9px] font-semibold">Chat</span>
+    </button>
+    <button onclick="showTab('monitor')" data-mtab="monitor"
+      class="mtab flex flex-col items-center gap-0.5 flex-1 py-1.5 rounded-lg transition-colors text-zinc-500">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 19V6l12-3v13M9 19a3 3 0 11-6 0 3 3 0 016 0zm12-3a3 3 0 11-6 0 3 3 0 016 0z M9 10l12-3"/></svg>
+      <span class="text-[9px] font-semibold">Monitor</span>
+    </button>
+    <button onclick="showTab('apps')" data-mtab="apps"
+      class="mtab flex flex-col items-center gap-0.5 flex-1 py-1.5 rounded-lg transition-colors text-zinc-500">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h4v4H4V6zm6 0h4v4h-4V6zm6 0h4v4h-4V6zM4 14h4v4H4v-4zm6 0h4v4h-4v-4zm6 0h4v4h-4v-4z"/></svg>
+      <span class="text-[9px] font-semibold">Apps</span>
+    </button>
+    <button onclick="showTab('memory')" data-mtab="memory"
+      class="mtab flex flex-col items-center gap-0.5 flex-1 py-1.5 rounded-lg transition-colors text-zinc-500">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z"/></svg>
+      <span class="text-[9px] font-semibold">Memory</span>
+    </button>
+    <button onclick="showTab('config')" data-mtab="config"
+      class="mtab flex flex-col items-center gap-0.5 flex-1 py-1.5 rounded-lg transition-colors text-zinc-500">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+      <span class="text-[9px] font-semibold">Config</span>
+    </button>
+  </nav>
+
   <!-- AGPL §13 source offer — required for network deployments -->
   <footer class="text-[10px] text-zinc-600 px-4 py-2 border-t border-zinc-800/60 flex justify-between items-center font-mono">
     <span>Peko Agent · AGPL-3.0-or-later</span>
@@ -484,6 +541,15 @@ function showTab(tab) {
       if (t) t.className = offClass;
     }
   }
+  // Mobile nav active-state sync
+  var mtabs = document.querySelectorAll('.mtab');
+  for (var i = 0; i < mtabs.length; i++) {
+    var mt = mtabs[i];
+    var active = mt.getAttribute('data-mtab') === tab;
+    mt.className = 'mtab flex flex-col items-center gap-0.5 flex-1 py-1.5 rounded-lg transition-colors '
+      + (active ? 'text-violet-400 bg-violet-500/10' : 'text-zinc-500 hover:text-zinc-300');
+  }
+
   if (tab === 'config') loadCfg();
   if (tab === 'monitor') { refreshStats(); loadBrain(); startMonitorAutoRefresh(); }
   if (tab === 'apps') loadApps();
@@ -652,6 +718,16 @@ function autoResize(el) {
 }
 
 /* ── Send / Stop ── */
+// Quick-action chip on empty state: fills the input + sends right away.
+function sendSuggested(btn) {
+  var task = btn && btn.dataset ? btn.dataset.task : null;
+  if (!task) return;
+  var inp = document.getElementById('inp');
+  inp.value = task;
+  autoResize(inp);
+  send();
+}
+
 async function send() {
   var inp = document.getElementById('inp');
   var text = inp.value.trim();
@@ -1422,6 +1498,29 @@ async function saveSoul() {
     }
   } catch(e) { alert('Failed: '+e.message); }
 }
+
+/* ── Cycling placeholder — helps new users discover capabilities ── */
+(function cyclePlaceholder() {
+  var inp = document.getElementById('inp');
+  if (!inp) return;
+  var examples = [
+    'Enter a task...',
+    'Try: Open YouTube and search for cats',
+    'Try: Take a screenshot and describe it',
+    'Try: Send SMS to Alice saying I\'m on my way',
+    'Try: Turn on WiFi',
+    'Try: What apps are using the most battery?',
+    'Try: Go home then open Settings',
+  ];
+  var i = 0;
+  setInterval(function() {
+    // Only cycle when empty + not focused (avoid interrupting typing)
+    if (inp.value === '' && document.activeElement !== inp) {
+      i = (i + 1) % examples.length;
+      inp.placeholder = examples[i];
+    }
+  }, 4000);
+})();
 
 /* ── Init ── */
 checkStatus();
