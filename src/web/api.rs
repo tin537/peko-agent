@@ -66,6 +66,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/user", get(get_user_model).post(update_user_model))
         // Queue status
         .route("/api/queue", get(queue_status))
+        // Brain status — mode + providers
+        .route("/api/brain", get(brain_status))
         // Screenshots
         .route("/api/screenshots/{filename}", get(serve_screenshot))
         // AGPL §13 compliance — source offer + third-party licenses
@@ -411,8 +413,13 @@ async fn run_task(
                 peko_core::runtime::StreamCallback::Thinking(text) => {
                     serde_json::json!({"type": "thinking", "text": text})
                 }
-                peko_core::runtime::StreamCallback::Done { iterations, session_id } => {
-                    serde_json::json!({"type": "done", "iterations": iterations, "session_id": session_id})
+                peko_core::runtime::StreamCallback::Done { iterations, session_id, brain } => {
+                    serde_json::json!({
+                        "type": "done",
+                        "iterations": iterations,
+                        "session_id": session_id,
+                        "brain": brain,
+                    })
                 }
                 peko_core::runtime::StreamCallback::Error(msg) => {
                     serde_json::json!({"type": "error", "message": msg})
@@ -613,6 +620,29 @@ async fn update_user_model(
 async fn queue_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let status = state.task_queue.status().await;
     Json(serde_json::to_value(&status).unwrap_or(serde_json::json!({})))
+}
+
+// ── Brain status API ──
+//
+// Returns the currently configured brain mode + provider info. The UI polls
+// this to render the header badge, the Monitor tab Brain section, and to
+// show the current mode in the Config tab.
+
+async fn brain_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let Some(ref brain) = state.brain else {
+        return Json(serde_json::json!({
+            "enabled": false,
+            "mode": null,
+            "note": "no brain configured — using default provider chain",
+        }));
+    };
+    Json(serde_json::json!({
+        "enabled": true,
+        "mode": brain.mode().to_string(),
+        "supports_escalation": brain.mode().supports_escalation(),
+        "local_model": brain.local_model_name(),
+        "cloud_model": brain.cloud_model_name(),
+    }))
 }
 
 // ── Screenshot serving ──

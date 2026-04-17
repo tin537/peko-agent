@@ -52,7 +52,17 @@ pub enum StreamCallback {
     ToolStart { name: String },
     ToolResult { name: String, content: String, is_error: bool, image: Option<(String, String)> },
     Thinking(String),
-    Done { iterations: usize, session_id: String },
+    /// Emitted once when the task completes.
+    /// `brain` indicates which brain ultimately produced the answer:
+    ///   "local"     — handled entirely by local
+    ///   "cloud"     — handled entirely by cloud
+    ///   "escalated" — started on local, escalated to cloud mid-task
+    ///   None        — no brain configured (default provider)
+    Done {
+        iterations: usize,
+        session_id: String,
+        brain: Option<String>,
+    },
     Error(String),
 }
 
@@ -467,6 +477,11 @@ impl AgentRuntime {
 
         self.budget.reset();
 
+        // Track whether this task escalated mid-flight — used for the
+        // per-message brain badge in the UI (local / cloud / escalated).
+        let start_brain = self.active_brain.clone();
+        let mut did_escalate = false;
+
         // Append user message
         let user_msg = Message::user(user_input.to_string());
         conversation.push(user_msg.clone());
@@ -740,10 +755,25 @@ impl AgentRuntime {
             }
         }
 
+        // Decide the per-task brain label shown in the UI.
+        //   did_escalate → "escalated"  (started local, ended on cloud)
+        //   else local   → "local"
+        //   else cloud   → "cloud"
+        //   no brain     → None
+        let brain_label: Option<String> = if did_escalate {
+            Some("escalated".to_string())
+        } else {
+            match (&start_brain, &self.active_brain) {
+                (_, Some(choice)) => Some(choice.to_string()),
+                _ => None,
+            }
+        };
+
         let sid = session_id.to_string();
         let _ = tx.send(StreamCallback::Done {
             iterations: total_iterations,
             session_id: sid.clone(),
+            brain: brain_label,
         }).await;
 
         Ok(AgentResponse {

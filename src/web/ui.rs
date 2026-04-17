@@ -67,6 +67,11 @@ tailwind.config = {
       <div class="hidden sm:flex items-center gap-2 ml-1">
         <div class="h-4 w-px bg-zinc-800"></div>
         <span id="modelInfo" class="inline-flex items-center px-2 py-0.5 bg-zinc-800 rounded-md text-[11px] font-mono text-zinc-400 truncate max-w-[200px]">...</span>
+        <!-- Brain mode badge: hidden until /api/brain confirms a brain is configured -->
+        <span id="brainBadge" class="hidden inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide" title="Brain routing mode">
+          <svg class="w-2.5 h-2.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2a7 7 0 00-7 7c0 2.38 1.19 4.47 3 5.74V17a1 1 0 001 1h6a1 1 0 001-1v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 00-7-7zM9 21a1 1 0 001 1h4a1 1 0 001-1v-1H9v1z"/></svg>
+          <span id="brainBadgeText">…</span>
+        </span>
       </div>
     </div>
     <div class="flex items-center gap-3">
@@ -291,6 +296,16 @@ tailwind.config = {
       <!-- Device Panel (was Monitor) -->
       <div id="monitorPanel" class="hidden flex-1 overflow-y-auto p-4">
         <div class="max-w-5xl mx-auto space-y-4">
+          <!-- Brain Status -->
+          <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+            <h2 class="text-[10px] text-zinc-500 uppercase mb-3 font-bold tracking-wider">Brain</h2>
+            <div id="brainCard" class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <div><span class="text-zinc-500 text-[10px]">Mode</span><p id="brMode" class="text-zinc-200 font-medium">…</p></div>
+              <div><span class="text-zinc-500 text-[10px]">Local model</span><p id="brLocal" class="text-zinc-200 font-mono truncate">…</p></div>
+              <div><span class="text-zinc-500 text-[10px]">Cloud model</span><p id="brCloud" class="text-zinc-200 font-mono truncate">…</p></div>
+              <div><span class="text-zinc-500 text-[10px]">Escalation</span><p id="brEsc" class="text-zinc-200">…</p></div>
+            </div>
+          </div>
           <!-- Device Identity -->
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
             <h2 class="text-[10px] text-zinc-500 uppercase mb-3 font-bold tracking-wider">Device Profile</h2>
@@ -470,7 +485,7 @@ function showTab(tab) {
     }
   }
   if (tab === 'config') loadCfg();
-  if (tab === 'monitor') { refreshStats(); startMonitorAutoRefresh(); }
+  if (tab === 'monitor') { refreshStats(); loadBrain(); startMonitorAutoRefresh(); }
   if (tab === 'apps') loadApps();
   if (tab === 'messages') { if (!msgES) startMsgStream(); }
   if (tab === 'memory') loadMemories();
@@ -562,14 +577,26 @@ function addMsg(type, content) {
   return el;
 }
 
-function addIterBadge(iterations, sessionId) {
+function addIterBadge(iterations, sessionId, brain) {
   const list = showMsgsList();
   const el = document.createElement('div');
   el.className = 'msg-in flex justify-center py-2';
+  // Brain tag color per routing result
+  var brainStyles = {
+    'local':     'bg-emerald-900/30 text-emerald-300 border-emerald-700/40',
+    'cloud':     'bg-sky-900/30 text-sky-300 border-sky-700/40',
+    'escalated': 'bg-amber-900/30 text-amber-300 border-amber-700/40',
+  };
+  var brainHtml = '';
+  if (brain) {
+    var cls = brainStyles[brain] || 'bg-zinc-800 text-zinc-400 border-zinc-700/40';
+    brainHtml = '<span class="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded ' + cls + '">' + escAttr(brain) + '</span>';
+  }
   el.innerHTML =
     '<div class="inline-flex items-center gap-2 px-3 py-1.5 bg-zinc-800/50 border border-zinc-700/40 rounded-full">' +
       '<svg class="w-3 h-3 text-emerald-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>' +
       '<span class="text-[11px] font-medium text-zinc-400">' + iterations + ' iteration' + (iterations !== 1 ? 's' : '') + '</span>' +
+      brainHtml +
       '<span class="text-[10px] font-mono text-zinc-600">' + ((sessionId || '').slice(0, 8)) + '</span>' +
     '</div>';
   list.appendChild(el);
@@ -678,7 +705,7 @@ async function send() {
           cur = null;
           // Set active session for continuation
           if (ev.session_id) activeSessionId = ev.session_id;
-          addIterBadge(ev.iterations, ev.session_id);
+          addIterBadge(ev.iterations, ev.session_id, ev.brain);
           break;
         case 'error':
           addMsg('error', esc(ev.message || 'Unknown error'));
@@ -965,6 +992,47 @@ function esc(s) {
 }
 function escAttr(s) {
   return String(s).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/* ── Brain status (mode + models) ── */
+async function loadBrain() {
+  try {
+    var r = await fetch(API+'/api/brain');
+    var b = await r.json();
+    var badge = document.getElementById('brainBadge');
+    var badgeText = document.getElementById('brainBadgeText');
+
+    if (!b.enabled) {
+      if (badge) badge.classList.add('hidden');
+      var m = document.getElementById('brMode'); if (m) m.textContent = 'disabled';
+      var lm = document.getElementById('brLocal'); if (lm) lm.textContent = '—';
+      var cm = document.getElementById('brCloud'); if (cm) cm.textContent = '—';
+      var em = document.getElementById('brEsc'); if (em) em.textContent = '—';
+      return;
+    }
+
+    // Header badge — color per mode
+    var modeStyles = {
+      'dual':       'bg-violet-900/30 text-violet-300 border border-violet-700/30',
+      'local-only': 'bg-emerald-900/30 text-emerald-300 border border-emerald-700/30',
+      'cloud-only': 'bg-sky-900/30 text-sky-300 border border-sky-700/30',
+    };
+    if (badge) {
+      badge.className = 'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide '
+        + (modeStyles[b.mode] || 'bg-zinc-800 text-zinc-300');
+      badgeText.textContent = b.mode;
+    }
+
+    // Monitor card
+    var mMode  = document.getElementById('brMode');
+    var mLocal = document.getElementById('brLocal');
+    var mCloud = document.getElementById('brCloud');
+    var mEsc   = document.getElementById('brEsc');
+    if (mMode)  mMode.textContent  = b.mode;
+    if (mLocal) mLocal.textContent = b.local_model || '—';
+    if (mCloud) mCloud.textContent = b.cloud_model || '—';
+    if (mEsc)   mEsc.textContent   = b.supports_escalation ? 'enabled' : 'disabled';
+  } catch (e) { /* ignore */ }
 }
 
 /* ── Device Profile ── */
@@ -1358,7 +1426,9 @@ async function saveSoul() {
 /* ── Init ── */
 checkStatus();
 loadSessions();
+loadBrain();
 setInterval(checkStatus, 8000);
+setInterval(loadBrain, 30000);  // refresh brain badge every 30s
 document.getElementById('inp').focus();
 </script>
 </body>
