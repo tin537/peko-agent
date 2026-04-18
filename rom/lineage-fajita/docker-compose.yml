@@ -1,0 +1,40 @@
+# docker-compose.yml — Peko LineageOS builder.
+#
+# From repo root:
+#   docker compose -f rom/lineage-fajita/docker-compose.yml run --rm builder
+#
+# Inside the container:
+#   ./rom/lineage-fajita/build.sh --init   # once
+#   ./rom/lineage-fajita/build.sh          # each build
+#
+# Outputs land in the `lineage-src` volume at
+#   /home/builder/lineage/out/target/product/fajita/*.zip
+# — copy them out with `docker cp` or by running `cp` into /work/peko/out/.
+
+services:
+  builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+    platform: linux/amd64          # Apple Silicon: Rosetta emulates
+    image: peko-builder:latest
+    volumes:
+      - lineage-src:/home/builder/lineage        # 80GB source tree
+      - ccache:/home/builder/.ccache             # ~50GB, persists builds
+      - ../..:/work/peko                         # peko-agent checkout
+    working_dir: /work/peko
+    tty: true
+    stdin_open: true
+    # AOSP wants lots of file descriptors + memory
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    # Give it ~16GB (adjust in Docker Desktop Resources too)
+    mem_limit: 16g
+
+volumes:
+  lineage-src:
+  ccache:
