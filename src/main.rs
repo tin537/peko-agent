@@ -73,22 +73,29 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
         }
     }
 
+    // Resolve modem path once — explicit config wins, else cached, else probe.
+    // Handles fajita/fog/most Qualcomm layouts automatically (/dev/smd11 etc).
+    let modem_path = peko_core::resolve_modem(
+        config.hardware.as_ref().and_then(|h| h.modem_device.as_deref()),
+        &config.agent.data_dir,
+    );
+
     // SMS tool — AT commands via serial modem
     if config.tools.sms {
-        if let Some(modem_path) = config.hardware.as_ref().and_then(|h| h.modem_device.as_deref()) {
-            match SerialModem::open(std::path::Path::new(modem_path)) {
+        if let Some(ref path) = modem_path {
+            match SerialModem::open(path) {
                 Ok(modem) => registry.register(SmsTool::new(modem)),
-                Err(e) => warn!(error = %e, "modem not available, sms tool disabled"),
+                Err(e) => warn!(error = %e, path = %path.display(), "modem open failed, sms tool disabled"),
             }
         }
     }
 
     // Call tool — AT commands via serial modem
     if config.tools.call {
-        if let Some(modem_path) = config.hardware.as_ref().and_then(|h| h.modem_device.as_deref()) {
-            match SerialModem::open(std::path::Path::new(modem_path)) {
+        if let Some(ref path) = modem_path {
+            match SerialModem::open(path) {
                 Ok(modem) => registry.register(CallTool::new(modem)),
-                Err(e) => warn!(error = %e, "modem not available, call tool disabled"),
+                Err(e) => warn!(error = %e, path = %path.display(), "modem open failed, call tool disabled"),
             }
         }
     }

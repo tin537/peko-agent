@@ -1,0 +1,7 @@
+id=peko_agent
+name=Peko Agent
+version=v0.1.0
+versionCode=1
+author=Peko Agent project
+description=Autonomous AI agent-as-OS for Android. Installs peko-agent and peko-llm-daemon into /system/bin via Magisk overlay, with init.rc services + SELinux allow rules. Web UI on :8080.
+updateJson=

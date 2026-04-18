@@ -20,6 +20,7 @@ pub mod life_loop;
 pub mod curiosity;
 pub mod goal;
 pub mod gardener;
+pub mod hardware;
 
 pub use message::{Message, ToolCall};
 pub use tool::{Tool, ToolRegistry, ToolResult};
@@ -44,6 +45,7 @@ pub use life_loop::{LifeLoop, AutonomyState, Proposal, ProposalStatus};
 pub use curiosity::Curiosity;
 pub use goal::{GoalGenerator, Pattern, PatternKind};
 pub use gardener::{GardenerConfig, spawn as spawn_gardener};
+pub use hardware::{resolve_modem, DetectedHardware};
 
 #[cfg(test)]
 mod runtime_tests;

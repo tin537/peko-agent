@@ -73,6 +73,12 @@ RUN curl -fsSL "https://dl.google.com/android/repository/android-ndk-r27c-linux.
 RUN useradd -m -u 1000 -s /bin/bash builder \
     && echo 'builder ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/builder
 
+# Pre-create volume mountpoints owned by `builder` — otherwise Docker creates
+# them as root on first mount and `repo init` fails with "Permission denied".
+RUN install -d -o 1000 -g 1000 \
+        /home/builder/lineage \
+        /home/builder/.ccache
+
 USER builder
 WORKDIR /home/builder
 

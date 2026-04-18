@@ -4,9 +4,11 @@ Cargo.lock
 *.db
 *.log
 config.toml
+!magisk/peko-module/system/etc/peko/config.toml
 .env
 
 # Local artifacts (not committed)
 /models/                          # downloaded GGUF files, tokenizers
 /data-mac/                        # host dev data dir
 /crates/peko-llm-daemon/build-*/  # CMake build outputs (host + Android)
+magisk/out/

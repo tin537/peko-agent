@@ -1,0 +1,23 @@
+# sepolicy.rule — Magisk-injected SELinux allow rules.
+#
+# Magisk runs peko-agent under `u:r:magisk:s0` by default, which is already
+# permissive-enough for most operations. These rules patch in the few
+# specific access paths our tools need when stock LineageOS sepolicy blocks
+# them. Keep the list minimal — broader rules weaken the device.
+
+# Modem AT: /dev/smd* char devices are typically labeled smd_device
+allow magisk smd_device chr_file { read write open ioctl getattr }
+
+# uinput — virtual keyboard for text injection
+allow magisk uhid_device chr_file { read write open ioctl }
+
+# /dev/input/event* — touch + key injection
+allow magisk input_device chr_file { read write open ioctl getattr }
+
+# /dev/graphics/fb0 and DRM devices — for screenshots when screencap is slow
+allow magisk graphics_device chr_file { read write open ioctl mmap getattr }
+allow magisk gpu_device chr_file { read write open ioctl mmap getattr }
+
+# Web UI bind on port 8080
+allow magisk self tcp_socket { create bind listen accept read write getopt setopt }
+allow magisk unreserved_port tcp_socket { name_bind }
