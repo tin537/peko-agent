@@ -263,6 +263,24 @@ impl LifeLoop {
                     let _ = mot.save(&mot_path);
                 }
 
+                // Expire pending proposals older than 24h so the list doesn't
+                // grow unbounded. Threshold is deliberately generous — users
+                // may ignore the Life tab for a day.
+                {
+                    let cutoff = chrono::Utc::now() - chrono::Duration::hours(24);
+                    let mut ps = pr.lock().await;
+                    let mut expired = 0;
+                    for p in ps.iter_mut() {
+                        if p.status == ProposalStatus::Pending && p.created_at < cutoff {
+                            p.status = ProposalStatus::Expired;
+                            expired += 1;
+                        }
+                    }
+                    if expired > 0 {
+                        info!(expired, "life loop: expired stale proposals");
+                    }
+                }
+
                 // Gate: queue idle + rate-limit budget
                 if !queue.is_idle().await {
                     debug!("queue busy, skipping tick");
@@ -286,8 +304,23 @@ impl LifeLoop {
                 // Build task prompt based on chosen action
                 let (prompt, reasoning) = match action {
                     LifeAction::Explore => {
+                        // Collect prompts from still-live proposals so Curiosity
+                        // doesn't re-propose the same exploration on every tick.
+                        // "Live" = pending or approved-but-unexecuted; once a
+                        // proposal is rejected/executed/expired the suggestion
+                        // becomes fair game again.
+                        let recent_prompts: Vec<String> = {
+                            let proposals = pr.lock().await;
+                            proposals.iter()
+                                .filter(|p| matches!(
+                                    p.status,
+                                    ProposalStatus::Pending | ProposalStatus::Approved,
+                                ))
+                                .map(|p| p.task_prompt.clone())
+                                .collect()
+                        };
                         let user = user_model.lock().await;
-                        let p = Curiosity::next(&*user, &tools);
+                        let p = Curiosity::next(&*user, &tools, &recent_prompts);
                         (p, "Curiosity: explore something unseen".to_string())
                     }
                     LifeAction::ReviewFailures => {

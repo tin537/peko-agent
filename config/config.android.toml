@@ -40,3 +40,19 @@ allowed_paths = ["/data/local/tmp/peko", "/sdcard"]
 
 [tools.shell_config]
 timeout_seconds = 30
+
+# Phase A autonomy shakedown — propose-only, 60s heartbeat so proposals
+# appear within a minute instead of 5. Bump tick_interval_secs back to 300
+# (or remove the whole block) once validated.
+[autonomy]
+enabled             = true
+tick_interval_secs  = 60
+max_internal_tasks_per_hour = 6
+max_internal_tasks_per_day  = 30
+max_tokens_per_day          = 50000
+propose_only        = true
+memory_gardener     = true
+memory_gardener_cron = "0 6 * * *"
+reflection          = true
+curiosity           = 0.10
+goal_generation     = true
