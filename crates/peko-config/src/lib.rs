@@ -173,16 +173,26 @@ pub struct AgentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
-    pub anthropic: Option<ProviderEntry>,
+    // Cloud providers — each optional. Add more by adding a field here and a
+    // matching case in runtime::build_provider_by_name.
+    pub anthropic:  Option<ProviderEntry>,
     pub openrouter: Option<ProviderEntry>,
+    pub openai:     Option<ProviderEntry>,
+    pub groq:       Option<ProviderEntry>,
+    pub deepseek:   Option<ProviderEntry>,
+    pub mistral:    Option<ProviderEntry>,
+    pub together:   Option<ProviderEntry>,
     pub local: Option<ProviderEntry>,
     /// Embedded local brain — GGUF model loaded in-process via candle
     pub embedded: Option<EmbeddedProviderEntry>,
     #[serde(default = "default_priority")]
     pub priority: Vec<String>,
-    /// Dual-brain config: "local_name:cloud_name" (e.g. "embedded:anthropic").
-    /// When set, the agent routes simple/skill-based tasks to the local brain
-    /// and complex tasks to the cloud brain. The local brain can escalate.
+    /// Dual-brain config. Accepts:
+    ///   `"local:anthropic"`              single cloud
+    ///   `"local:anthropic,openrouter"`   cloud chain — first available wins,
+    ///                                    later entries are fallback on error
+    ///   `"local"`                        local-only
+    ///   `"anthropic"` or `"a,b,c"`       cloud-only, with or without fallback
     #[serde(default)]
     pub brain: Option<String>,
 }

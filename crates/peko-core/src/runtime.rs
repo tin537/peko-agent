@@ -870,115 +870,175 @@ impl LlmProvider for NullProvider {
     }
 }
 
-/// Build a brain router from config. Supports three modes:
+/// Build an individual provider by name from the JSON config. Shared between
+/// `build_provider_helper` and `build_dual_brain`.
 ///
-/// | `provider.brain` value | Mode        | Behavior                          |
-/// |------------------------|-------------|-----------------------------------|
-/// | `"local:anthropic"`    | Dual        | classify + route + escalate tool  |
-/// | `"local"`              | LocalOnly   | always use `provider.local`       |
-/// | `"anthropic"`          | CloudOnly   | always use `provider.anthropic`   |
+/// Supported provider names (explicit cases for known pricing/headers):
+///   - `anthropic`                   → AnthropicProvider, API key from config or ANTHROPIC_API_KEY env
+///   - `openrouter`                  → OpenAICompatProvider → openrouter.ai, OPENROUTER_API_KEY
+///   - `openai`                      → OpenAICompatProvider → api.openai.com, OPENAI_API_KEY
+///   - `groq`                        → OpenAICompatProvider → api.groq.com/openai/v1, GROQ_API_KEY
+///   - `deepseek`                    → OpenAICompatProvider → api.deepseek.com, DEEPSEEK_API_KEY
+///   - `mistral`                     → OpenAICompatProvider → api.mistral.ai/v1, MISTRAL_API_KEY
+///   - `together`                    → OpenAICompatProvider → api.together.xyz/v1, TOGETHER_API_KEY
+///   - any other name                → generic OpenAI-compat using whatever base_url is set (localhost fallback)
 ///
-/// Returns None if `brain` is not set or the referenced provider can't be built.
+/// UDS scheme `unix://<path>` on any provider entry routes to the local
+/// peko-llm-daemon (abstract or filesystem namespace).
+pub fn build_provider_by_name(config: &serde_json::Value, name: &str) -> Option<Box<dyn LlmProvider>> {
+    use peko_transport::{AnthropicProvider, OpenAICompatProvider, UnixSocketProvider};
+
+    let entry = &config["provider"][name];
+    if entry.is_null() { return None; }
+
+    let api_key = entry["api_key"].as_str().unwrap_or("").to_string();
+    let model = entry["model"].as_str().unwrap_or("").to_string();
+    let base_url = entry["base_url"].as_str().unwrap_or("").to_string();
+    let max_tokens = entry["max_tokens"].as_u64().unwrap_or(4096) as usize;
+
+    if model.is_empty() { return None; }
+
+    // `unix://<path>` → local daemon over a UDS (abstract or filesystem namespace)
+    if let Some(rest) = base_url.strip_prefix("unix://") {
+        info!(name = %name, socket = %rest, "building UnixSocketProvider for local daemon");
+        return Some(Box::new(UnixSocketProvider::new(rest.to_string(), model, max_tokens)));
+    }
+
+    // Resolve API key: explicit config → env var for this provider → empty.
+    let resolve_key = |default_env: &str| -> String {
+        if !api_key.is_empty() { api_key.clone() }
+        else { std::env::var(default_env).unwrap_or_default() }
+    };
+
+    // OpenAI-compatible provider names mapped to their default base URL + env var.
+    // Any entry here uses OpenAICompatProvider.
+    let openai_compat: &[(&str, &str, &str)] = &[
+        ("openrouter", "https://openrouter.ai/api/v1",       "OPENROUTER_API_KEY"),
+        ("openai",     "https://api.openai.com/v1",          "OPENAI_API_KEY"),
+        ("groq",       "https://api.groq.com/openai/v1",     "GROQ_API_KEY"),
+        ("deepseek",   "https://api.deepseek.com",           "DEEPSEEK_API_KEY"),
+        ("mistral",    "https://api.mistral.ai/v1",          "MISTRAL_API_KEY"),
+        ("together",   "https://api.together.xyz/v1",        "TOGETHER_API_KEY"),
+    ];
+
+    if name == "anthropic" {
+        let key = resolve_key("ANTHROPIC_API_KEY");
+        if key.is_empty() { return None; }
+        return Some(Box::new(AnthropicProvider::new(
+            key, model, max_tokens,
+            if base_url.is_empty() { None } else { Some(base_url) },
+        )));
+    }
+
+    if let Some((_, default_url, env)) = openai_compat.iter().find(|(n, _, _)| *n == name) {
+        let key = resolve_key(env);
+        if key.is_empty() { return None; }
+        let url = if base_url.is_empty() { default_url.to_string() } else { base_url };
+        return Some(Box::new(OpenAICompatProvider::new(key, model, url, max_tokens)));
+    }
+
+    // Unknown provider → generic OpenAI-compat (e.g. Ollama, vLLM, local inference server).
+    // Default base_url points at Ollama's OpenAI-compat endpoint.
+    let url = if base_url.is_empty() { "http://localhost:11434/v1".to_string() } else { base_url };
+    Some(Box::new(OpenAICompatProvider::new(api_key, model, url, max_tokens)))
+}
+
+/// Build a provider from a comma-separated chain of names. Each name is
+/// resolved individually; the chain is wrapped in `ProviderChain` so the
+/// first that responds wins and later ones act as fallback. A chain of
+/// length 1 unwraps to that single provider.
+///
+/// Returns None if *every* named provider fails to build (e.g. all missing
+/// API keys) — callers decide whether that's fatal.
+fn build_provider_chain(config: &serde_json::Value, names: &[&str]) -> Option<Box<dyn LlmProvider>> {
+    use peko_transport::ProviderChain;
+
+    let providers: Vec<Box<dyn LlmProvider>> = names.iter()
+        .filter_map(|n| {
+            let got = build_provider_by_name(config, n.trim());
+            if got.is_none() {
+                warn!(name = %n.trim(), "provider skipped (missing key/model/config)");
+            }
+            got
+        })
+        .collect();
+
+    match providers.len() {
+        0 => None,
+        1 => Some(providers.into_iter().next().unwrap()),
+        _ => {
+            info!(count = providers.len(), "cloud chain built with fallback");
+            Some(Box::new(ProviderChain::new(providers)))
+        }
+    }
+}
+
+/// Build a brain router from config. Supports three modes and **multi-provider
+/// cloud fallback** for escalation robustness.
+///
+/// | `provider.brain` value             | Mode        | Behavior                                     |
+/// |------------------------------------|-------------|----------------------------------------------|
+/// | `"local:anthropic"`                | Dual        | classify + route; escalate uses anthropic    |
+/// | `"local:anthropic,openrouter"`     | Dual        | escalate tries anthropic, falls back to OR   |
+/// | `"local:anthropic,openai,groq"`    | Dual        | 3-deep cloud chain — the first key that works|
+/// | `"local"`                          | LocalOnly   | always use `provider.local`; no escalation   |
+/// | `"anthropic"`                      | CloudOnly   | always use `provider.anthropic`              |
+/// | `"anthropic,openrouter"`           | CloudOnly   | cloud-only with fallback (e.g. rate limit)   |
+///
+/// Returns None if `brain` is not set or no provider in the chain could be built.
 pub fn build_dual_brain(config: &serde_json::Value) -> Option<DualBrain> {
     use crate::brain::BrainMode;
 
     let brain_str = config["provider"]["brain"].as_str()?;
 
-    // Parse mode + provider names
+    // Parse "local_name:cloud_chain" or "chain" — each half may be a single
+    // name or a comma-separated list for fallback.
     let parts: Vec<&str> = brain_str.split(':').collect();
-    let (mode, local_name, cloud_name) = match parts.as_slice() {
-        // "name"           → single-brain (mode decided by whether there's a cloud fallback,
-        //                    but we just treat it as LocalOnly when the only name is a local-like
-        //                    provider, else CloudOnly)
+    let (mode, local_names, cloud_names): (_, Vec<&str>, Vec<&str>) = match parts.as_slice() {
         [single] => {
-            let single = single.trim();
-            // Heuristic: providers named "local", "embedded", or whose base_url uses unix://
-            // or points at localhost → LocalOnly. Anything else → CloudOnly.
-            let entry = &config["provider"][single];
+            // No colon → single-mode brain. The chain may still have multiple
+            // entries (e.g. "anthropic,openrouter" = cloud-only with fallback).
+            let names: Vec<&str> = single.split(',').map(str::trim).collect();
+            // Heuristic: if the FIRST name looks local, treat as LocalOnly.
+            let first = names.first().copied().unwrap_or("");
+            let entry = &config["provider"][first];
             let base_url = entry["base_url"].as_str().unwrap_or("");
-            let looks_local = matches!(single, "local" | "embedded")
+            let looks_local = matches!(first, "local" | "embedded")
                 || base_url.starts_with("unix://")
                 || base_url.starts_with("http://localhost")
                 || base_url.starts_with("http://127.");
-            if looks_local {
-                (BrainMode::LocalOnly, single, single)
-            } else {
-                (BrainMode::CloudOnly, single, single)
-            }
+            let mode = if looks_local { BrainMode::LocalOnly } else { BrainMode::CloudOnly };
+            (mode, names.clone(), names)
         }
-        // "local:cloud" → Dual
-        [l, c] => (BrainMode::Dual, l.trim(), c.trim()),
+        [l, c] => {
+            let locals: Vec<&str> = l.split(',').map(str::trim).collect();
+            let clouds: Vec<&str> = c.split(',').map(str::trim).collect();
+            (BrainMode::Dual, locals, clouds)
+        }
         _ => {
             warn!(brain = brain_str, "invalid brain config, expected 'local:cloud' or 'name'");
             return None;
         }
     };
 
-    fn build_single(config: &serde_json::Value, name: &str) -> Option<Box<dyn LlmProvider>> {
-        use peko_transport::{AnthropicProvider, OpenAICompatProvider, UnixSocketProvider};
-
-        let entry = &config["provider"][name];
-        if entry.is_null() { return None; }
-
-        let api_key = entry["api_key"].as_str().unwrap_or("").to_string();
-        let model = entry["model"].as_str().unwrap_or("").to_string();
-        let base_url = entry["base_url"].as_str().unwrap_or("").to_string();
-        let max_tokens = entry["max_tokens"].as_u64().unwrap_or(4096) as usize;
-
-        if model.is_empty() { return None; }
-
-        // `unix://` scheme routes to the local peko-llm-daemon over a UDS.
-        // Examples:
-        //   unix:///data/local/tmp/peko/llm.sock    — filesystem
-        //   unix://@peko-llm                        — Linux abstract namespace
-        if let Some(rest) = base_url.strip_prefix("unix://") {
-            let path = rest.to_string();
-            info!(name = %name, socket = %path, "building UnixSocketProvider for local daemon");
-            return Some(Box::new(UnixSocketProvider::new(path, model, max_tokens)));
-        }
-
-        match name {
-            "anthropic" => {
-                let key = if api_key.is_empty() {
-                    std::env::var("ANTHROPIC_API_KEY").unwrap_or_default()
-                } else { api_key };
-                if key.is_empty() { return None; }
-                Some(Box::new(AnthropicProvider::new(
-                    key, model, max_tokens,
-                    if base_url.is_empty() { None } else { Some(base_url) },
-                )))
-            }
-            "openrouter" => {
-                let key = if api_key.is_empty() {
-                    std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
-                } else { api_key };
-                if key.is_empty() { return None; }
-                let url = if base_url.is_empty() { "https://openrouter.ai/api/v1".to_string() } else { base_url };
-                Some(Box::new(OpenAICompatProvider::new(key, model, url, max_tokens)))
-            }
-            _ => {
-                let url = if base_url.is_empty() { "http://localhost:11434/v1".to_string() } else { base_url };
-                Some(Box::new(OpenAICompatProvider::new(api_key, model, url, max_tokens)))
-            }
-        }
-    }
-
-    let local = match build_single(config, local_name) {
+    let local = match build_provider_chain(config, &local_names) {
         Some(p) => p,
         None => {
-            warn!(name = local_name, "failed to build local brain provider");
+            warn!(names = ?local_names, "failed to build local brain chain");
             return None;
         }
     };
-    let cloud = match build_single(config, cloud_name) {
+
+    let cloud = match build_provider_chain(config, &cloud_names) {
         Some(p) => p,
         None => {
+            // No cloud keys at all — fall back to local on both sides so the
+            // agent still boots (escalation becomes a no-op).
             warn!(
-                name = cloud_name,
-                "cloud brain unavailable — using local for both brains (escalation disabled)"
+                names = ?cloud_names,
+                "cloud chain unavailable — using local for both brains (escalation disabled)"
             );
-            // Rebuild local so both sides have their own provider instance
-            match build_single(config, local_name) {
+            match build_provider_chain(config, &local_names) {
                 Some(fallback) => fallback,
                 None => {
                     warn!("local fallback also failed, aborting dual-brain");
@@ -992,8 +1052,81 @@ pub fn build_dual_brain(config: &serde_json::Value) -> Option<DualBrain> {
         mode = %mode,
         local = local.model_name(),
         cloud = cloud.model_name(),
+        cloud_chain_len = cloud_names.len(),
         "brain initialized"
     );
 
     Some(DualBrain::with_mode(mode, local, cloud))
+}
+
+#[cfg(test)]
+mod multi_provider_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn build_by_name_handles_known_openai_compat_with_env() {
+        std::env::set_var("GROQ_API_KEY", "test-groq-key");
+        let cfg = json!({
+            "provider": {
+                "groq": { "model": "llama-3.3-70b-versatile", "max_tokens": 2048 }
+            }
+        });
+        let p = build_provider_by_name(&cfg, "groq");
+        assert!(p.is_some(), "groq should build when env key is set");
+        assert_eq!(p.unwrap().model_name(), "llama-3.3-70b-versatile");
+        std::env::remove_var("GROQ_API_KEY");
+    }
+
+    #[test]
+    fn build_by_name_handles_unknown_as_generic_openai_compat() {
+        // Unknown name with explicit api_key and base_url should build a
+        // generic OpenAI-compatible provider (e.g. vLLM, Ollama, local).
+        let cfg = json!({
+            "provider": {
+                "my-local-inference": {
+                    "api_key": "ignored",
+                    "model": "llama-3.2-3b",
+                    "base_url": "http://192.168.1.10:8000/v1",
+                    "max_tokens": 1024,
+                }
+            }
+        });
+        let p = build_provider_by_name(&cfg, "my-local-inference");
+        assert!(p.is_some());
+    }
+
+    #[test]
+    fn chain_skips_missing_keeps_working() {
+        // anthropic has no key → skipped; groq has env key → builds.
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::set_var("GROQ_API_KEY", "test");
+        let cfg = json!({
+            "provider": {
+                "anthropic": { "model": "claude-sonnet-4-20250514" },
+                "groq":      { "model": "llama-3.3-70b-versatile" },
+            }
+        });
+        let chain = build_provider_chain(&cfg, &["anthropic", "groq"]);
+        assert!(chain.is_some(), "chain should build when at least one provider is configurable");
+        std::env::remove_var("GROQ_API_KEY");
+    }
+
+    #[test]
+    fn dual_brain_parses_cloud_chain() {
+        std::env::set_var("GROQ_API_KEY", "test");
+        std::env::set_var("ANTHROPIC_API_KEY", "test");
+        let cfg = json!({
+            "provider": {
+                "brain": "local:anthropic,groq",
+                "local":     { "model": "embedded", "base_url": "unix://@peko-llm" },
+                "anthropic": { "model": "claude-sonnet-4-20250514" },
+                "groq":      { "model": "llama-3.3-70b-versatile" },
+            }
+        });
+        let brain = build_dual_brain(&cfg);
+        assert!(brain.is_some(), "dual brain should parse the cloud chain");
+        std::env::remove_var("GROQ_API_KEY");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
 }
