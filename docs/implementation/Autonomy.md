@@ -3,26 +3,44 @@
 > Detailed module designs for the six autonomy phases (A-F) described
 > in [[../architecture/Full-Life-Roadmap]]. Also see
 > [[Safety-Model]] for rate limits, kill switches, and audit log.
+>
+> **Status (Apr 2026): all phases A–G plus token-budget and
+> proposal-expiry sweeps shipped and verified on emulator + OnePlus 6T.**
 
 ---
 
-## Module layout
+## Module layout (as shipped)
 
 ```
 crates/peko-core/src/
-├── autonomy.rs        [NEW]  AutonomyConfig + rate limiter + kill switch
-├── reflector.rs       [NEW]  Phase A — post-action self-evaluation
-├── motivation.rs      [NEW]  Phase D — internal drives
-├── life_loop.rs       [NEW]  Phase B — idle heartbeat
-├── curiosity.rs       [NEW]  Phase E — exploration strategy
-├── goal.rs            [NEW]  Phase F — proactive goal generation
-├── memory.rs          [MOD]  Phase C — gardener methods
-├── task_queue.rs      [MOD]  TaskSource::Internal variant
-└── lib.rs             [MOD]  wire exports
+├── reflector.rs       — Phase A — post-action self-evaluation
+│                        auto-fires from task_queue; writes
+│                        MemoryCategory::Reflection entries.
+├── motivation.rs      — Phase D — internal drives (curiosity/competence/
+│                        social/coherence), events fired by code paths
+│                        only (not LLM), decay toward 0.5 baseline 1%/hr.
+├── life_loop.rs       — Phase B — heartbeat + RateLimiter + TokenBudget
+│                        + expire_old called per tick; LifeLoopHandle
+│                        exposes snapshot/pause/resume.
+├── curiosity.rs       — Phase E — candidate list with recent_prompts
+│                        dedup; never re-proposes a pending suggestion.
+├── goal.rs            — Phase F — pattern-driven proactive goals
+│                        (GoalGenerator::top).
+├── gardener.rs        — Phase C — daily prune + importance decay;
+│                        cron-driven, skills exempt.
+├── hardware.rs        — first-boot modem auto-probe (AT → /dev/smd11
+│                        etc.), cached in detected_hardware.json.
+├── memory.rs          — MemoryCategory::Reflection variant;
+│                        prune()/decay_importance() callers in gardener.
+├── task_queue.rs      — TaskSource::Internal variant; fires Reflector +
+│                        DriveEvent per completion; skips reflection for
+│                        internal tasks to avoid loops.
+└── lib.rs             — exports all of the above.
 ```
 
-All modules live in `peko-core` so `peko-agent` (the binary) can compose them
-in `main.rs` without leaking cross-crate concerns.
+Integration test: `crates/peko-core/tests/life_loop_e2e.rs` — proves
+proposals appear when enabled + curiosity high, stay silent when disabled,
+and Motivation persists across save/load.
 
 ---
 

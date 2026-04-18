@@ -79,33 +79,50 @@ Two cooperating processes on the device, linked by a Unix Domain Socket. The age
 ### Agent Core
 - **ReAct loop** with streaming LLM calls (SSE)
 - **Dual-Brain router** — routes simple/skill-matched tasks to an on-device model, complex tasks to cloud; local brain can escalate
+- **Multi-provider cloud chain** — `brain = "local:anthropic,openrouter"` tries anthropic first, falls back to openrouter on rate-limit/error. 7 cloud providers supported: anthropic, openrouter, openai, groq, deepseek, mistral, together.
 - **13 tools** for full device control
 - **Context compression** for long-running tasks
 - **Iteration budget** with atomic interrupt
 - **Session persistence** (SQLite)
-- **Provider failover** chain (Anthropic, OpenAI-compatible, UDS-local)
 
 ### Learning Loop
 - **Memory system** — FTS5 full-text search across persistent memories, auto-injected into prompts, periodic nudge to save important facts
 - **Skills system** — Agent creates reusable procedures from experience, tracks success/failure rates, self-improves when steps fail
 - **SOUL.md** — Customizable personality loaded from disk, editable via web UI
 
+### Autonomy (Full Life — shipped Apr 2026)
+- **Reflector** — auto-evaluates every completed task, writes a structured Reflection memory
+- **Life Loop** — 60–300s heartbeat; decays drives, proposes exploration/review tasks when motivation thresholds cross
+- **Motivation drives** — curiosity / competence / social / coherence, updated by code events (not LLM), persist across reboots
+- **Curiosity** — proposes unseen tools to explore; dedupes against recent pending proposals
+- **Goal generator** — pattern-driven "helpful" tasks derived from memory + user model
+- **Memory gardener** — daily cron prunes low-importance, un-accessed memories + decays importance
+- **Token budget** — sliding-24h cap on autonomy spend; gates each tick
+- **Proposal expiry** — pending proposals older than 24h auto-expire
+- **Propose-only by default** — queues for user approval; flip to auto-execute after trust is established
+
 ### Interfaces
-- **Web UI** (port 8080) — Chat, Device monitor, Apps manager, Messages stream, Memory browser, Skills viewer, Config editor with SOUL.md
+- **Web UI** (port 8080) — Chat, Device monitor, Apps manager, Messages, Memory, Skills, **Life** tab (drives + proposals + rate limits), Config editor with **Brain Mode picker** (Dual / Local only / Cloud only)
 - **Telegram Bot** — Send tasks, receive responses + screenshots, /status /memories /skills commands
 - **Cron Scheduler** — Autonomous recurring tasks with Telegram delivery
 
 ### Hardware Access
 - **Touch injection** via evdev (`/dev/input/event*`) and uinput virtual devices
-- **Screen capture** via framebuffer mmap or screencap
-- **SMS/Calls** via AT commands to serial modem
+- **Screen capture** via framebuffer mmap or screencap fallback
+- **SMS/Calls** via AT commands to serial modem — **modem path auto-probed** on first boot (`/dev/smd11`, `/dev/smd1`, `/dev/ttyUSB*`, cached to `detected_hardware.json`)
 - **Text input** via synthetic key injection
 - **UI inspection** via uiautomator XML dump
 - **Package management** via pm/am/installd
 
-### ROM Integration
+### Deploy Paths
+- **Magisk module** ([`magisk/`](magisk/)) — works on any rooted ROM (stock, LineageOS, Pixel Experience). `./magisk/build-module.sh --install` builds + pushes + shows Magisk install steps. ~10 MB zip.
+- **LineageOS overlay** ([`rom/lineage-fajita/`](rom/lineage-fajita/)) — bakes peko into a custom ROM for OnePlus 6T. Docker-based build host (`Dockerfile` + `docker-compose.yml`) for reproducible builds on Apple Silicon / Intel.
+- **Stripped AOSP** ([`rom/agent-os/`](rom/agent-os/)) — frameworkless mode, peko IS the userspace. Scaffolded.
+- **Rooted ADB** ([`scripts/deploy.sh`](scripts/deploy.sh)) — push binary to `/system/bin/` via USB or wireless ADB.
+
+### ROM Integration (shared across deploy paths)
 - `init.rc` service (hybrid + frameworkless modes)
-- Complete SELinux policy (5 files)
+- Complete SELinux policy (5 `.te` files) + Magisk `sepolicy.rule` for rooted installs
 - AOSP build integration (Android.bp + device makefile)
 - Deploy script, boot test, SELinux denial collector
 
@@ -142,7 +159,22 @@ cargo run -- --config config/config.example.toml --port 8080
 ./emulator/deploy_test.sh
 ```
 
-### Real Android Device (rooted)
+### Real Android Device — Magisk module (easiest)
+
+```bash
+# Build ARM64 binary + daemon, package as Magisk module, push to /sdcard
+./magisk/build-module.sh --install
+
+# On phone: Magisk app → Modules → Install from storage → pick zip → Reboot
+# Verify
+adb forward tcp:8080 tcp:8080 && open http://localhost:8080
+```
+
+Works on any rooted ROM (stock, LineageOS, Pixel Experience, crDroid). The
+module ships peko-agent + peko-llm-daemon + default config; push a GGUF
+model to `/data/peko/models/local.gguf` to enable the local brain.
+
+### Real Android Device — init.rc service (rooted, non-Magisk)
 
 ```bash
 # Build for ARM64
@@ -154,6 +186,21 @@ cargo build --target aarch64-linux-android --release
 
 # Start
 adb shell su -c setprop sys.peko.start 1
+```
+
+### Custom LineageOS ROM (OnePlus 6T)
+
+```bash
+# Use the Docker build host — amd64 Ubuntu 22.04 with NDK + Rust + repo
+docker compose -f rom/lineage-fajita/docker-compose.yml run --rm builder
+
+# inside container (one-time):
+./rom/lineage-fajita/build.sh --init     # repo sync (~80 GB)
+# inside container (each build):
+./rom/lineage-fajita/build.sh            # mka bacon
+
+# flash from LineageOS recovery:
+adb sideload out/target/product/fajita/lineage-21.0-*-fajita.zip
 ```
 
 ## Project Structure
@@ -188,15 +235,14 @@ peko-agent/
 
 | Metric | Value |
 |---|---|
-| Rust source files | 51 |
-| Lines of Rust | 10,175 |
-| Tests passing | 54 |
-| Binary size (ARM64) | 4.1 MB |
-| Runtime RSS | ~6 MB |
+| Tests passing | 103 (lib + integration, workspace-wide) |
+| Binary size (ARM64) | 6.8 MB (peko-agent) + 3.1 MB (peko-llm-daemon) |
+| Runtime RSS | ~6 MB (agent) + 30–400 MB (daemon, model-dependent) |
 | Agent tools | 13 |
-| API endpoints | 24 |
-| Web UI tabs | 8 |
-| Obsidian docs | 48 |
+| Cloud LLM providers supported | 7 (anthropic, openrouter, openai, groq, deepseek, mistral, together) + generic OpenAI-compat |
+| Deploy paths | 4 (Magisk module, LineageOS overlay, stripped AOSP, rooted ADB) |
+| Web UI tabs | 8 (Chat, Device, Apps, Messages, Memory, Skills, Life, Config) |
+| Autonomy phases shipped | 7/7 (A–G + token budget + proposal expiry) |
 
 ## Configuration
 

@@ -65,16 +65,63 @@ open http://localhost:18080
 ./emulator/deploy_test.sh --skip-build  # deploy existing binary
 ```
 
-## Option 3: Real Android Device
+## Option 3: Real Android Device — Magisk module (recommended)
 
-Full Agent-as-OS on real hardware. Requires rooted device.
+Works on any rooted Android (stock ROM, LineageOS, Pixel Experience, …). No
+custom ROM build needed. `peko-agent` + `peko-llm-daemon` drop into
+`/system/bin` via Magisk overlay.
 
 ### Prerequisites
-- Rooted Android device (Magisk recommended)
-- ADB access
-- NDK installed
+- Bootloader unlocked + Magisk installed (`adb shell su -c id` shows `uid=0`)
+- Android NDK 27+ at `~/Library/Android/sdk/ndk/…` (or env `ANDROID_NDK_HOME`)
+- `rustup target add aarch64-linux-android`
 
 ### Deploy
+
+```bash
+# Cross-build + package + push to /sdcard + print Magisk install steps
+./magisk/build-module.sh --install
+
+# On the phone:
+#   Magisk app → Modules → Install from storage → pick peko-magisk-*.zip
+#   Reboot
+
+# Forward the web UI
+adb forward tcp:8080 tcp:8080 && open http://localhost:8080
+
+# See what the hardware auto-probe found
+adb shell cat /data/peko/detected_hardware.json
+```
+
+**Local LLM** (optional): push a GGUF model to the device, then the
+`peko-llm-daemon` started by the Magisk module picks it up at boot:
+```bash
+adb push your-model.gguf /sdcard/
+adb shell su -c 'mkdir -p /data/peko/models && mv /sdcard/your-model.gguf /data/peko/models/local.gguf'
+adb shell su -c 'am kill bin.peko-agent ; sleep 2'    # or reboot
+```
+
+### Brain mode picker (Settings → Brain Mode in the web UI)
+
+Three cards:
+- **Dual** — local GGUF + cloud escalation
+- **Local only** — just the GGUF
+- **Cloud only** — just a cloud provider
+
+Cloud dropdown: anthropic / openrouter / openai / groq / deepseek /
+mistral / together. Picking a provider auto-fills a sensible default
+model; override or leave blank.
+
+Advanced: chain fallback via `provider.brain` in `config.toml`:
+```toml
+brain = "local:groq,anthropic,openrouter"   # local escalates to groq,
+                                             # then anthropic, then openrouter
+```
+
+## Option 4: Real Android Device — init.rc service (non-Magisk)
+
+For rooted devices where you prefer a classic init service (bakes into
+`/system/bin` via `chmod +x`, starts via `class core`).
 
 ```bash
 # 1. Build
@@ -89,8 +136,7 @@ cargo build --target aarch64-linux-android --release
 adb shell su -c setprop sys.peko.start 1
 
 # 4. Access web UI
-adb forward tcp:8080 tcp:8080
-open http://localhost:8080
+adb forward tcp:8080 tcp:8080 && open http://localhost:8080
 ```
 
 ### Frameworkless Mode (no Android framework)
@@ -102,15 +148,41 @@ adb reboot
 # Device boots directly into the agent — no launcher, no apps, just Peko Agent
 ```
 
+## Option 5: Custom LineageOS ROM (OnePlus 6T)
+
+For when you want peko baked into the ROM itself rather than via Magisk.
+
+```bash
+# One-shot Docker build env (Ubuntu 22.04 + NDK + Rust + repo)
+docker compose -f rom/lineage-fajita/docker-compose.yml run --rm builder
+
+# Inside the container (first time):
+./rom/lineage-fajita/build.sh --init    # repo sync ~80GB, 30-60min
+./rom/lineage-fajita/build.sh           # mka bacon, 2-12hr first build
+
+# Flash from LineageOS recovery:
+adb sideload out/target/product/fajita/lineage-21.0-*-fajita.zip
+```
+
+See `rom/lineage-fajita/Dockerfile` + `docker-compose.yml` for the
+build host spec, and `rom/lineage-fajita/peko_overlay.mk` for what
+gets added to the ROM (strips ~25 AOSP apps, performance tuning,
+peko + daemon preinstalled).
+
 ## First Steps After Setup
 
-### 1. Configure LLM Provider
+### 1. Pick Brain Mode + configure provider
 
-Go to **Config** tab in the web UI:
-- Select provider (OpenAI-Compatible for most APIs)
-- Enter API key
-- Set model name and base URL
-- Click **Save Changes**
+Go to **Config** tab in the web UI, then **Brain Mode** section:
+
+- **Dual** — local GGUF + cloud escalation. Enter GGUF path (e.g.
+  `/data/peko/models/local.gguf`) and pick a cloud provider + API key.
+- **Local only** — just the GGUF path. No cloud keys needed.
+- **Cloud only** — pick a provider, paste API key. Default model is
+  auto-filled; override if you want a different size.
+
+Click **Save Changes**. The settings are persisted to `config.toml`
+and the brain is rebuilt on next request.
 
 ### 2. Send Your First Task
 
@@ -145,6 +217,29 @@ notify = "telegram"
 ### 5. Customize Personality
 
 Go to **Config** tab > scroll to **SOUL.md** section > edit and save.
+
+### 6. Turn on Autonomy (Full Life)
+
+`[autonomy]` section of `config.toml`:
+
+```toml
+[autonomy]
+enabled = true                     # master switch
+tick_interval_secs = 300           # 60 for shakedown, 300 for daily use
+propose_only = true                # queue proposals for approval (start here)
+max_tokens_per_day = 50000         # cost safety — autonomous LLM cap
+max_internal_tasks_per_hour = 4    # rate limit
+max_internal_tasks_per_day = 20
+memory_gardener = true             # daily prune + importance decay
+memory_gardener_cron = "0 6 * * *"
+reflection = true                  # auto-eval every completed task
+curiosity = 0.10
+goal_generation = true
+```
+
+Watch the **Life** tab: drives tick, proposals appear, you approve/reject.
+After a week of propose-only you can flip `propose_only = false` for
+auto-execution.
 
 ## Troubleshooting
 

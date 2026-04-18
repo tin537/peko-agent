@@ -12,18 +12,25 @@ See [[../implementation/Safety-Model]] for the trust architecture.
 
 ## Phases at a glance
 
-| Phase | Module | Value | Effort | Score gain |
-|-------|--------|-------|--------|------------|
-| **A** | `reflector.rs` — automatic post-action self-evaluation | Quality of all future memories | 2-3h | +1 |
-| **B** | `life_loop.rs` — idle-time "heartbeat" thinker | Core of autonomous behavior | 4-6h | +2 |
-| **C** | `memory.rs` — gardener (pruning + summarization) | Avoid unbounded growth | 2-3h | +1 |
-| **D** | `motivation.rs` — drives (curiosity, competence, social, coherence) | Gives B a decision function | 2-3h | +1 |
-| **E** | `curiosity.rs` — exploration strategy | Tier 4 curiosity criterion | 3-4h | +1 |
-| **F** | `goal.rs` — pattern-driven proactive goals | Tier 4 self-direction | 4-5h | +2 |
-| **G** | Web UI "Life" tab | Transparency; trust | 3-4h | - |
+| Phase | Module | Value | Status |
+|-------|--------|-------|--------|
+| **A** | `reflector.rs` — automatic post-action self-evaluation | Quality of all future memories | ✅ Shipped (Apr 2026) — auto-fires from `task_queue` after every non-internal task |
+| **B** | `life_loop.rs` — idle-time "heartbeat" thinker | Core of autonomous behavior | ✅ Shipped — 60s tick verified on emulator + OP6T |
+| **C** | `gardener.rs` — daily prune + importance-decay pass | Avoid unbounded memory growth | ✅ Shipped — cron `0 6 * * *`, skills exempt |
+| **D** | `motivation.rs` — drives (curiosity, competence, social, coherence) | Gives B a decision function | ✅ Shipped — events fired from task_queue + approve/reject |
+| **E** | `curiosity.rs` — exploration strategy with dedup | Tier 4 curiosity criterion | ✅ Shipped — candidate-filter against recent proposals |
+| **F** | `goal.rs` — pattern-driven proactive goals | Tier 4 self-direction | ✅ Shipped — `GoalGenerator::top` |
+| **G** | Web UI "Life" tab | Transparency; trust | ✅ Shipped — drives + rate limits + tokens + proposals |
+| **Token budget** | `life_loop::TokenBudget` — sliding-24h spend cap | Cost safety for autonomy | ✅ Shipped — `max_tokens_per_day` enforced |
+| **Proposal expiry** | `LifeLoopHandle::expire_old` called per tick | Bounded proposal list | ✅ Shipped — 24h cutoff |
 
 **Baseline score:** 21.5/27 (Digital Life)
-**Post-A-F score estimate:** 26-27/27 (Advanced Life)
+**Current score estimate:** 26-27/27 (Advanced Life)
+
+Implementation artifacts: [[../../crates/peko-core/src/reflector.rs]],
+[[../../crates/peko-core/src/life_loop.rs]], [[../../crates/peko-core/src/gardener.rs]],
+[[../../crates/peko-core/src/motivation.rs]], [[../../crates/peko-core/src/curiosity.rs]],
+[[../../crates/peko-core/src/goal.rs]]. E2E test: `crates/peko-core/tests/life_loop_e2e.rs`.
 
 ---
 
@@ -54,15 +61,18 @@ One new section controls everything autonomous:
 enabled = false                    # master switch, default off
 tick_interval_secs = 300           # heartbeat period
 max_internal_tasks_per_hour = 4    # rate limit
+max_internal_tasks_per_day = 20    # rate limit
+max_tokens_per_day = 50000         # token budget (est: prompt/4 + 1000/task)
 propose_only = true                # queue for user approval; false auto-executes
 allowed_tools = [                  # whitelist for autonomous tasks
   "screenshot", "ui_inspect", "memory", "skills",
   "filesystem",                    # read-only ops only in v1
 ]
-memory_gardener_cron = "0 6 * * *" # daily 06:00 local
-reflection = true                  # Phase A
+memory_gardener = true             # Phase C on
+memory_gardener_cron = "0 6 * * *" # daily 06:00 UTC
+reflection = true                  # Phase A on
 curiosity = 0.1                    # 0-1; probability per tick
-goal_generation = true             # Phase F
+goal_generation = true             # Phase F on
 ```
 
 With all off (default), Peko behaves exactly as today.

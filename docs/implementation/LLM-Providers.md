@@ -1,6 +1,25 @@
 # LLM Providers
 
-> Anthropic, OpenAI-compatible, and local model implementations.
+> Anthropic, seven OpenAI-compatible clouds, embedded GGUF, and a UDS
+> local-daemon path — all behind a unified `LlmProvider` trait with
+> comma-separated chain fallback for dual-brain escalation.
+
+## Supported providers (as of Apr 2026)
+
+| Name in config | Backend | Env var | Default base URL |
+|---|---|---|---|
+| `anthropic` | `AnthropicProvider` | `ANTHROPIC_API_KEY` | `https://api.anthropic.com` |
+| `openrouter` | `OpenAICompatProvider` | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1` |
+| `openai` | `OpenAICompatProvider` | `OPENAI_API_KEY` | `https://api.openai.com/v1` |
+| `groq` | `OpenAICompatProvider` | `GROQ_API_KEY` | `https://api.groq.com/openai/v1` |
+| `deepseek` | `OpenAICompatProvider` | `DEEPSEEK_API_KEY` | `https://api.deepseek.com` |
+| `mistral` | `OpenAICompatProvider` | `MISTRAL_API_KEY` | `https://api.mistral.ai/v1` |
+| `together` | `OpenAICompatProvider` | `TOGETHER_API_KEY` | `https://api.together.xyz/v1` |
+| `embedded` | `EmbeddedProvider` (candle, in-process GGUF) | — | filesystem path |
+| `local` (UDS) | `UnixSocketProvider` → `peko-llm-daemon` | — | `unix://@peko-llm` |
+| *any other name* | Generic `OpenAICompatProvider` | — | `http://localhost:11434/v1` (Ollama) |
+
+Provider selection + routing is done by `build_dual_brain` in `peko-core/src/runtime.rs` (see [[Dual-Brain]]). For the brain-mode picker UI wired to this, see `src/web/ui.rs` — Settings → Brain Mode.
 
 ---
 
@@ -227,19 +246,53 @@ pub struct ProviderChain {
 }
 ```
 
-Tries providers in priority order defined in [[peko-config|config.toml]]:
+Used in two places now:
+
+### 1. Legacy `priority` list
 
 ```toml
 [provider]
 priority = ["anthropic", "openrouter", "local"]
 ```
 
-Failover triggers:
+Preserved for backward-compat; `build_provider_helper` still reads it.
+
+### 2. Brain-level cloud chain (preferred — Apr 2026)
+
+The `provider.brain` string now accepts **comma-separated chains** on either
+side of the colon:
+
+```toml
+[provider]
+brain = "local:anthropic,openrouter"
+# tries anthropic for escalation; if it rate-limits / errors, falls back
+# to openrouter. Missing api_keys are silently skipped at build time.
+```
+
+Examples:
+
+| `brain` value | Behavior |
+|---|---|
+| `"local:anthropic"` | Dual, single cloud (legacy behaviour preserved) |
+| `"local:anthropic,openrouter"` | Dual; anthropic primary, openrouter fallback |
+| `"local:groq,deepseek,openrouter"` | Dual; 3-deep chain of cheap options |
+| `"anthropic"` | Cloud-only, single |
+| `"anthropic,openrouter"` | Cloud-only with fallback (no local) |
+| `"local"` / `"embedded"` | Local-only, no cloud |
+
+Parsing happens in `build_dual_brain`; the chain is wrapped in
+`ProviderChain` when length ≥ 2, unwrapped to a bare `Box<dyn LlmProvider>`
+when length == 1. See the 4 unit tests in
+`crates/peko-core/src/runtime.rs` (`multi_provider_tests`).
+
+### Failover triggers
+
 - Connection timeout / network error
 - HTTP 429 (rate limited)
 - HTTP 500-599 (server error)
 
-Does NOT failover on:
+### Does NOT failover on
+
 - HTTP 400 (bad request — our fault, not transient)
 - HTTP 401/403 (auth error — won't fix itself)
 

@@ -1,10 +1,77 @@
 # Phase 6: Android Deploy
 
-> From standalone binary to init.rc service — the Agent-as-OS.
+> From standalone binary to on-device service. Three deploy paths shipped
+> — pick based on how committed you are to "Peko replaces the OS."
 
 ---
 
-## Goal
+## Three deploy paths
+
+| Path | What you install | Effort | Control |
+|---|---|---|---|
+| **A. Magisk module** ✅ shipped | `.zip` on top of any ROM with Magisk | 15 min | Coexists with Android |
+| **B. LineageOS overlay** ✅ scaffolded | Custom ROM with peko baked in | 2-6 hr build | Agent boots as `class core` |
+| **C. Stripped AOSP** (future) | Minimal ROM, peko IS the userspace | weeks | Agent-as-OS |
+
+**Start with A.** Get peko running on a real device today. Promote to B when
+you want boot-speed guarantees and process class. Reserve C for a v2 device.
+
+### Path A: Magisk module (recommended for dev iteration)
+
+Artifacts live at [[../../magisk/]]:
+- `peko-module/module.prop` — metadata for Magisk's module manager
+- `peko-module/post-fs-data.sh` — early boot: seed `/data/peko/{config.toml,SOUL.md}`
+- `peko-module/service.sh` — after boot_completed: deviceidle whitelist, log
+  rotation, start `peko-llm-daemon` (if GGUF present) + `peko-agent`
+- `peko-module/sepolicy.rule` — minimal allows under the magisk domain
+- `peko-module/system/etc/peko/config.toml` — defaults shipped with install
+- `build-module.sh` — cross-builds cargo + stages binaries + zips
+
+Flash flow:
+```bash
+./magisk/build-module.sh --install   # cross-build + adb push + print install steps
+# On phone: Magisk app → Modules → Install from storage → pick the zip → Reboot
+```
+
+After reboot:
+```bash
+adb forward tcp:8080 tcp:8080 && open http://localhost:8080
+adb shell cat /data/peko/detected_hardware.json   # what modem was auto-probed
+```
+
+Verified on OnePlus 6T (fajita) + LineageOS 21.
+
+### Path B: LineageOS overlay
+
+Artifacts live at [[../../rom/lineage-fajita/]]. Pulls the official fajita
+device tree, overlays peko as `device/peko/common`, inherits from
+`lineage_fajita.mk`. Uses `Docker` (or a Linux build host) via
+`rom/lineage-fajita/Dockerfile` + `docker-compose.yml`.
+
+```bash
+docker compose -f rom/lineage-fajita/docker-compose.yml run --rm builder
+# inside container:
+./rom/lineage-fajita/build.sh --init   # repo sync (~80 GB, 30-60 min)
+./rom/lineage-fajita/build.sh          # mka bacon (2-12 hr)
+adb sideload out/target/product/fajita/lineage-21.0-*-fajita.zip
+```
+
+Overlay components:
+- `local_manifest.xml` — pulls fajita device + peko overlay into `.repo/`
+- `peko_overlay.mk` — product makefile inherited by lineage_fajita.mk
+- `remove_apps.mk` — strips ~25 AOSP/LOS packages (Calendar, Gallery, Email, Music…)
+- `boot_tuning.mk` — dex2oat=speed, dalvik heap, zram/lz4, SurfaceFlinger offsets, doze whitelist
+- `peko-performance.rc` — runtime init service: schedutil governor, deviceidle whitelist, `peko-llm-daemon` with 5s crash backoff
+
+### Path C: Stripped AOSP (future)
+
+Frameworkless mode — peko replaces SystemUI + Launcher3. Scaffolding at
+`rom/agent-os/` exists; not yet flashed on hardware. Covered by the
+original Goal / Prerequisites section below.
+
+---
+
+## Goal (Paths B and C)
 
 Peko Agent boots from Android's init process, runs as a system daemon with proper SELinux policy, and survives reboots.
 
