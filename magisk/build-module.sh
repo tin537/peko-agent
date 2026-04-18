@@ -25,10 +25,12 @@ ZIP="$OUT_DIR/peko-magisk-${VERSION}.zip"
 
 SKIP_BUILD=false
 DO_INSTALL=false
+WITH_OVERLAY=false
 for a in "$@"; do
     case "$a" in
-        --skip-build) SKIP_BUILD=true ;;
-        --install)    DO_INSTALL=true ;;
+        --skip-build)   SKIP_BUILD=true ;;
+        --install)      DO_INSTALL=true ;;
+        --with-overlay) WITH_OVERLAY=true ;;
         *) echo "unknown arg: $a"; exit 1 ;;
     esac
 done
@@ -66,6 +68,32 @@ fi
 # Copy SOUL.md if present
 if [ -f "$REPO_ROOT/SOUL.md" ]; then
     install -m 0644 "$REPO_ROOT/SOUL.md" "$MODULE_DIR/system/etc/peko/SOUL.md"
+fi
+
+# ─── Optional: Android overlay APK as priv-app ────────────────────
+OVERLAY_DIR="$REPO_ROOT/android/peko-overlay"
+OVERLAY_APK="$OVERLAY_DIR/app/build/outputs/apk/release/app-release-unsigned.apk"
+PRIV_APP_DIR="$MODULE_DIR/system/priv-app/PekoOverlay"
+
+if [ "$WITH_OVERLAY" = true ]; then
+    echo "[+] Building peko-overlay APK (Gradle, release)"
+    (
+        cd "$OVERLAY_DIR"
+        ./gradlew :app:assembleRelease
+    )
+fi
+
+if [ -f "$OVERLAY_APK" ]; then
+    echo "[+] Including PekoOverlay.apk as priv-app"
+    mkdir -p "$PRIV_APP_DIR"
+    install -m 0644 "$OVERLAY_APK" "$PRIV_APP_DIR/PekoOverlay.apk"
+else
+    # Clean out any stale copy so we don't ship an old APK silently.
+    rm -rf "$PRIV_APP_DIR"
+    if [ "$WITH_OVERLAY" = true ]; then
+        echo "[x] --with-overlay set but APK not produced at $OVERLAY_APK"
+        exit 1
+    fi
 fi
 
 # ─── Pack the zip (Magisk accepts standard zip, META-INF optional) ─

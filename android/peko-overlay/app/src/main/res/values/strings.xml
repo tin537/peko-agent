@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Peko</string>
+    <string name="perm_title">Draw over other apps</string>
+    <string name="perm_body">Peko needs the "Display over other apps" permission so the floating chat stays visible while you use other apps.</string>
+    <string name="perm_grant">Open settings</string>
+    <string name="perm_retry">Check again</string>
+    <string name="notif_channel_name">Peko overlay</string>
+    <string name="notif_channel_desc">Keeps the floating Peko bubble alive in the background.</string>
+    <string name="notif_title">Peko is here</string>
+    <string name="notif_body">Tap the cat to chat.</string>
+    <string name="mascot_greet_idle">peko peko…</string>
+    <string name="mascot_thinking">peko is thinking</string>
+    <string name="mascot_working">peko is working</string>
+    <string name="mascot_done">done! *meow*</string>
+    <string name="chat_hint">Say something to Peko</string>
+    <string name="chat_send">Send</string>
+    <string name="chat_close">Close</string>
+</resources>

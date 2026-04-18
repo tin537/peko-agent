@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the web UI palette — zinc-900/violet-400 dark theme -->
+    <color name="peko_violet">#a78bfa</color>
+    <color name="peko_violet_dark">#7c3aed</color>
+    <color name="peko_bg">#18181b</color>
+    <color name="peko_bg_elev">#27272a</color>
+    <color name="peko_text">#e4e4e7</color>
+    <color name="peko_text_dim">#a1a1aa</color>
+    <color name="peko_cat_body">#fbbf24</color>
+    <color name="peko_cat_stripe">#f59e0b</color>
+    <color name="peko_cat_belly">#fef3c7</color>
+</resources>

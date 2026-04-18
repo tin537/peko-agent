@@ -13,6 +13,13 @@ sleep 8
 cmd deviceidle whitelist +bin.peko-agent >/dev/null 2>&1
 cmd deviceidle whitelist +bin.peko-llm-daemon >/dev/null 2>&1
 
+# If the Peko overlay app shipped with the module (installed as priv-app by
+# Magisk's systemless mount), auto-grant SYSTEM_ALERT_WINDOW so the user
+# doesn't have to trek through Settings after a fresh install.
+if pm list packages 2>/dev/null | grep -q '^package:com.peko.overlay$'; then
+    appops set com.peko.overlay SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
+fi
+
 # Rotate the log so we don't bloat — keep last 5 runs.
 # Shift oldest-to-newest: .4→.5, .3→.4, ... .1→.2, then current→.1
 if [ -f "$LOG" ]; then

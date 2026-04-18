@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Peko mascot — idle pose (eyes open, sitting).
+     Simple round-faced orange cat, kawaii proportions. 96dp viewport. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="96"
+    android:viewportHeight="96">
+
+    <!-- Ear tips (back) -->
+    <path
+        android:pathData="M26 30 L22 16 L36 24 Z"
+        android:fillColor="@color/peko_cat_stripe"/>
+    <path
+        android:pathData="M70 30 L74 16 L60 24 Z"
+        android:fillColor="@color/peko_cat_stripe"/>
+
+    <!-- Head -->
+    <path
+        android:pathData="M48 22 C72 22 80 40 80 54 C80 72 66 84 48 84 C30 84 16 72 16 54 C16 40 24 22 48 22 Z"
+        android:fillColor="@color/peko_cat_body"/>
+
+    <!-- Belly patch / cheeks highlight -->
+    <path
+        android:pathData="M48 58 C58 58 62 64 62 70 C62 76 56 80 48 80 C40 80 34 76 34 70 C34 64 38 58 48 58 Z"
+        android:fillColor="@color/peko_cat_belly"/>
+
+    <!-- Stripes (forehead) -->
+    <path
+        android:pathData="M40 34 L44 42 M48 32 L48 42 M56 34 L52 42"
+        android:strokeColor="@color/peko_cat_stripe"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"/>
+
+    <!-- Eyes (open) -->
+    <path
+        android:pathData="M37 50 A3 3 0 1 0 37 50.0001 Z"
+        android:fillColor="#18181b"/>
+    <path
+        android:pathData="M59 50 A3 3 0 1 0 59 50.0001 Z"
+        android:fillColor="#18181b"/>
+
+    <!-- Mouth (tiny ω shape) -->
+    <path
+        android:pathData="M44 64 Q48 68 52 64"
+        android:strokeColor="#18181b"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"/>
+
+    <!-- Nose -->
+    <path
+        android:pathData="M47 58 L49 58 L48 60 Z"
+        android:fillColor="#d97706"/>
+
+    <!-- Whiskers -->
+    <path
+        android:pathData="M30 60 L40 61 M30 64 L40 63 M66 61 L56 60 M66 63 L56 63"
+        android:strokeColor="#a16207"
+        android:strokeWidth="1"
+        android:strokeLineCap="round"/>
+</vector>
