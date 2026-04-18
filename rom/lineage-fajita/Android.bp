@@ -1,0 +1,23 @@
+// Android.bp — Prebuilt binaries for the LineageOS fajita overlay.
+// Merged by Soong when device/peko/common is in the source tree.
+//
+// peko-agent itself is declared in rom/layout/Android.bp — this file adds
+// the LLM daemon and the performance init script.
+
+cc_prebuilt_binary {
+    name: "peko-llm-daemon",
+    stem: "peko-llm-daemon",
+    srcs: ["../layout/peko-llm-daemon"],  // cross-built by build.sh
+    vendor: false,
+    compile_multilib: "64",
+    target: {
+        android_arm64: {
+            srcs: ["../layout/peko-llm-daemon"],
+        },
+    },
+    init_rc: [
+        "peko-performance.rc",
+    ],
+    // No separate SELinux domain — daemon runs under the peko_agent policy
+    // since they're tightly coupled and both need /dev/input + /dev/graphics.
+}

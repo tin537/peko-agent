@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  local_manifest.xml — LineageOS source-tree overlay for OnePlus 6T (fajita).
+
+  Place at:  .repo/local_manifests/peko.xml
+  Then:      repo sync -j$(nproc)
+
+  Pulls in:
+    - Existing LineageOS device/kernel/vendor trees for fajita
+    - The peko-agent checkout itself as an AOSP module
+    - A prebuilt binary path so peko-agent and peko-llm-daemon get picked up
+
+  Pins + notes:
+    - `lineage-21.0` == Android 14. Bump to `lineage-22.0` (A15) if available.
+    - If the upstream LineageOS project renames paths, adjust here.
+-->
+<manifest>
+
+  <!-- Device trees (officially maintained) -->
+  <project path="device/oneplus/fajita"
+           name="LineageOS/android_device_oneplus_fajita"
+           remote="github"
+           revision="lineage-21.0" />
+
+  <project path="device/oneplus/sdm845-common"
+           name="LineageOS/android_device_oneplus_sdm845-common"
+           remote="github"
+           revision="lineage-21.0" />
+
+  <project path="kernel/oneplus/sdm845"
+           name="LineageOS/android_kernel_oneplus_sdm845"
+           remote="github"
+           revision="lineage-21.0" />
+
+  <project path="vendor/oneplus"
+           name="TheMuppets/proprietary_vendor_oneplus"
+           remote="github"
+           revision="lineage-21.0" />
+
+  <!-- Peko Agent — cloned straight into the AOSP tree as a device overlay -->
+  <project path="device/peko/common"
+           name="YOUR_GITHUB/peko-agent"
+           remote="github"
+           revision="main"
+           clone-depth="1" />
+
+</manifest>
