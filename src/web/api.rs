@@ -117,7 +117,7 @@ async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
     let config = state.config.lock().await;
     let mut safe = config.clone();
     if let Some(provider) = safe.get_mut("provider") {
-        for key in ["anthropic", "openrouter", "local"] {
+        for key in ["anthropic", "openrouter", "local", "openai", "groq", "deepseek", "mistral", "together"] {
             if let Some(entry) = provider.get_mut(key) {
                 if let Some(api_key) = entry.get("api_key") {
                     if let Some(k) = api_key.as_str() {
@@ -167,7 +167,7 @@ async fn set_config(
     }
     if let Some(provider) = new_config.get("provider") {
         if let Some(existing_provider) = config.get("provider").cloned() {
-            for key in ["anthropic", "openrouter", "local"] {
+            for key in ["anthropic", "openrouter", "local", "openai", "groq", "deepseek", "mistral", "together"] {
                 if let Some(new_entry) = provider.get(key) {
                     let new_api_key = new_entry.get("api_key")
                         .and_then(|v| v.as_str())
@@ -189,6 +189,16 @@ async fn set_config(
             }
             if let Some(priority) = provider.get("priority") {
                 config["provider"]["priority"] = priority.clone();
+            }
+            // Brain routing string (e.g. "embedded:anthropic", "embedded",
+            // "anthropic"). Written directly — no merge needed.
+            if let Some(brain) = provider.get("brain") {
+                config["provider"]["brain"] = brain.clone();
+            }
+            // Embedded/GGUF local brain config — written directly. No api_key
+            // merge needed since there's no secret in this entry.
+            if let Some(embedded) = provider.get("embedded") {
+                config["provider"]["embedded"] = embedded.clone();
             }
         } else {
             config["provider"] = provider.clone();

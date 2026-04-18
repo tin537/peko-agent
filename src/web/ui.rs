@@ -191,36 +191,80 @@ tailwind.config = {
       <div id="cfgPanel" class="hidden">
         <div class="max-w-2xl mx-auto px-6 py-8 space-y-8">
 
-          <!-- LLM Provider -->
+          <!-- Brain Mode + Providers -->
           <section>
             <div class="flex items-center gap-2 mb-4">
               <svg class="w-4 h-4 text-violet-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"/></svg>
-              <h3 class="text-xs font-bold uppercase tracking-wider text-violet-400">LLM Provider</h3>
+              <h3 class="text-xs font-bold uppercase tracking-wider text-violet-400">Brain Mode</h3>
             </div>
             <div class="bg-zinc-900/80 rounded-xl border border-zinc-800/80 p-5 space-y-4">
-              <div>
-                <label for="cProv" class="block text-xs font-medium text-zinc-400 mb-1.5">Provider</label>
-                <select id="cProv" onchange="provChanged()" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors cursor-pointer">
-                  <option value="local">OpenAI-Compatible / Custom</option>
-                  <option value="openrouter">OpenRouter</option>
-                  <option value="anthropic">Anthropic</option>
-                </select>
+
+              <!-- Mode selector — 3 cards -->
+              <div class="grid grid-cols-3 gap-2" id="brainModeCards">
+                <label class="mode-card flex flex-col gap-1 p-3 rounded-lg bg-zinc-800 border border-zinc-700/40 cursor-pointer hover:border-violet-500/60 transition-colors" data-mode="dual">
+                  <input type="radio" name="brainMode" value="dual" class="sr-only" onchange="brainModeChanged()">
+                  <span class="text-sm text-zinc-200 font-medium">Dual</span>
+                  <span class="text-[11px] text-zinc-500 leading-tight">Local + cloud; local escalates when stuck</span>
+                </label>
+                <label class="mode-card flex flex-col gap-1 p-3 rounded-lg bg-zinc-800 border border-zinc-700/40 cursor-pointer hover:border-violet-500/60 transition-colors" data-mode="local">
+                  <input type="radio" name="brainMode" value="local" class="sr-only" onchange="brainModeChanged()">
+                  <span class="text-sm text-zinc-200 font-medium">Local only</span>
+                  <span class="text-[11px] text-zinc-500 leading-tight">Run a GGUF model on-device</span>
+                </label>
+                <label class="mode-card flex flex-col gap-1 p-3 rounded-lg bg-zinc-800 border border-zinc-700/40 cursor-pointer hover:border-violet-500/60 transition-colors" data-mode="cloud">
+                  <input type="radio" name="brainMode" value="cloud" class="sr-only" onchange="brainModeChanged()">
+                  <span class="text-sm text-zinc-200 font-medium">Cloud only</span>
+                  <span class="text-[11px] text-zinc-500 leading-tight">One provider, pay-per-use</span>
+                </label>
               </div>
-              <div>
-                <label for="cKey" class="block text-xs font-medium text-zinc-400 mb-1.5">API Key</label>
-                <input type="password" id="cKey" placeholder="sk-..." class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors placeholder-zinc-600">
+
+              <!-- Local brain config (shown for dual + local) -->
+              <div id="localBrainCfg" class="hidden space-y-3 pt-3 border-t border-zinc-800">
+                <div class="text-[11px] text-violet-400/80 uppercase tracking-wider font-semibold">Local GGUF model</div>
+                <div>
+                  <label for="gguf_path" class="block text-xs font-medium text-zinc-400 mb-1.5">Model file path</label>
+                  <input id="gguf_path" placeholder="/data/peko/models/local.gguf" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors placeholder-zinc-600">
+                  <p class="text-[11px] text-zinc-500 mt-1">Absolute path to a .gguf file on the device. Push with <code class="text-zinc-300">adb push your-model.gguf /data/peko/models/local.gguf</code>.</p>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label for="gguf_ctx" class="block text-xs font-medium text-zinc-400 mb-1.5">Context</label>
+                    <input type="number" id="gguf_ctx" value="2048" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors">
+                  </div>
+                  <div>
+                    <label for="gguf_maxtok" class="block text-xs font-medium text-zinc-400 mb-1.5">Max tokens</label>
+                    <input type="number" id="gguf_maxtok" value="512" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors">
+                  </div>
+                </div>
               </div>
-              <div>
-                <label for="cModel" class="block text-xs font-medium text-zinc-400 mb-1.5">Model</label>
-                <input id="cModel" placeholder="e.g. mimo-v2-omni" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors placeholder-zinc-600">
-              </div>
-              <div>
-                <label for="cUrl" class="block text-xs font-medium text-zinc-400 mb-1.5">Base URL</label>
-                <input id="cUrl" placeholder="https://api.example.com/v1" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors placeholder-zinc-600">
-              </div>
-              <div>
-                <label for="cMaxTok" class="block text-xs font-medium text-zinc-400 mb-1.5">Max Tokens</label>
-                <input type="number" id="cMaxTok" value="4096" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors">
+
+              <!-- Cloud brain config (shown for dual + cloud) -->
+              <div id="cloudBrainCfg" class="hidden space-y-3 pt-3 border-t border-zinc-800">
+                <div class="text-[11px] text-violet-400/80 uppercase tracking-wider font-semibold">Cloud provider</div>
+                <div>
+                  <label for="cloud_provider" class="block text-xs font-medium text-zinc-400 mb-1.5">Provider</label>
+                  <select id="cloud_provider" onchange="cloudProviderChanged()" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors cursor-pointer">
+                    <option value="anthropic">Anthropic (claude-sonnet-4)</option>
+                    <option value="openrouter">OpenRouter (any model)</option>
+                    <option value="openai">OpenAI (gpt-4o, gpt-4o-mini)</option>
+                    <option value="groq">Groq (llama-3.3-70b, free tier)</option>
+                    <option value="deepseek">DeepSeek (cheap, strong)</option>
+                    <option value="mistral">Mistral AI</option>
+                    <option value="together">Together.ai</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="cloud_key" class="block text-xs font-medium text-zinc-400 mb-1.5">API key</label>
+                  <input type="password" id="cloud_key" placeholder="sk-..." class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors placeholder-zinc-600">
+                </div>
+                <div>
+                  <label for="cloud_model" class="block text-xs font-medium text-zinc-400 mb-1.5">Model</label>
+                  <input id="cloud_model" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors placeholder-zinc-600">
+                </div>
+                <div>
+                  <label for="cloud_maxtok" class="block text-xs font-medium text-zinc-400 mb-1.5">Max tokens</label>
+                  <input type="number" id="cloud_maxtok" value="4096" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors">
+                </div>
               </div>
             </div>
           </section>
@@ -1005,19 +1049,97 @@ function newChat() {
 }
 
 /* ── Config ── */
+
+// Sensible default model per cloud provider — populated when user changes
+// the Cloud Provider dropdown if they haven't typed a model yet.
+var CLOUD_DEFAULT_MODELS = {
+  anthropic:  'claude-sonnet-4-20250514',
+  openrouter: 'anthropic/claude-sonnet-4',
+  openai:     'gpt-4o-mini',
+  groq:       'llama-3.3-70b-versatile',
+  deepseek:   'deepseek-chat',
+  mistral:    'mistral-large-latest',
+  together:   'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+};
+
+// Valid cloud provider names — used to parse the brain string.
+var CLOUD_PROVIDERS = ['anthropic','openrouter','openai','groq','deepseek','mistral','together'];
+
+// Parse `provider.brain` back into {mode, localName, cloudName}.
+// Accepts "local", "embedded", "<cloud>" for single-mode and
+// "<local>:<cloud>" (possibly comma-separated) for dual.
+function parseBrainString(brainStr) {
+  if (!brainStr) return { mode: 'cloud', cloudName: 'anthropic' };
+  var parts = brainStr.split(':');
+  if (parts.length === 1) {
+    var first = parts[0].split(',')[0].trim();
+    if (first === 'local' || first === 'embedded') return { mode: 'local' };
+    return { mode: 'cloud', cloudName: first };
+  }
+  return {
+    mode: 'dual',
+    localName: parts[0].split(',')[0].trim() || 'embedded',
+    cloudName: parts[1].split(',')[0].trim() || 'anthropic',
+  };
+}
+
+// Toggle which brain-config sub-forms are shown, and highlight the active
+// mode card. Called from the radio onchange and on initial load.
+function brainModeChanged() {
+  var mode = document.querySelector('input[name="brainMode"]:checked');
+  mode = mode ? mode.value : 'cloud';
+  document.getElementById('localBrainCfg').classList.toggle('hidden', mode === 'cloud');
+  document.getElementById('cloudBrainCfg').classList.toggle('hidden', mode === 'local');
+  document.querySelectorAll('.mode-card').forEach(function(card) {
+    var active = card.getAttribute('data-mode') === mode;
+    card.classList.toggle('border-violet-500', active);
+    card.classList.toggle('bg-violet-500/10', active);
+    card.classList.toggle('border-zinc-700/40', !active);
+  });
+}
+
+// When the user switches cloud providers, auto-fill the model field with a
+// sensible default — but only if the model field is empty (respects edits).
+function cloudProviderChanged() {
+  var p = document.getElementById('cloud_provider').value;
+  var modelEl = document.getElementById('cloud_model');
+  if (!modelEl.value.trim()) {
+    modelEl.value = CLOUD_DEFAULT_MODELS[p] || '';
+  }
+  modelEl.placeholder = CLOUD_DEFAULT_MODELS[p] || 'model id';
+}
+
 async function loadCfg() {
   try {
     var r = await fetch(API + '/api/config');
     var c = await r.json();
-    var prio = (c.provider && c.provider.priority ? c.provider.priority : ['local'])[0];
-    document.getElementById('cProv').value = prio;
-    var e = (c.provider && c.provider[prio]) ? c.provider[prio] : {};
-    var maskedKey = e.api_key || '';
-    document.getElementById('cKey').value = maskedKey;
-    document.getElementById('cKey').placeholder = maskedKey ? 'Key saved (enter new to change)' : 'Enter API key';
-    document.getElementById('cModel').value = e.model || '';
-    document.getElementById('cUrl').value = e.base_url || '';
-    document.getElementById('cMaxTok').value = e.max_tokens || 4096;
+    var prov = c.provider || {};
+
+    // ─ Brain mode ─
+    var parsed = parseBrainString(prov.brain);
+    var radio = document.querySelector('input[name="brainMode"][value="' + parsed.mode + '"]');
+    if (radio) radio.checked = true;
+
+    // ─ Local (GGUF) side ─
+    var emb = prov.embedded || {};
+    document.getElementById('gguf_path').value = emb.model || '';
+    document.getElementById('gguf_ctx').value = emb.context_window || 2048;
+    document.getElementById('gguf_maxtok').value = emb.max_tokens || 512;
+
+    // ─ Cloud side ─
+    var cloudName = parsed.cloudName || 'anthropic';
+    document.getElementById('cloud_provider').value = CLOUD_PROVIDERS.indexOf(cloudName) >= 0 ? cloudName : 'anthropic';
+    var cloudEntry = prov[cloudName] || {};
+    var k = cloudEntry.api_key || '';
+    document.getElementById('cloud_key').value = k;
+    document.getElementById('cloud_key').placeholder = k ? 'Key saved (enter new to change)' : 'sk-...';
+    document.getElementById('cloud_model').value = cloudEntry.model || '';
+    document.getElementById('cloud_model').placeholder = CLOUD_DEFAULT_MODELS[cloudName] || '';
+    document.getElementById('cloud_maxtok').value = cloudEntry.max_tokens || 4096;
+
+    brainModeChanged();
+
+    // ─ Agent + tools (unchanged) ─
     document.getElementById('cIter').value = (c.agent && c.agent.max_iterations) || 50;
     document.getElementById('cCtx').value = (c.agent && c.agent.context_window) || 200000;
     var t = c.tools || {};
@@ -1034,21 +1156,48 @@ async function loadCfg() {
   loadSoul();
 }
 
-function provChanged() {
-  var p = document.getElementById('cProv').value;
-  var urls = { local: '', openrouter: 'https://openrouter.ai/api/v1', anthropic: 'https://api.anthropic.com' };
-  document.getElementById('cUrl').value = urls[p] || '';
-}
-
 async function saveCfg() {
-  var prov = document.getElementById('cProv').value;
-  var keyVal = document.getElementById('cKey').value;
+  var mode = (document.querySelector('input[name="brainMode"]:checked') || {}).value || 'cloud';
+  var cloudName = document.getElementById('cloud_provider').value;
+  var cloudKey  = document.getElementById('cloud_key').value;
+  var cloudModel = document.getElementById('cloud_model').value || CLOUD_DEFAULT_MODELS[cloudName] || '';
+  var cloudMaxTok = parseInt(document.getElementById('cloud_maxtok').value) || 4096;
+  var ggufPath = document.getElementById('gguf_path').value;
+  var ggufCtx = parseInt(document.getElementById('gguf_ctx').value) || 2048;
+  var ggufMaxTok = parseInt(document.getElementById('gguf_maxtok').value) || 512;
+
+  // Build the `brain` string based on selected mode.
+  var brainStr;
+  if (mode === 'local')       brainStr = 'embedded';
+  else if (mode === 'cloud')  brainStr = cloudName;
+  else                        brainStr = 'embedded:' + cloudName;
+
+  var provider = { brain: brainStr, priority: [cloudName] };
+
+  // Only include embedded if mode uses local side
+  if (mode === 'local' || mode === 'dual') {
+    provider.embedded = {
+      model: ggufPath,
+      context_window: ggufCtx,
+      max_tokens: ggufMaxTok,
+    };
+  }
+
+  // Only include cloud provider entry if mode uses cloud side
+  if (mode === 'cloud' || mode === 'dual') {
+    provider[cloudName] = {
+      api_key: cloudKey || null,
+      model: cloudModel,
+      max_tokens: cloudMaxTok,
+    };
+  }
+
   var cfg = {
     agent: {
       max_iterations: parseInt(document.getElementById('cIter').value) || 50,
-      context_window: parseInt(document.getElementById('cCtx').value) || 200000
+      context_window: parseInt(document.getElementById('cCtx').value) || 200000,
     },
-    provider: { priority: [prov] },
+    provider: provider,
     tools: {
       shell: document.getElementById('tShell').checked,
       filesystem: document.getElementById('tFs').checked,
@@ -1058,20 +1207,15 @@ async function saveCfg() {
       text_input: document.getElementById('tText').checked,
       ui_dump: document.getElementById('tUi').checked,
       sms: document.getElementById('tSms').checked,
-      call: document.getElementById('tCall').checked
-    }
+      call: document.getElementById('tCall').checked,
+    },
   };
-  cfg.provider[prov] = {
-    api_key: keyVal || null,
-    model: document.getElementById('cModel').value,
-    base_url: document.getElementById('cUrl').value || null,
-    max_tokens: parseInt(document.getElementById('cMaxTok').value) || 4096
-  };
+
   try {
     var r = await fetch(API + '/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cfg)
+      body: JSON.stringify(cfg),
     });
     if (r.ok) {
       var el = document.getElementById('cfgSaved');
