@@ -195,6 +195,14 @@ pub struct ProviderConfig {
     ///   `"anthropic"` or `"a,b,c"`       cloud-only, with or without fallback
     #[serde(default)]
     pub brain: Option<String>,
+    /// Catch-all for user-named custom providers (e.g. `[provider.xiaomi]`,
+    /// `[provider.custom]`, `[provider.ollama]`). Without `#[serde(flatten)]`
+    /// here the strongly-typed parse would silently drop these sections,
+    /// and runtime::build_provider_by_name would then see an empty entry
+    /// and refuse to build the brain. Deserialised as arbitrary JSON so
+    /// new provider shapes don't require recompiling.
+    #[serde(flatten, default)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
