@@ -18,8 +18,9 @@
 //! modems and older/newer radio layouts.
 
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -71,8 +72,17 @@ pub fn resolve_modem(
     configured: Option<&str>,
     data_dir: &Path,
 ) -> Option<PathBuf> {
-    // 1. Explicit non-"auto" config wins. Empty / "auto" triggers probe.
+    // 1a. Explicit "disable" — user knows there's no usable modem (e.g.
+    //     OnePlus 6T, where RILD owns the AT channel). Skip both probe
+    //     and open attempts so main.rs doesn't even try to register
+    //     SMS/Call tools, keeping the boot log clean.
     if let Some(c) = configured {
+        let c = c.trim();
+        if matches!(c, "none" | "disabled" | "skip" | "off") {
+            debug!("modem probe disabled by config");
+            return None;
+        }
+        // 1b. Explicit path wins without probing.
         if !c.is_empty() && c != "auto" {
             return Some(PathBuf::from(c));
         }
@@ -103,6 +113,14 @@ pub fn resolve_modem(
 }
 
 /// Try each candidate in order; return the first that responds to AT.
+///
+/// Each candidate is probed inside its own watchdog thread with a hard
+/// join-timeout. This is belt-and-braces for kernels where *both* read()
+/// and poll() ignore O_NONBLOCK and lie about readiness (seen on Qualcomm
+/// glink_pkt on sdm845/fajita) — if the probe thread wedges inside
+/// `glink_pkt_read`, the main thread still moves on after the timeout
+/// and startup proceeds. The wedged thread leaks a single file descriptor
+/// until process exit; acceptable cost for a one-time boot probe.
 pub fn probe_modem() -> Option<PathBuf> {
     info!(candidates = PROBE_CANDIDATES.len(), "probing modem paths");
     for path in PROBE_CANDIDATES {
@@ -110,16 +128,16 @@ pub fn probe_modem() -> Option<PathBuf> {
         if !p.exists() {
             continue;
         }
-        match send_at_probe(p) {
-            Ok(true) => {
+        match probe_with_watchdog(p, PROBE_TIMEOUT_MS) {
+            Some(true) => {
                 info!(device = %path, "modem auto-detected");
                 return Some(PathBuf::from(path));
             }
-            Ok(false) => {
+            Some(false) => {
                 debug!(device = %path, "modem path exists but no OK response");
             }
-            Err(e) => {
-                debug!(device = %path, error = %e, "modem probe error");
+            None => {
+                debug!(device = %path, "modem probe wedged, moving on");
             }
         }
     }
@@ -127,41 +145,110 @@ pub fn probe_modem() -> Option<PathBuf> {
     None
 }
 
+/// Runs `send_at_probe` inside a detached thread and joins with a hard
+/// deadline. Returns:
+///   - `Some(true)`  — modem responded with `OK`
+///   - `Some(false)` — probe finished in time, no response / error
+///   - `None`        — probe thread wedged past the deadline; abandoned
+fn probe_with_watchdog(path: &Path, inner_timeout_ms: u64) -> Option<bool> {
+    let (tx, rx) = std::sync::mpsc::channel::<std::io::Result<bool>>();
+    let probe_path = path.to_path_buf();
+    // Detach — we never join this handle so a wedged probe doesn't keep
+    // us on the startup critical path.
+    std::thread::spawn(move || {
+        let _ = tx.send(send_at_probe(&probe_path));
+    });
+    // Outer deadline > inner deadline by a small margin so the inner loop's
+    // own poll timeout usually fires first; the watchdog is only invoked
+    // when the kernel ignores O_NONBLOCK entirely.
+    match rx.recv_timeout(Duration::from_millis(inner_timeout_ms + 300)) {
+        Ok(Ok(b)) => Some(b),
+        Ok(Err(_)) => Some(false),
+        Err(_) => None,
+    }
+}
+
 /// Write `AT\r` and return true if the response contains `OK` within
-/// PROBE_TIMEOUT_MS. Non-blocking + timeout-bounded so a hung character
-/// device doesn't hang peko's startup.
+/// PROBE_TIMEOUT_MS.
+///
+/// Implementation note: the previous version used `OpenOptions::custom_flags
+/// (O_NONBLOCK)` + `file.read()` in a sleep-loop. On Qualcomm sdm845/sdm660
+/// (OnePlus 6T/fajita, Redmi fog, Pixel 3 series) the glink_pkt char driver
+/// **silently ignores O_NONBLOCK on read()**, so the read() syscall enters
+/// the kernel and blocks forever inside `glink_pkt_read`, never honouring
+/// the loop's time budget. Symptom: peko-agent hangs in uninterruptible
+/// sleep after logging "probing modem paths", and `:8080` is never bound.
+///
+/// Fix: use `libc::poll()` before each read. poll() uses the driver's
+/// `.poll` fop (not `.read`) and returns readiness correctly even on the
+/// broken glink driver. If poll times out, we bail without ever calling
+/// read() on the hung FD. O_NONBLOCK is kept on open() itself as a safety
+/// belt in case the driver blocks inside open() too.
 fn send_at_probe(path: &Path) -> std::io::Result<bool> {
-    // O_NONBLOCK so a dead device doesn't block; we poll with a timeout.
     const O_NONBLOCK: i32 = 0o4000;
-    let mut file = OpenOptions::new()
+    let file = OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(O_NONBLOCK)
         .open(path)?;
 
-    // Best-effort: some modems need CRLF, some need just CR.
-    let _ = file.write_all(b"AT\r");
+    // Best-effort: some modems want CR, some CRLF. The write() path on
+    // glink is bounded (3-byte payload) and hasn't been observed to hang.
+    let _ = (&file).write_all(b"AT\r");
 
+    let fd = file.as_raw_fd();
     let deadline = Instant::now() + Duration::from_millis(PROBE_TIMEOUT_MS);
     let mut buf = [0u8; 256];
     let mut acc = Vec::with_capacity(256);
 
-    while Instant::now() < deadline {
-        match file.read(&mut buf) {
-            Ok(0) => std::thread::sleep(Duration::from_millis(10)),
-            Ok(n) => {
-                acc.extend_from_slice(&buf[..n]);
-                if acc.windows(2).any(|w| w == b"OK") {
-                    return Ok(true);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { libc::poll(&mut pfd as *mut _, 1, remaining.as_millis() as i32) };
+        match rc {
+            -1 => {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            0 => return Ok(false), // timeout — no data
+            _ => {
+                if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                    return Ok(false); // device in error/hangup state
+                }
+                if pfd.revents & libc::POLLIN == 0 {
+                    continue; // spurious wake, re-poll with remaining budget
+                }
+                let n = unsafe {
+                    libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                };
+                if n < 0 {
+                    let e = std::io::Error::last_os_error();
+                    match e.kind() {
+                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock => continue,
+                        _ => return Err(e),
+                    }
+                } else if n == 0 {
+                    return Ok(false); // EOF
+                } else {
+                    acc.extend_from_slice(&buf[..n as usize]);
+                    if acc.windows(2).any(|w| w == b"OK") {
+                        return Ok(true);
+                    }
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => return Err(e),
         }
     }
-    Ok(false)
 }
 
 #[cfg(test)]
