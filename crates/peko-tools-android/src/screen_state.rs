@@ -21,6 +21,8 @@ use std::process::{Command, Stdio};
 use std::sync::RwLock;
 use std::time::Duration;
 
+use peko_hal::InputDevice;
+
 /// Process-global lockscreen PIN, seeded from config.toml by main.rs
 /// at startup and updated by the `/api/config` POST handler when the
 /// user changes it in the UI. `None` = auto-unlock disabled; `Some(s)`
@@ -29,6 +31,34 @@ use std::time::Duration;
 /// RwLock rather than OnceLock because the UI save path needs to
 /// replace it at runtime, not just once at boot.
 static LOCK_PIN: RwLock<Option<String>> = RwLock::new(None);
+
+/// Kernel-level swipe that bypasses InputManagerService.
+///
+/// This is the key escape hatch that makes peko "agent as OS" actually
+/// deliver on that promise. `input swipe` / `input touchscreen swipe`
+/// route through InputManagerService.injectInputEvent(), which tags
+/// every event with FLAG_INJECTED. Android's keyguard window sets
+/// `INPUT_FEATURE_DISABLE_USER_ACTIVITY` and filters injected events —
+/// that's why userspace apps (and even root apps going through the
+/// `input` binary) can't dismiss the keyguard on a non-credential ROM.
+///
+/// Writing raw `input_event` structs to /dev/input/event2 is a
+/// different path entirely. InputReader in system_server picks them
+/// up from the kernel input device and delivers them to windows
+/// without the injected flag — they're indistinguishable from a
+/// finger on the glass. The keyguard accepts them.
+///
+/// Opens a fresh fd each call because we don't want to lock-contend
+/// with TouchTool on the shared Arc<Mutex<InputDevice>>, and opening
+/// /dev/input/eventN is a kernel-local operation (~100µs).
+fn raw_unlock_swipe() -> bool {
+    let Ok(mut dev) = InputDevice::find_touchscreen() else { return false; };
+    // Swipe from lower-middle (inside the touch area, above nav gesture
+    // bar) all the way up to mid-screen. Duration 150ms — matches a
+    // typical human fling; below 80ms the gesture detector rejects it
+    // as "accidental glitch", above 400ms it's treated as a drag start.
+    dev.inject_swipe(540, 2100, 540, 600, 150).is_ok()
+}
 
 /// Called at startup and whenever the user saves a new PIN through the
 /// Config UI. Empty / whitespace / non-digit values are treated as
@@ -151,10 +181,10 @@ pub fn ensure_awake() -> bool {
     //                              is typical when peko is in use), and
     //                              idempotent so calling every time is
     //                              fine. We never clear it — no point.
-    sh_silent("input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard; svc power stayon true");
+    sh_silent("input keyevent KEYCODE_WAKEUP; svc power stayon true");
 
     // Poll until PowerManager reports Awake. Usually 300–500ms after
-    // dismiss-keyguard on sdm845.
+    // the keyevent on sdm845.
     let deadline = std::time::Instant::now() + Duration::from_millis(WAKE_TIMEOUT_MS);
     while !is_awake() {
         if std::time::Instant::now() >= deadline { break; }
@@ -162,6 +192,15 @@ pub fn ensure_awake() -> bool {
     }
     // Even after Awake, SurfaceFlinger needs a few frames to paint into
     // the framebuffer before direct reads become meaningful.
+    std::thread::sleep(Duration::from_millis(POST_WAKE_SETTLE_MS));
+
+    // Kernel-level swipe-up to dismiss the no-credential keyguard.
+    // `wm dismiss-keyguard` is unreliable on LineageOS 20 (keyguard
+    // treats its own "dismiss" request as a hint and leaves the swipe
+    // overlay up), and shell `input swipe` is filtered by the keyguard
+    // window. Raw /dev/input/event2 writes reach the keyguard as if
+    // they were a finger — this is the whole point of running as root.
+    raw_unlock_swipe();
     std::thread::sleep(Duration::from_millis(POST_WAKE_SETTLE_MS));
 
     // PIN auto-entry. Only fires when:
