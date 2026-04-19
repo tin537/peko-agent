@@ -251,6 +251,7 @@ tailwind.config = {
                     <option value="deepseek">DeepSeek (cheap, strong)</option>
                     <option value="mistral">Mistral AI</option>
                     <option value="together">Together.ai</option>
+                    <option value="custom">Custom (OpenAI-compatible endpoint)</option>
                   </select>
                 </div>
                 <div>
@@ -260,6 +261,10 @@ tailwind.config = {
                 <div>
                   <label for="cloud_model" class="block text-xs font-medium text-zinc-400 mb-1.5">Model</label>
                   <input id="cloud_model" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors placeholder-zinc-600">
+                </div>
+                <div>
+                  <label for="cloud_base_url" class="block text-xs font-medium text-zinc-400 mb-1.5">Base URL <span class="text-zinc-500 font-normal">(optional — override default endpoint)</span></label>
+                  <input id="cloud_base_url" placeholder="https://api.example.com/v1" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors placeholder-zinc-600">
                 </div>
                 <div>
                   <label for="cloud_maxtok" class="block text-xs font-medium text-zinc-400 mb-1.5">Max tokens</label>
@@ -1060,10 +1065,14 @@ var CLOUD_DEFAULT_MODELS = {
   deepseek:   'deepseek-chat',
   mistral:    'mistral-large-latest',
   together:   'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+  custom:     '',
 };
 
 // Valid cloud provider names — used to parse the brain string.
-var CLOUD_PROVIDERS = ['anthropic','openrouter','openai','groq','deepseek','mistral','together'];
+// "custom" is a catch-all for arbitrary OpenAI-compatible endpoints; the
+// runtime treats any unknown provider name as generic openai-compat and
+// uses whatever base_url the entry supplies.
+var CLOUD_PROVIDERS = ['anthropic','openrouter','openai','groq','deepseek','mistral','together','custom'];
 
 // Parse `provider.brain` back into {mode, localName, cloudName}.
 // Accepts "local", "embedded", "<cloud>" for single-mode and
@@ -1107,6 +1116,13 @@ function cloudProviderChanged() {
     modelEl.value = CLOUD_DEFAULT_MODELS[p] || '';
   }
   modelEl.placeholder = CLOUD_DEFAULT_MODELS[p] || 'model id';
+  // The base_url override is optional for known providers, required for "custom".
+  var urlEl = document.getElementById('cloud_base_url');
+  if (p === 'custom') {
+    urlEl.placeholder = 'https://api.example.com/v1';
+  } else {
+    urlEl.placeholder = 'leave blank to use the default endpoint';
+  }
 }
 
 async function loadCfg() {
@@ -1128,16 +1144,21 @@ async function loadCfg() {
 
     // ─ Cloud side ─
     var cloudName = parsed.cloudName || 'anthropic';
-    document.getElementById('cloud_provider').value = CLOUD_PROVIDERS.indexOf(cloudName) >= 0 ? cloudName : 'anthropic';
+    // Known name → dropdown picks it directly. Unknown saved name (e.g. a
+    // prior "custom" entry under a different key) falls back to "custom".
+    var selected = CLOUD_PROVIDERS.indexOf(cloudName) >= 0 ? cloudName : 'custom';
+    document.getElementById('cloud_provider').value = selected;
     var cloudEntry = prov[cloudName] || {};
     var k = cloudEntry.api_key || '';
     document.getElementById('cloud_key').value = k;
     document.getElementById('cloud_key').placeholder = k ? 'Key saved (enter new to change)' : 'sk-...';
     document.getElementById('cloud_model').value = cloudEntry.model || '';
-    document.getElementById('cloud_model').placeholder = CLOUD_DEFAULT_MODELS[cloudName] || '';
+    document.getElementById('cloud_model').placeholder = CLOUD_DEFAULT_MODELS[selected] || '';
+    document.getElementById('cloud_base_url').value = cloudEntry.base_url || '';
     document.getElementById('cloud_maxtok').value = cloudEntry.max_tokens || 4096;
 
     brainModeChanged();
+    cloudProviderChanged(); // refresh placeholders for the current selection
 
     // ─ Agent + tools (unchanged) ─
     document.getElementById('cIter').value = (c.agent && c.agent.max_iterations) || 50;
@@ -1161,7 +1182,16 @@ async function saveCfg() {
   var cloudName = document.getElementById('cloud_provider').value;
   var cloudKey  = document.getElementById('cloud_key').value;
   var cloudModel = document.getElementById('cloud_model').value || CLOUD_DEFAULT_MODELS[cloudName] || '';
+  var cloudBaseUrl = (document.getElementById('cloud_base_url').value || '').trim();
   var cloudMaxTok = parseInt(document.getElementById('cloud_maxtok').value) || 4096;
+
+  // "custom" provider requires a base_url; otherwise the runtime would fall
+  // back to its localhost:11434 default and silently never reach the user's
+  // real endpoint.
+  if (cloudName === 'custom' && !cloudBaseUrl && (mode === 'cloud' || mode === 'dual')) {
+    alert('Custom provider needs a Base URL (e.g. https://api.example.com/v1)');
+    return;
+  }
   var ggufPath = document.getElementById('gguf_path').value;
   var ggufCtx = parseInt(document.getElementById('gguf_ctx').value) || 2048;
   var ggufMaxTok = parseInt(document.getElementById('gguf_maxtok').value) || 512;
@@ -1185,11 +1215,16 @@ async function saveCfg() {
 
   // Only include cloud provider entry if mode uses cloud side
   if (mode === 'cloud' || mode === 'dual') {
-    provider[cloudName] = {
+    var entry = {
       api_key: cloudKey || null,
       model: cloudModel,
       max_tokens: cloudMaxTok,
     };
+    // Only emit base_url when the user actually set one, so known providers
+    // keep using their defaults and we don't serialise empty strings into
+    // the saved config.
+    if (cloudBaseUrl) entry.base_url = cloudBaseUrl;
+    provider[cloudName] = entry;
   }
 
   var cfg = {

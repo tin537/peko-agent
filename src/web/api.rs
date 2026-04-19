@@ -116,17 +116,19 @@ async fn status(State(state): State<AppState>) -> Json<serde_json::Value> {
 async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
     let config = state.config.lock().await;
     let mut safe = config.clone();
-    if let Some(provider) = safe.get_mut("provider") {
-        for key in ["anthropic", "openrouter", "local", "openai", "groq", "deepseek", "mistral", "together"] {
-            if let Some(entry) = provider.get_mut(key) {
-                if let Some(api_key) = entry.get("api_key") {
-                    if let Some(k) = api_key.as_str() {
-                        if k.len() > 8 {
-                            entry["api_key"] = serde_json::Value::String(
-                                format!("{}...{}", &k[..4], &k[k.len()-4..])
-                            );
-                        }
-                    }
+    // Meta-keys under [provider] that are not themselves provider entries.
+    const PROVIDER_META: &[&str] = &["brain", "priority", "embedded"];
+    if let Some(provider) = safe.get_mut("provider").and_then(|p| p.as_object_mut()) {
+        // Mask api_key on every provider entry, regardless of name —
+        // user-named custom providers ("xiaomi", "foo", ...) must be
+        // protected too, not just the hardcoded ones.
+        for (name, entry) in provider.iter_mut() {
+            if PROVIDER_META.contains(&name.as_str()) { continue; }
+            if let Some(api_key) = entry.get("api_key").and_then(|v| v.as_str()) {
+                if api_key.len() > 8 {
+                    entry["api_key"] = serde_json::Value::String(
+                        format!("{}...{}", &api_key[..4], &api_key[api_key.len()-4..])
+                    );
                 }
             }
         }
@@ -166,25 +168,39 @@ async fn set_config(
         config["agent"] = agent.clone();
     }
     if let Some(provider) = new_config.get("provider") {
+        // Meta-keys that live under [provider] but aren't themselves
+        // provider entries and therefore get written directly without the
+        // api_key merge logic.
+        const PROVIDER_META: &[&str] = &["brain", "priority", "embedded"];
+
         if let Some(existing_provider) = config.get("provider").cloned() {
-            for key in ["anthropic", "openrouter", "local", "openai", "groq", "deepseek", "mistral", "together"] {
-                if let Some(new_entry) = provider.get(key) {
+            // Merge every key the UI sent, including user-named custom
+            // providers. The previous hardcoded list silently dropped any
+            // entry that wasn't anthropic/openrouter/openai/... which made
+            // custom OpenAI-compatible endpoints impossible to save.
+            if let Some(new_obj) = provider.as_object() {
+                for (name, new_entry) in new_obj {
+                    if PROVIDER_META.contains(&name.as_str()) { continue; }
+
                     let new_api_key = new_entry.get("api_key")
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
 
+                    // Empty or masked ("abcd...wxyz") key means the UI
+                    // didn't re-enter the secret — preserve the existing
+                    // one instead of clobbering it with the mask.
                     if new_api_key.is_empty() || new_api_key.contains("...") {
                         if let Some(existing_key) = existing_provider
-                            .get(key)
+                            .get(name)
                             .and_then(|e| e.get("api_key"))
                         {
                             let mut merged = new_entry.clone();
                             merged["api_key"] = existing_key.clone();
-                            config["provider"][key] = merged;
+                            config["provider"][name] = merged;
                             continue;
                         }
                     }
-                    config["provider"][key] = new_entry.clone();
+                    config["provider"][name] = new_entry.clone();
                 }
             }
             if let Some(priority) = provider.get("priority") {
