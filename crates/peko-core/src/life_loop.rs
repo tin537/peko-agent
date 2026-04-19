@@ -71,6 +71,16 @@ pub struct AutonomyState {
     #[serde(default)]
     pub tokens_max_per_day: u64,
     pub recent_proposals: Vec<Proposal>,
+    /// Total proposals ever generated (all statuses, not just the 20 in
+    /// `recent_proposals`). Lets the UI show "you've seen N proposals"
+    /// even when the trimmed list is empty.
+    #[serde(default)]
+    pub total_proposals: usize,
+    /// Row count of the agent's long-term memory store. Included here so
+    /// the autonomy panel can surface "something is growing" even on a
+    /// fresh boot where proposals are still zero.
+    #[serde(default)]
+    pub memory_count: usize,
 }
 
 /// Sliding-window rate limiter.
@@ -217,6 +227,7 @@ impl LifeLoop {
             token_budget: self.token_budget.clone(),
             max_tokens_per_day: self.config.max_tokens_per_day,
             motivation:   self.motivation.clone(),
+            memory:       self.memory.clone(),
         };
 
         if !self.config.enabled {
@@ -408,6 +419,10 @@ pub struct LifeLoopHandle {
     token_budget: Arc<Mutex<TokenBudget>>,
     max_tokens_per_day: u64,
     motivation:   Arc<Mutex<Motivation>>,
+    /// Shared with LifeLoop — lets snapshot() report the long-term
+    /// memory row count for the Autonomy UI without routing through
+    /// a separate endpoint.
+    memory:       Arc<Mutex<MemoryStore>>,
 }
 
 impl LifeLoopHandle {
@@ -452,8 +467,10 @@ impl LifeLoopHandle {
         let (last_hour, last_day) = self.rate_limiter.lock().await.snapshot();
         let tokens_last_day = self.token_budget.lock().await.spent_today();
         let proposals = self.proposals.lock().await.clone();
+        let total_proposals = proposals.len();
         // Return only the 20 most recent for UI rendering
         let recent: Vec<Proposal> = proposals.into_iter().rev().take(20).collect();
+        let memory_count: usize = self.memory.lock().await.count().unwrap_or(0);
         AutonomyState {
             enabled,
             paused: self.is_paused(),
@@ -463,6 +480,8 @@ impl LifeLoopHandle {
             tokens_last_day,
             tokens_max_per_day: self.max_tokens_per_day,
             recent_proposals: recent,
+            total_proposals,
+            memory_count,
         }
     }
 }

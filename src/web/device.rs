@@ -710,52 +710,144 @@ pub async fn messages_stream(State(_state): State<AppState>) -> Response {
 }
 
 fn get_recent_sms() -> Vec<serde_json::Value> {
-    // Try content provider via content command
-    let sms = shell("content query --uri content://sms/inbox --projection address:body:date --sort-order 'date DESC LIMIT 20' 2>/dev/null");
-    if sms.is_empty() { return vec![]; }
+    // Query the telephony provider database directly. peko-agent runs as
+    // root on Magisk-installed devices, so we can bypass the `content`
+    // CLI (which has a shell-quoting landmine around `date DESC LIMIT 20`
+    // that silently turned the command into a usage error).
+    //
+    // Android 11+ moved the DB to /data/user_de/0/; the legacy path is
+    // kept for older ROMs. Use whichever exists.
+    const DBS: &[&str] = &[
+        "/data/user_de/0/com.android.providers.telephony/databases/mmssms.db",
+        "/data/data/com.android.providers.telephony/databases/mmssms.db",
+    ];
+    let Some(db) = DBS.iter().find(|p| std::path::Path::new(*p).exists()) else {
+        return vec![];
+    };
+    // \x1f is the ASCII Unit Separator — guaranteed not to appear in an
+    // SMS address or body, so we can split fields without worrying about
+    // commas/tabs/quotes in the content.
+    let cmd = format!(
+        "sqlite3 -separator $'\\x1f' {} \"SELECT address, body, date FROM sms WHERE type=1 ORDER BY date DESC LIMIT 20;\"",
+        db
+    );
+    let out = shell(&cmd);
+    if out.trim().is_empty() { return vec![]; }
 
-    sms.lines().filter_map(|line| {
-        let addr = extract_field(line, "address=");
-        let body = extract_field(line, "body=");
-        let date = extract_field(line, "date=");
-        if addr.is_some() || body.is_some() {
-            Some(serde_json::json!({
-                "from": addr.unwrap_or_default(),
-                "body": body.unwrap_or_default(),
-                "date": date.unwrap_or_default(),
-            }))
-        } else { None }
+    out.lines().filter_map(|line| {
+        let parts: Vec<&str> = line.splitn(3, '\u{1f}').collect();
+        if parts.len() < 3 { return None; }
+        // `date` is ms since epoch — convert to an ISO8601 string for the UI.
+        let ts_ms = parts[2].parse::<i64>().ok()?;
+        let ts = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ts_ms)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_else(|| parts[2].to_string());
+        Some(serde_json::json!({
+            "from": parts[0],
+            "body": parts[1],
+            "date": ts,
+        }))
     }).collect()
 }
 
 fn get_current_notifications() -> Vec<serde_json::Value> {
-    let notifs = shell("dumpsys notification --noredact 2>/dev/null | grep -A5 'NotificationRecord' | head -50");
-    if notifs.is_empty() { return vec![]; }
+    // Full dumpsys output — no `grep -A5` prefilter, which was cutting off
+    // `tickerText=` / `android.text=` lines that live 10-20 rows below the
+    // NotificationRecord header. Scope is bounded by the total dump size
+    // (a few hundred KB on a busy device; fine to parse in-process).
+    let raw = shell("dumpsys notification --noredact 2>/dev/null");
+    if raw.is_empty() { return vec![]; }
 
-    let mut items = Vec::new();
-    let mut current_pkg = String::new();
-    let mut current_text = String::new();
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut cur_pkg:   Option<String> = None;
+    let mut cur_title: Option<String> = None;
+    let mut cur_text:  Option<String> = None;
+    let mut cur_ticker: Option<String> = None;
 
-    for line in notifs.lines() {
-        let trimmed = line.trim();
-        if trimmed.contains("pkg=") {
-            if !current_pkg.is_empty() {
-                items.push(serde_json::json!({"package":current_pkg,"text":current_text}));
+    // Extract text after `key=` on a dumpsys line. Two modes:
+    //   compact=true  — value ends at the next whitespace; used for pkg,
+    //                   uid, and other single-token fields so we don't
+    //                   slurp "user=... id=..." into the value.
+    //   compact=false — value ends at EOL; used for title/text/tickerText
+    //                   which contain spaces and the whole line belongs.
+    //
+    // Also unwraps the `String (…)` / `SpannableString (…)` / `CharSequence (…)`
+    // wrappers that Android's toString prefixes on notification fields.
+    fn after(line: &str, key: &str, compact: bool) -> Option<String> {
+        let start = line.find(key)? + key.len();
+        let rest = line[start..].trim_start_matches('"');
+        let end = if compact {
+            rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len())
+        } else {
+            rest.find(['\n', '\r']).unwrap_or(rest.len())
+        };
+        let mut v = rest[..end].trim().trim_end_matches('"').to_string();
+        // Android's toString on text fields wraps the content in a type
+        // prefix — `String (…)`, `SpannableString (…)`, `CharSequence (…)`.
+        // A multi-line SpannableString gets split across dumpsys rows, so
+        // we only see the opening half on the one line we matched.
+        // Strip the prefix regardless; trim the trailing `)` only if it's
+        // present on this line.
+        for prefix in ["String (", "SpannableString (", "CharSequence ("] {
+            if let Some(stripped) = v.strip_prefix(prefix) {
+                v = stripped.to_string();
+                if v.ends_with(')') {
+                    v.truncate(v.len() - 1);
+                }
+                break;
             }
-            current_pkg = trimmed.split("pkg=").nth(1)
-                .and_then(|s| s.split_whitespace().next())
-                .unwrap_or("").to_string();
-            current_text.clear();
         }
-        if trimmed.contains("tickerText=") || trimmed.contains("android.text=") {
-            current_text = trimmed.split('=').skip(1).collect::<Vec<_>>().join("=").trim().to_string();
-        }
-    }
-    if !current_pkg.is_empty() {
-        items.push(serde_json::json!({"package":current_pkg,"text":current_text}));
+        if v == "null" { return None; }
+        if v.is_empty() { return None; }
+        Some(v.trim().to_string())
     }
 
-    items.into_iter().take(20).collect()
+    let flush = |items: &mut Vec<serde_json::Value>,
+                 pkg: &mut Option<String>,
+                 title: &mut Option<String>,
+                 text: &mut Option<String>,
+                 ticker: &mut Option<String>| {
+        if let Some(p) = pkg.take() {
+            // Prefer the richest text we found: title+text, then text alone,
+            // then tickerText (which often has the fullest human-readable
+            // summary on TikTok / social apps).
+            let body = match (title.take(), text.take(), ticker.take()) {
+                (Some(t), Some(b), _) if !b.is_empty() => format!("{} — {}", t, b),
+                (Some(t), _,       _) if !t.is_empty() => t,
+                (_,       Some(b), _) if !b.is_empty() => b,
+                (_,       _,       Some(tk)) if !tk.is_empty() => tk,
+                _ => String::new(),
+            };
+            items.push(serde_json::json!({"package": p, "text": body}));
+        } else {
+            *title = None; *text = None; *ticker = None;
+        }
+    };
+
+    for raw_line in raw.lines() {
+        let line = raw_line.trim_start();
+        // Each NotificationRecord starts a fresh entry.
+        if line.starts_with("NotificationRecord(") {
+            flush(&mut items, &mut cur_pkg, &mut cur_title, &mut cur_text, &mut cur_ticker);
+            cur_pkg = after(line, "pkg=", true);
+            continue;
+        }
+        if cur_pkg.is_none() { continue; }
+
+        if let Some(t) = after(line, "android.title=",   false) { if cur_title.is_none()  { cur_title  = Some(t); } }
+        if let Some(t) = after(line, "android.text=",    false) { if cur_text.is_none()   { cur_text   = Some(t); } }
+        if let Some(t) = after(line, "android.bigText=", false) { cur_text = Some(t); }
+        if let Some(t) = after(line, "tickerText=",      false) { if cur_ticker.is_none() { cur_ticker = Some(t); } }
+    }
+    flush(&mut items, &mut cur_pkg, &mut cur_title, &mut cur_text, &mut cur_ticker);
+
+    // Drop the invisible system channel spam (android OS internal notifs
+    // with no text) and cap to 20 so the panel stays scannable.
+    items.retain(|it| {
+        it.get("text").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false)
+    });
+    items.truncate(20);
+    items
 }
 
 fn extract_field(line: &str, prefix: &str) -> Option<String> {

@@ -549,6 +549,30 @@ tailwind.config = {
             </div>
           </div>
 
+          <!-- Pulse — "something is happening" counters, useful when
+               proposals list is still empty on a fresh device -->
+          <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+            <h3 class="text-[10px] text-zinc-500 uppercase mb-3 font-bold tracking-wider">Life pulse</h3>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+              <div>
+                <p class="text-zinc-400 text-[10px] uppercase tracking-wider">Ticks</p>
+                <p class="text-zinc-100 font-mono" id="lifePulseTicks">0</p>
+              </div>
+              <div>
+                <p class="text-zinc-400 text-[10px] uppercase tracking-wider">Last tick</p>
+                <p class="text-zinc-100 font-mono text-xs" id="lifePulseLast">—</p>
+              </div>
+              <div>
+                <p class="text-zinc-400 text-[10px] uppercase tracking-wider">Memories</p>
+                <p class="text-zinc-100 font-mono" id="lifePulseMem">0</p>
+              </div>
+              <div>
+                <p class="text-zinc-400 text-[10px] uppercase tracking-wider">Proposals (total)</p>
+                <p class="text-zinc-100 font-mono" id="lifePulseProposals">0</p>
+              </div>
+            </div>
+          </div>
+
           <!-- Rate limit snapshot -->
           <div class="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
             <h3 class="text-[10px] text-zinc-500 uppercase mb-2 font-bold tracking-wider">Rate limits</h3>
@@ -1759,8 +1783,30 @@ async function loadAutonomy() {
     var tc = document.getElementById('lifeTokenCap');
     if (ts) ts.textContent = s.tokens_last_day || 0;
     if (tc) tc.textContent = s.tokens_max_per_day || 0;
+
+    // Pulse — raw counters that always have a value, so the panel
+    // doesn't look empty on a fresh device.
+    document.getElementById('lifePulseTicks').textContent = s.motivation.tick_count || 0;
+    document.getElementById('lifePulseLast').textContent  = s.motivation.updated_at
+      ? relativeTime(s.motivation.updated_at)
+      : '—';
+    document.getElementById('lifePulseMem').textContent   = s.memory_count || 0;
+    document.getElementById('lifePulseProposals').textContent = s.total_proposals || 0;
+
     renderProposals(s.recent_proposals || []);
   } catch (e) { /* ignore */ }
+}
+
+// Compact "3m ago" / "2h ago" formatter — always relative to now so a stale
+// page still shows a sane number without needing a clock-sync.
+function relativeTime(iso) {
+  var t = Date.parse(iso);
+  if (!t) return iso;
+  var s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60)   return Math.round(s) + 's ago';
+  if (s < 3600) return Math.round(s / 60) + 'm ago';
+  if (s < 86400) return Math.round(s / 3600) + 'h ago';
+  return Math.round(s / 86400) + 'd ago';
 }
 
 function renderDrives(m) {
