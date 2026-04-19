@@ -87,6 +87,11 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
         config.security.as_ref().and_then(|s| s.lock_pin.clone())
     );
 
+    // Unlock tool — one-shot "wake + dismiss + PIN" that the agent
+    // reaches for when the user asks to unlock / log in. Always available
+    // (it only uses shell primitives + the PIN static).
+    registry.register(peko_tools_android::UnlockDeviceTool::new());
+
     // SMS tool — AT commands via serial modem
     if config.tools.sms {
         if let Some(ref path) = modem_path {

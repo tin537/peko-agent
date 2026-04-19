@@ -3,6 +3,7 @@ pub mod screen_state;
 pub mod touch;
 pub mod key_event;
 pub mod text_input;
+pub mod unlock_device;
 pub mod sms;
 pub mod call;
 pub mod shell;
@@ -26,6 +27,7 @@ pub use package_manager_tool::PackageManagerTool;
 pub use memory_tool::MemoryTool;
 pub use skills_tool::SkillsTool;
 pub use delegate_tool::DelegateTool;
+pub use unlock_device::UnlockDeviceTool;
 
 #[cfg(test)]
 mod tests;

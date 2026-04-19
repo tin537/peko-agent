@@ -149,3 +149,30 @@ pub fn ensure_awake() -> bool {
 fn is_awake() -> bool {
     sh("dumpsys power | grep -E 'mWakefulness='").contains("Awake")
 }
+
+/// Explicit unlock — wakes the screen if needed, then always types the
+/// configured PIN (even if the screen was already awake). Use this when
+/// the caller INTENDS to unlock, as opposed to ensure_awake which is a
+/// cautious pre-flight for any UI tool.
+///
+/// Returns:
+///   Ok(true)  — PIN was sent
+///   Ok(false) — no PIN configured, nothing to type (caller should
+///               check whether the screen was simply on a no-PIN
+///               lockscreen, which wm dismiss-keyguard already cleared)
+pub fn enter_pin_now() -> bool {
+    ensure_awake();
+    let Some(pin) = lock_pin() else { return false; };
+    let cmd = format!("input text {}; sleep 0.2; input keyevent KEYCODE_ENTER", pin);
+    let _ = Command::new("sh").arg("-c").arg(&cmd).status();
+    std::thread::sleep(Duration::from_millis(600));
+    true
+}
+
+/// Whether a lock PIN is currently configured. Exposed so the
+/// unlock_device tool can tell the agent "no PIN configured — I dismissed
+/// the basic swipe lock, that's all I can do" rather than lying about
+/// a successful unlock.
+pub fn has_lock_pin() -> bool {
+    lock_pin().is_some()
+}
