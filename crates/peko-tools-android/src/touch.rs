@@ -6,6 +6,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::screen_state::ensure_awake;
+
 pub struct TouchTool {
     device: Arc<Mutex<InputDevice>>,
 }
@@ -63,6 +65,9 @@ impl Tool for TouchTool {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolResult>> + Send + '_>> {
         let device = self.device.clone();
         Box::pin(async move {
+            // A tap on a dozing phone fires into the dimmed overlay, not
+            // the app below. Wake + swipe-dismiss before injecting.
+            ensure_awake();
             let action = args["action"].as_str().unwrap_or("tap");
             let x = args["x"].as_i64().ok_or_else(|| anyhow::anyhow!("missing x"))? as i32;
             let y = args["y"].as_i64().ok_or_else(|| anyhow::anyhow!("missing y"))? as i32;

@@ -1,4 +1,5 @@
 pub mod screenshot;
+pub mod screen_state;
 pub mod touch;
 pub mod key_event;
 pub mod text_input;

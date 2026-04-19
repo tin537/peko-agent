@@ -4,6 +4,8 @@ use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::screen_state::ensure_awake;
+
 pub struct UiAutomationTool;
 
 impl UiAutomationTool {
@@ -47,6 +49,9 @@ impl Tool for UiAutomationTool {
         args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolResult>> + Send + '_>> {
         Box::pin(async move {
+            // uiautomator dump and SurfaceFlinger capture both return stale
+            // / blank results against a dozing display; wake first.
+            ensure_awake();
             let action = args["action"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing 'action'"))?;
 

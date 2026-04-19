@@ -7,6 +7,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::screen_state::ensure_awake;
+
 /// Max dimension for LLM — resize larger screenshots to save tokens and bandwidth.
 /// 720p is enough for UI element recognition while keeping base64 under ~100KB.
 const MAX_DIMENSION: u32 = 720;
@@ -105,27 +107,19 @@ impl Tool for ScreenshotTool {
         _args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolResult>> + Send + '_>> {
         Box::pin(async move {
-            if let Some(ref device) = self.device {
-                let dev = device.lock().await;
-                let buffer = dev.capture()?;
+            // Wake the display + dismiss the keyguard before capturing,
+            // otherwise a dozing phone produces a blank image.
+            ensure_awake();
 
-                let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-                    buffer.width,
-                    buffer.height,
-                    buffer.data,
-                ).ok_or_else(|| anyhow::anyhow!("failed to create image buffer"))?;
-
-                let dyn_img = image::DynamicImage::ImageRgba8(img);
-                let (b64, w, h, size_kb) = resize_and_encode(&dyn_img);
-
-                Ok(ToolResult::with_image(
-                    format!("Screenshot captured ({}x{}, {}KB). The image is attached.", w, h, size_kb),
-                    b64,
-                    "image/jpeg".to_string(),
-                ))
-            } else {
-                Self::capture_via_screencap()
-            }
+            // Prefer `screencap` (goes through SurfaceFlinger, returns the
+            // composited display at native resolution) over direct
+            // framebuffer reads. On sdm845 and similar, /dev/graphics/fb0
+            // is a stale low-res AOD buffer and returns black, so the old
+            // "fb first, screencap fallback" order silently produced a
+            // useless image. The _device field is kept so devices that
+            // really do need fb access (headless, no SurfaceFlinger) can
+            // be special-cased later.
+            Self::capture_via_screencap()
         })
     }
 }

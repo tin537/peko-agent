@@ -6,6 +6,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use crate::screen_state::ensure_awake;
+
 pub struct TextInputTool {
     device: Arc<Mutex<UInputDevice>>,
 }
@@ -42,6 +44,7 @@ impl Tool for TextInputTool {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolResult>> + Send + '_>> {
         let device = self.device.clone();
         Box::pin(async move {
+            ensure_awake();
             let text = args["text"].as_str()
                 .ok_or_else(|| anyhow::anyhow!("missing 'text' parameter"))?;
 
