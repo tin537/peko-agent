@@ -133,6 +133,16 @@ async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
             }
         }
     }
+    // Mask the lock PIN — return a placeholder if one is set so the UI
+    // can render "PIN saved" without ever sending the digits back to
+    // the browser. Clearing happens by posting an explicit empty string.
+    if let Some(security) = safe.get_mut("security") {
+        if let Some(pin) = security.get("lock_pin").and_then(|v| v.as_str()) {
+            if !pin.is_empty() {
+                security["lock_pin"] = serde_json::Value::String("****".to_string());
+            }
+        }
+    }
     Json(safe)
 }
 
@@ -224,6 +234,25 @@ async fn set_config(
         config["tools"] = tools.clone();
     }
 
+    // Security — lockscreen PIN. The UI re-sends "****" as a sentinel
+    // for "keep what you already have", same convention as api_key.
+    // An empty string explicitly clears the PIN.
+    if let Some(security) = new_config.get("security") {
+        let incoming = security.get("lock_pin").and_then(|v| v.as_str()).unwrap_or("");
+        let keep_existing = incoming == "****" || incoming.contains("****");
+        if keep_existing {
+            // No-op: leave config["security"]["lock_pin"] as-is.
+        } else {
+            // Normalise: empty string / null → clear; otherwise store verbatim
+            // (set_lock_pin below validates it's digits-only).
+            let mut new_security = security.clone();
+            if incoming.is_empty() {
+                new_security["lock_pin"] = serde_json::Value::Null;
+            }
+            config["security"] = new_security;
+        }
+    }
+
     // Persist to disk so config survives restarts and updates
     let config_path = state.config_path.clone();
     let config_snapshot = config.clone();
@@ -233,6 +262,15 @@ async fn set_config(
         tracing::error!(error = %e, "failed to persist config to disk");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
+
+    // Push the (possibly new) PIN into the tools-android static so the
+    // next ensure_awake() call uses it without waiting for a restart.
+    let live_pin = config_snapshot
+        .get("security")
+        .and_then(|s| s.get("lock_pin"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    peko_tools_android::screen_state::set_lock_pin(live_pin);
 
     info!(path = %config_path.display(), "config saved to disk");
     StatusCode::OK

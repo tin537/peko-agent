@@ -294,6 +294,25 @@ tailwind.config = {
             </div>
           </section>
 
+          <!-- Security — lockscreen PIN for auto-unlock -->
+          <section>
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-violet-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"/></svg>
+              <h3 class="text-xs font-bold uppercase tracking-wider text-violet-400">Security</h3>
+            </div>
+            <div class="bg-zinc-900/80 rounded-xl border border-zinc-800/80 p-5">
+              <div>
+                <label for="lock_pin" class="block text-xs font-medium text-zinc-400 mb-1.5">
+                  Lock screen PIN <span class="text-zinc-500 font-normal">(optional — enables auto-unlock on a PIN-locked phone)</span>
+                </label>
+                <input type="password" id="lock_pin" placeholder="1234" inputmode="numeric" pattern="[0-9]*" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60 transition-colors placeholder-zinc-600">
+                <p class="text-[11px] text-zinc-500 mt-2 leading-relaxed">
+                  Stored plaintext in <code class="text-zinc-400">/data/peko/config.toml</code>. Anyone with root on the device can already read it, so this is no new exposure — but don't paste your bank-app PIN. Digits only. Leave blank to disable.
+                </p>
+              </div>
+            </div>
+          </section>
+
           <!-- Tools -->
           <section>
             <div class="flex items-center gap-2 mb-4">
@@ -1184,6 +1203,19 @@ async function loadCfg() {
     brainModeChanged();
     cloudProviderChanged(); // refresh placeholders for the current selection
 
+    // ─ Security (lockscreen PIN) ─
+    var savedPin = (c.security && c.security.lock_pin) || '';
+    var pinEl = document.getElementById('lock_pin');
+    // Backend sends "****" when a PIN is set — don't show the sentinel
+    // in the input, just hint that a PIN is saved via placeholder.
+    if (savedPin && savedPin.includes('****')) {
+      pinEl.value = '';
+      pinEl.placeholder = 'PIN saved — enter new digits to change, clear to remove';
+    } else {
+      pinEl.value = savedPin;
+      pinEl.placeholder = '1234';
+    }
+
     // ─ Agent + tools (unchanged) ─
     document.getElementById('cIter').value = (c.agent && c.agent.max_iterations) || 50;
     document.getElementById('cCtx').value = (c.agent && c.agent.context_window) || 200000;
@@ -1251,12 +1283,33 @@ async function saveCfg() {
     provider[cloudName] = entry;
   }
 
+  // Security — lock_pin conventions match the api_key flow:
+  //   - empty string       → clear the saved PIN
+  //   - "****" sentinel    → never sent; we emit "****" as "keep existing"
+  //   - digits             → new PIN
+  // The input is cleared on load when a PIN is already saved (see
+  // loadCfg), so an empty value there means "leave alone", not "clear".
+  var pinInput = document.getElementById('lock_pin').value.trim();
+  var pinPlaceholderShownSaved = document.getElementById('lock_pin').placeholder.indexOf('saved') >= 0;
+  var lockPinField;
+  if (pinPlaceholderShownSaved && pinInput === '') {
+    lockPinField = '****';           // keep what's already stored
+  } else {
+    lockPinField = pinInput;          // digits or empty-to-clear
+  }
+
+  if (lockPinField !== '' && lockPinField !== '****' && !/^[0-9]+$/.test(lockPinField)) {
+    alert('Lock PIN must be digits only');
+    return;
+  }
+
   var cfg = {
     agent: {
       max_iterations: parseInt(document.getElementById('cIter').value) || 50,
       context_window: parseInt(document.getElementById('cCtx').value) || 200000,
     },
     provider: provider,
+    security: { lock_pin: lockPinField },
     tools: {
       shell: document.getElementById('tShell').checked,
       filesystem: document.getElementById('tFs').checked,

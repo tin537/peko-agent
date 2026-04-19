@@ -18,7 +18,33 @@
 //! a stored PIN) dismisses the keyguard manually.
 
 use std::process::Command;
+use std::sync::RwLock;
 use std::time::Duration;
+
+/// Process-global lockscreen PIN, seeded from config.toml by main.rs
+/// at startup and updated by the `/api/config` POST handler when the
+/// user changes it in the UI. `None` = auto-unlock disabled; `Some(s)`
+/// = try to type `s` + ENTER after waking the display.
+///
+/// RwLock rather than OnceLock because the UI save path needs to
+/// replace it at runtime, not just once at boot.
+static LOCK_PIN: RwLock<Option<String>> = RwLock::new(None);
+
+/// Called at startup and whenever the user saves a new PIN through the
+/// Config UI. Empty / whitespace / non-digit values are treated as
+/// "disabled" so a partially-typed PIN doesn't lock us out.
+pub fn set_lock_pin(pin: Option<String>) {
+    let normalised = pin
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    if let Ok(mut guard) = LOCK_PIN.write() {
+        *guard = normalised;
+    }
+}
+
+fn lock_pin() -> Option<String> {
+    LOCK_PIN.read().ok().and_then(|g| g.clone())
+}
 
 /// Hard cap on how long we'll wait for `mWakefulness=Awake` after sending
 /// KEYCODE_WAKEUP. Empirically 600–900ms on sdm845 (fajita); we pad to
@@ -55,6 +81,16 @@ fn sh(cmd: &str) -> String {
 ///   - otherwise send `KEYCODE_WAKEUP`, wait for display, swipe up to
 ///     dismiss the basic no-PIN lockscreen
 pub fn ensure_awake() -> bool {
+    // Fast-path: if the display is already on, we assume the user or a
+    // previous call has already dealt with the keyguard. Don't re-type
+    // the PIN here — if there's an editable field focused, we'd inject
+    // the PIN into it, which is exactly the kind of surprise we want
+    // to avoid.
+    let was_already_awake = is_awake();
+    if was_already_awake {
+        return true;
+    }
+
     // Shell out via `sh -c` rather than Command::new("input") so we
     // always pick up /system/bin — Command's own PATH resolution can
     // miss it on Magisk-seeded environments.
@@ -89,6 +125,23 @@ pub fn ensure_awake() -> bool {
     // Even after Awake, SurfaceFlinger needs a few frames to paint into
     // the framebuffer before direct reads become meaningful.
     std::thread::sleep(Duration::from_millis(POST_WAKE_SETTLE_MS));
+
+    // PIN auto-entry. Only fires when:
+    //   - we were dozing at entry (so we're coming out of a locked state,
+    //     not mid-interaction — avoids typing into a focused TextField)
+    //   - a numeric PIN is configured in [security].lock_pin
+    // On non-secure devices the keyguard is already gone by now and the
+    // PIN digits land nowhere useful (launcher eats them); on PIN-locked
+    // devices they unlock the phone.
+    if let Some(pin) = lock_pin() {
+        // pin is already validated digits-only via set_lock_pin, so no
+        // shell-escaping gymnastics needed. Small sleep between text and
+        // ENTER so the IME framework commits the digits before we submit.
+        let cmd = format!("input text {}; sleep 0.2; input keyevent KEYCODE_ENTER", pin);
+        let _ = Command::new("sh").arg("-c").arg(&cmd).status();
+        // Unlock animation on Android 13 / sdm845 is ~400ms; add headroom.
+        std::thread::sleep(Duration::from_millis(600));
+    }
 
     true
 }

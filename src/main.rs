@@ -80,6 +80,13 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
         &config.agent.data_dir,
     );
 
+    // Seed the lockscreen PIN (if configured) so ensure_awake() can
+    // auto-unlock after waking the display. Updated live by the
+    // /api/config POST handler when the user changes it in the UI.
+    peko_tools_android::screen_state::set_lock_pin(
+        config.security.as_ref().and_then(|s| s.lock_pin.clone())
+    );
+
     // SMS tool — AT commands via serial modem
     if config.tools.sms {
         if let Some(ref path) = modem_path {

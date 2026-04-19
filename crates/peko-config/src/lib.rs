@@ -26,6 +26,26 @@ pub struct PekoConfig {
     /// Default-disabled. See docs/implementation/Safety-Model.md.
     #[serde(default)]
     pub autonomy: AutonomyConfig,
+    /// Optional security / lockscreen handling. Default-empty — only
+    /// populated when the user wants auto-unlock.
+    #[serde(default)]
+    pub security: Option<SecurityConfig>,
+}
+
+/// Lockscreen auto-unlock. If `lock_pin` is set, `ensure_awake()` will
+/// type the PIN and press ENTER after waking the display, so tasks can
+/// run even on a phone with a numeric lock set.
+///
+/// Security note: the PIN is stored plaintext in config.toml. Anyone
+/// with root on the device can already read it, so this is not a new
+/// exposure — just be aware before pasting your bank-app PIN in.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SecurityConfig {
+    /// Numeric PIN, digits only. Leave `None` / empty to disable
+    /// auto-unlock (agent will still wake the screen; if a credential
+    /// prompt appears, downstream tools will fail and report it).
+    #[serde(default)]
+    pub lock_pin: Option<String>,
 }
 
 /// Controls the "digital life" autonomous behavior stack.
