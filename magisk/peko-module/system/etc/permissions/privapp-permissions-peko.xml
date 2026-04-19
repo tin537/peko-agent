@@ -13,21 +13,36 @@
   world-readable 0644 perms so PackageManagerService can parse it during
   early boot before /data/ is mounted.)
 
-  Only signature|privileged permissions go here. Runtime permissions
-  (SEND_SMS, RECEIVE_SMS, etc.) are normal `uses-permission` entries in
-  the APK's own manifest and are granted because the APK lives in
-  /system/priv-app/ — they do NOT need a line below.
+  Two classes of permission get listed here:
 
-  Keep this list narrow — every line we add is a signed-level power
-  peko-shim gets that a regular app doesn't have. Justifications:
+  1. signature|privileged perms the shim needs (MODIFY_PHONE_STATE to
+     target a specific SIM via SmsManager.createForSubscriptionId).
 
-  - MODIFY_PHONE_STATE: lets SmsManager.createForSubscriptionId(subId)
-    target a specific SIM on multi-SIM devices. Without it, the shim
-    can still send via the default SIM, but can't route around a
-    SIM in an "emergency-only" state.
+  2. Hard-restricted dangerous runtime perms (SEND_SMS, RECEIVE_SMS,
+     READ_SMS). These need to be whitelisted here so PackageManager
+     marks them as RESTRICTION_SYSTEM_EXEMPT — otherwise the APPLY_-
+     RESTRICTION flag blocks even `pm grant` from making them usable,
+     and SmsManager.sendTextMessage() throws SecurityException at
+     runtime regardless of appops state.
+
+     Whitelisting here does NOT auto-grant the permission; it just
+     makes a subsequent `pm grant com.peko.shim.sms <perm>` actually
+     stick. service.sh re-runs `pm grant` on every boot as the
+     defence-in-depth layer — permission state on Android 13+ can
+     reset on package update / clear-data.
+
+  Justifications per line:
+
+  - MODIFY_PHONE_STATE: per-SIM routing, described above.
+  - SEND_SMS / RECEIVE_SMS / READ_SMS: the shim's whole purpose.
+    Without these whitelisted, the shim installs but every send
+    throws `uid ... does not have android.permission.SEND_SMS`.
 -->
 <permissions>
     <privapp-permissions package="com.peko.shim.sms">
         <permission name="android.permission.MODIFY_PHONE_STATE" />
+        <permission name="android.permission.SEND_SMS" />
+        <permission name="android.permission.RECEIVE_SMS" />
+        <permission name="android.permission.READ_SMS" />
     </privapp-permissions>
 </permissions>

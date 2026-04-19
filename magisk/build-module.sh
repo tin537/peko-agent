@@ -96,7 +96,21 @@ fi
 
 # ─── Optional: Android overlay APK as priv-app ────────────────────
 OVERLAY_DIR="$REPO_ROOT/android/peko-overlay"
-OVERLAY_APK="$OVERLAY_DIR/app/build/outputs/apk/release/app-release-unsigned.apk"
+# AGP names the APK "app-release.apk" when a signingConfig is applied,
+# "app-release-unsigned.apk" when not. Accept whichever is present —
+# signed is preferred for priv-app install (Android 13 PackageManager
+# silently rejects unsigned APKs from /system/priv-app).
+# Use [ -f ] rather than `ls | head` so set -euo pipefail doesn't
+# silently abort the script when only one of the candidate filenames
+# exists — pipefail + ls-missing-file bit us on this previously.
+OVERLAY_APK_DIR="$OVERLAY_DIR/app/build/outputs/apk/release"
+if   [ -f "$OVERLAY_APK_DIR/app-release.apk" ]; then
+    OVERLAY_APK="$OVERLAY_APK_DIR/app-release.apk"
+elif [ -f "$OVERLAY_APK_DIR/app-release-unsigned.apk" ]; then
+    OVERLAY_APK="$OVERLAY_APK_DIR/app-release-unsigned.apk"
+else
+    OVERLAY_APK=""
+fi
 OVERLAY_PRIV_DIR="$MODULE_DIR/system/priv-app/PekoOverlay"
 
 if [ "$WITH_OVERLAY" = true ]; then
@@ -124,7 +138,14 @@ fi
 # the module tree at system/etc/permissions/ — we just need to stage
 # the APK here and everything lines up at boot.
 SMS_SHIM_DIR="$REPO_ROOT/android/peko-sms-shim"
-SMS_SHIM_APK="$SMS_SHIM_DIR/app/build/outputs/apk/release/app-release-unsigned.apk"
+SMS_SHIM_APK_DIR="$SMS_SHIM_DIR/app/build/outputs/apk/release"
+if   [ -f "$SMS_SHIM_APK_DIR/app-release.apk" ]; then
+    SMS_SHIM_APK="$SMS_SHIM_APK_DIR/app-release.apk"
+elif [ -f "$SMS_SHIM_APK_DIR/app-release-unsigned.apk" ]; then
+    SMS_SHIM_APK="$SMS_SHIM_APK_DIR/app-release-unsigned.apk"
+else
+    SMS_SHIM_APK=""
+fi
 SMS_SHIM_PRIV_DIR="$MODULE_DIR/system/priv-app/PekoSmsShim"
 
 if [ "$WITH_SMS_SHIM" = true ]; then

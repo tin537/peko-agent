@@ -17,6 +17,21 @@ android {
         versionName   = "0.1.0"
     }
 
+    // Sign release with the Android debug keystore — correction to an
+    // earlier wrong assumption. Android 13 / LineageOS 20 PackageManager
+    // silently rejects unsigned priv-apps (no logcat, no toast, just no
+    // install). The debug keystore is fine because on a Magisk-rooted
+    // device the attacker model is already "root can do anything"; the
+    // signature exists only to pass PMS validation.
+    signingConfigs {
+        create("debug-style") {
+            storeFile     = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            storePassword = "android"
+            keyAlias      = "androiddebugkey"
+            keyPassword   = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -25,8 +40,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Ship unsigned — Magisk priv-app install doesn't need apk signing to work,
-            // but Play Store would. Add signingConfigs if you want a signed APK.
+            signingConfig = signingConfigs.getByName("debug-style")
         }
     }
 

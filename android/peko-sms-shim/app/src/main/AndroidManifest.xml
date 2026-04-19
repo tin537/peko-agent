@@ -50,10 +50,10 @@
 
         <!-- The only entry point. Explicit component name required because
              implicit broadcasts with custom actions are restricted on
-             Android 8+. peko-agent calls:
-                 am broadcast -n com.peko.shim.sms/.SmsCommandReceiver \
-                     -a com.peko.shim.sms.SEND \
-                     --es id <uuid> --es to <phone> --es body <text>
+             Android 8+. peko-agent invokes via `am broadcast` with
+             extras: id=<uuid>, to=<phone>, body=<text>. (See the
+             tool's Rust side in peko-tools-android/src/sms_framework.rs
+             for the exact command line.)
 
              android:permission is set so only callers holding
              SEND_SMS (root shell does, installed apps don't) can

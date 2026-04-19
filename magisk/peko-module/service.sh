@@ -20,6 +20,37 @@ if pm list packages 2>/dev/null | grep -q '^package:com.peko.overlay$'; then
     appops set com.peko.overlay SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
 fi
 
+# If the Peko SMS shim shipped alongside, grant its runtime permissions at
+# boot. These are NOT granted automatically even for priv-apps — they're
+# "hard-restricted" dangerous permissions (SEND_SMS and friends). The
+# privapp-permissions-peko.xml whitelists them so they're RESTRICTION_-
+# SYSTEM_EXEMPT and `pm grant` can actually stick; without that XML,
+# this grant silently no-ops. Make the result dir world-writable too
+# so the shim's app-UID can write JSON status files that peko-agent polls.
+if pm list packages 2>/dev/null | grep -q '^package:com.peko.shim.sms$'; then
+    for perm in \
+        android.permission.SEND_SMS \
+        android.permission.RECEIVE_SMS \
+        android.permission.READ_SMS \
+        android.permission.READ_PHONE_STATE \
+        android.permission.READ_PHONE_NUMBERS; do
+        pm grant com.peko.shim.sms "$perm" >/dev/null 2>&1 || true
+    done
+    # AppOps matches — package-level AND uid-level so runtime checks
+    # can't fall back to "ignore" for the shim's UID.
+    SHIM_UID=$(dumpsys package com.peko.shim.sms 2>/dev/null | awk -F'=' '/userId=/ {print $2; exit}' | awk '{print $1}')
+    for op in SEND_SMS RECEIVE_SMS READ_SMS READ_PHONE_NUMBERS; do
+        appops set com.peko.shim.sms "$op" allow >/dev/null 2>&1 || true
+        [ -n "$SHIM_UID" ] && appops set --uid "$SHIM_UID" "$op" allow >/dev/null 2>&1 || true
+    done
+    # /data/peko/sms_out is peko-agent's result directory; shim needs
+    # to write to it as an app UID. 0777 is fine on a rooted device —
+    # the directory only contains ephemeral JSON status files, and
+    # peko-agent cleans its own stale ones.
+    mkdir -p /data/peko/sms_out
+    chmod 0777 /data/peko/sms_out
+fi
+
 # Rotate the log so we don't bloat — keep last 5 runs.
 # Shift oldest-to-newest: .4→.5, .3→.4, ... .1→.2, then current→.1
 if [ -f "$LOG" ]; then

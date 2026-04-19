@@ -18,6 +18,22 @@ android {
         versionName   = "0.1.0"
     }
 
+    // Sign release with the Android debug keystore. priv-apps on stock
+    // Android 13 / LineageOS 20 silently fail to install if the APK is
+    // unsigned — PackageManager skips the scan with no logcat output.
+    // The debug keystore is fine here because on a Magisk-rooted device
+    // the attacker model is already "anyone with root can do anything";
+    // the signature exists only to satisfy PackageManagerService's
+    // validity check.
+    signingConfigs {
+        create("debug-style") {
+            storeFile     = file("${System.getProperty("user.home")}/.android/debug.keystore")
+            storePassword = "android"
+            keyAlias      = "androiddebugkey"
+            keyPassword   = "android"
+        }
+    }
+
     buildTypes {
         release {
             // No minification — there's basically nothing to shrink. A single
@@ -25,6 +41,7 @@ android {
             // the SmsManager reflection we do in SmsCommandReceiver can't be
             // broken by R8 renaming the androidx shim.
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug-style")
         }
     }
 
