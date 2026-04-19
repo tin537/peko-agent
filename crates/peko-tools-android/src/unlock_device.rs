@@ -2,6 +2,7 @@ use peko_core::tool::{Tool, ToolResult};
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
+use std::process::{Command, Stdio};
 
 use crate::screen_state::{enter_pin_now, has_lock_pin};
 
@@ -49,14 +50,42 @@ impl Tool for UnlockDeviceTool {
             let pin_available = has_lock_pin();
             let pin_sent = enter_pin_now();
 
-            let msg = match (pin_available, pin_sent) {
-                (true, true) => "Device unlocked — woke the display, dismissed keyguard, typed PIN + ENTER.",
-                (false, _) => "No PIN configured; woke the display and dismissed the basic keyguard. \
-                               If a credential prompt is still showing, set security.lock_pin in the Config tab.",
-                (true, false) => "Tried to unlock but the PIN entry failed. Check that security.lock_pin \
-                                  is a digits-only value in the config.",
+            // Best-effort post-check: did we actually land on the home screen?
+            // On LineageOS 20 most dumpsys fields lie about keyguard state
+            // (isKeyguardShowing stays true even on home), but the focused
+            // WINDOW/APP reliably flips from NotificationShade+keyguard to the
+            // launcher once the keyguard is actually dismissed. If the focus
+            // is still NotificationShade the keyguard didn't come down, no
+            // matter what our wake sequence reported.
+            let focus = Command::new("sh")
+                .arg("-c")
+                .arg("dumpsys window | grep -E '^  mCurrentFocus' | head -1")
+                .stdin(Stdio::null()).stderr(Stdio::null())
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            let still_on_keyguard = focus.contains("NotificationShade")
+                || focus.contains("Keyguard");
+
+            let (content, is_error) = match (pin_sent, still_on_keyguard) {
+                (_, false) =>
+                    ("Device unlocked — woke the display, dismissed keyguard, reached the home screen.".to_string(), false),
+                (true, true) =>
+                    ("Typed the configured PIN but the keyguard is still up. Either the PIN is wrong, \
+                      or the ROM is blocking injected input on the credential screen. Check \
+                      security.lock_pin and try again, or unlock the phone manually.".to_string(), true),
+                (false, true) if pin_available =>
+                    ("Woke the screen but couldn't enter the PIN — the `input` binary may be blocked \
+                      by sepolicy. Check dmesg for avc denials against comm=cmd.".to_string(), true),
+                (false, true) =>
+                    ("Woke the screen but the keyguard is still showing. No PIN is configured — on \
+                      LineageOS and many other Android 13 ROMs the swipe-to-unlock keyguard filters \
+                      programmatic input for security. Fix by one of: \
+                      (a) Settings > Security > Screen lock = None, \
+                      (b) set a PIN and add it under Config > Security > lock_pin, \
+                      (c) swipe the phone manually once then leave it on.".to_string(), true),
             };
-            Ok(ToolResult::success(msg.to_string()))
+            Ok(if is_error { ToolResult::error(content) } else { ToolResult::success(content) })
         })
     }
 }
