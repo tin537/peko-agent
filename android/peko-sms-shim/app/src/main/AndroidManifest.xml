@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Peko SMS shim. A headless priv-app whose only job is to convert a
+  broadcast from peko-agent into an SmsManager.sendTextMessage() call.
+
+  Why this exists:
+  - The `input`-style shell path (service call isms N ...) requires
+    hardcoding Android-version-specific transaction indices, which
+    breaks on every OS upgrade.
+  - The AT-over-serial path (SmsTool in peko-tools-android) doesn't
+    work on OnePlus / Pixel / Samsung devices because RILD owns the
+    modem channel exclusively.
+  - Using SmsManager via a bundled priv-app is the same path Android's
+    own Messages app uses. Stable across versions, survives updates.
+
+  All the declared permissions are "signature|privileged" or
+  "privileged" level — i.e. they cannot be granted at runtime on a
+  stock install. Grant happens via privapp-permissions-peko.xml at
+  /system/etc/permissions/ (shipped alongside the APK in the Magisk
+  module). Without that XML, the APK installs but can't send anything.
+
+  Deliberately NO MainActivity: there is nothing for a user to open.
+  The package shows up under Settings → Apps → System → Peko SMS
+  Shim and is there purely as a permissions carrier for the receiver.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Sending and reading -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+
+    <!-- Picking the right SIM on multi-SIM devices -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+
+    <!-- Privileged: allows subscriptionId routing for non-default SMS apps -->
+    <uses-permission
+        android:name="android.permission.MODIFY_PHONE_STATE"
+        tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:label="Peko SMS Shim"
+        android:description="@string/app_desc"
+        android:allowBackup="false"
+        android:hasFragileUserData="false"
+        android:hardwareAccelerated="false"
+        android:directBootAware="true">
+
+        <!-- The only entry point. Explicit component name required because
+             implicit broadcasts with custom actions are restricted on
+             Android 8+. peko-agent calls:
+                 am broadcast -n com.peko.shim.sms/.SmsCommandReceiver \
+                     -a com.peko.shim.sms.SEND \
+                     --es id <uuid> --es to <phone> --es body <text>
+
+             android:permission is set so only callers holding
+             SEND_SMS (root shell does, installed apps don't) can
+             trigger the receiver — a defence-in-depth layer on top of
+             peko-agent's own UID check inside onReceive(). -->
+        <receiver
+            android:name=".SmsCommandReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="true"
+            android:permission="android.permission.SEND_SMS">
+            <intent-filter>
+                <action android:name="com.peko.shim.sms.SEND" />
+                <action android:name="com.peko.shim.sms.STATUS" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Receiver for the PendingIntents SmsManager fires when the
+             message is actually sent / delivered by the radio. Writes
+             the outcome into the same result file so peko's poller
+             sees it. -->
+        <receiver
+            android:name=".SmsResultReceiver"
+            android:enabled="true"
+            android:exported="false"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="com.peko.shim.sms.RESULT" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

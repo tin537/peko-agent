@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_desc">Headless permission-carrier for peko-agent. Converts incoming broadcasts into real SmsManager.sendTextMessage calls so peko can send SMS without AT-over-serial.</string>
+</resources>

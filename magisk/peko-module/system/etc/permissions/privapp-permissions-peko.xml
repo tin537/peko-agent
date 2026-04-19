@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  privapp-permissions-peko.xml
+
+  Whitelists the privileged permissions that peko's bundled shim APKs
+  need. Without this file, Android rejects the APKs at boot with
+  "Package com.peko.shim.sms requires unavailable signature|privileged
+  permission" and uninstalls them from /system/priv-app, which would
+  silently break SMS sending.
+
+  Placement: /system/etc/permissions/
+  (staged by the Magisk module's systemless bind-mount; file must have
+  world-readable 0644 perms so PackageManagerService can parse it during
+  early boot before /data/ is mounted.)
+
+  Only signature|privileged permissions go here. Runtime permissions
+  (SEND_SMS, RECEIVE_SMS, etc.) are normal `uses-permission` entries in
+  the APK's own manifest and are granted because the APK lives in
+  /system/priv-app/ — they do NOT need a line below.
+
+  Keep this list narrow — every line we add is a signed-level power
+  peko-shim gets that a regular app doesn't have. Justifications:
+
+  - MODIFY_PHONE_STATE: lets SmsManager.createForSubscriptionId(subId)
+    target a specific SIM on multi-SIM devices. Without it, the shim
+    can still send via the default SIM, but can't route around a
+    SIM in an "emergency-only" state.
+-->
+<permissions>
+    <privapp-permissions package="com.peko.shim.sms">
+        <permission name="android.permission.MODIFY_PHONE_STATE" />
+    </privapp-permissions>
+</permissions>
