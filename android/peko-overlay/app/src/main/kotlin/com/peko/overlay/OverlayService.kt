@@ -110,6 +110,10 @@ class OverlayService : LifecycleService(), ViewModelStoreOwner, SavedStateRegist
             gravity = Gravity.TOP or Gravity.START
             x = 32
             y = 260
+            // ADJUST_PAN shifts the overlay up when the IME appears, so the
+            // TextField stays visible. ADJUST_RESIZE doesn't play nicely with
+            // WRAP_CONTENT overlays — pan is the correct choice here.
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
         }
 
         val view = ComposeView(this).apply {

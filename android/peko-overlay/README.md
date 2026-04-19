@@ -20,14 +20,24 @@ other app. Tap the cat to open a chat card that streams replies from
 
 - **Android Studio Ladybug (2024.2)** or newer, OR command-line **AGP 8.7** +
   **JDK 17** + Android SDK 35 with platform-tools.
+- **Gradle 8.7+** on `PATH`, OR a materialised wrapper (`gradlew` + `gradle/wrapper/gradle-wrapper.jar`).
+  The wrapper is NOT checked in — first time through, bootstrap it with:
+
+  ```bash
+  gradle wrapper --gradle-version 8.10
+  ```
+
+  After that, `./gradlew …` works as usual and other contributors pick up the
+  pinned version automatically.
 - Android device/emulator running **Android 8.0+ (API 26)**.
 
 ## Build
 
-From this directory:
+From this directory (either works):
 
 ```bash
-./gradlew :app:assembleRelease
+./gradlew :app:assembleRelease   # if the wrapper has been generated
+gradle   :app:assembleRelease    # plain host install
 ```
 
 Output APK:

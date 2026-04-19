@@ -79,7 +79,18 @@ if [ "$WITH_OVERLAY" = true ]; then
     echo "[+] Building peko-overlay APK (Gradle, release)"
     (
         cd "$OVERLAY_DIR"
-        ./gradlew :app:assembleRelease
+        if [ -x ./gradlew ]; then
+            ./gradlew :app:assembleRelease
+        elif command -v gradle >/dev/null 2>&1; then
+            # No wrapper checked in — fall back to the host Gradle install.
+            # Run `gradle wrapper` once to materialise gradlew/ for future builds.
+            gradle :app:assembleRelease
+        else
+            echo "[x] Neither ./gradlew nor 'gradle' found."
+            echo "    Install Gradle 8.7+ (brew install gradle) or run 'gradle wrapper'"
+            echo "    in $OVERLAY_DIR to generate the wrapper, then retry."
+            exit 1
+        fi
     )
 fi
 

@@ -4,8 +4,13 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -51,15 +56,12 @@ class PekoClient(private val baseUrl: String) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     fun runTask(prompt: String, sessionId: String?): Flow<PekoEvent> = callbackFlow {
-        val body = buildString {
-            append("{\"input\":")
-            append(json.encodeToString(kotlinx.serialization.builtins.serializer(), prompt))
-            if (sessionId != null) {
-                append(",\"session_id\":")
-                append(json.encodeToString(kotlinx.serialization.builtins.serializer(), sessionId))
-            }
-            append("}")
-        }
+        // Build request body via kotlinx.serialization's JSON DSL — safer than
+        // hand-rolling escapes for user-supplied prompt text.
+        val body = buildJsonObject {
+            put("input", prompt)
+            if (sessionId != null) put("session_id", sessionId)
+        }.toString()
 
         val req = Request.Builder()
             .url("$baseUrl/api/run")
@@ -97,12 +99,17 @@ class PekoClient(private val baseUrl: String) {
             "tool_result" -> PekoEvent.ToolResult(
                 name    = obj["name"]?.jsonPrimitive?.content ?: "?",
                 content = obj["content"]?.jsonPrimitive?.content ?: "",
-                isError = obj["is_error"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() == true,
+                // Server sends is_error as a JSON boolean, so prefer the
+                // typed accessor — .content would stringify "true"/"false"
+                // and hide a malformed payload.
+                isError = obj["is_error"]?.jsonPrimitive?.booleanOrNull ?: false,
             )
             "done"        -> PekoEvent.Done(
-                iterations = obj["iterations"]?.jsonPrimitive?.content?.toIntOrNull(),
-                sessionId  = obj["session_id"]?.jsonPrimitive?.content,
-                brain      = obj["brain"]?.jsonPrimitive?.content,
+                // contentOrNull / intOrNull treat JSON null properly; plain
+                // .content would surface it as the literal string "null".
+                iterations = obj["iterations"]?.jsonPrimitive?.intOrNull,
+                sessionId  = obj["session_id"]?.jsonPrimitive?.contentOrNull,
+                brain      = obj["brain"]?.jsonPrimitive?.contentOrNull,
             )
             "error"       -> PekoEvent.Error(obj["message"]?.jsonPrimitive?.content ?: "unknown")
             else -> null
