@@ -21,3 +21,15 @@ allow magisk gpu_device chr_file { read write open ioctl mmap getattr }
 # Web UI bind on port 8080
 allow magisk self tcp_socket { create bind listen accept read write getopt setopt }
 allow magisk unreserved_port tcp_socket { name_bind }
+
+# When peko-agent shells out to `input`, `wm`, or `svc`, the Android
+# `cmd` binary passes the caller's stderr file descriptor through a
+# binder transaction to system_server. service.sh runs peko-agent with
+# stdout/stderr redirected into /data/peko/peko.log, so the fd that
+# reaches system_server points at a `system_data_root_file`. Without
+# the rules below, sepolicy denies the write and the binder transaction
+# aborts with "Failed transaction (2147483646)" — which is exactly
+# what was silently breaking unlock_device, touch, and text_input.
+# Scope: just write+append on system_data_root_file, no read/unlink/etc.
+allow system_server system_data_root_file:file { write append open getattr };
+allow system_server system_data_root_file:dir  { search getattr };

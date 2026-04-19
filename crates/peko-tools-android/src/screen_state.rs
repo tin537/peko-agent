@@ -17,7 +17,7 @@
 //! will fail until the user (or a future `unlock_device` tool that inputs
 //! a stored PIN) dismisses the keyguard manually.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::RwLock;
 use std::time::Duration;
 
@@ -61,10 +61,42 @@ const POST_WAKE_SETTLE_MS: u64 = 400;
 
 /// Run a shell command and return trimmed stdout. Errors become empty
 /// strings — callers treat "empty" the same as "didn't match".
+///
+/// CRITICAL fd hygiene: every `input` / `wm` / `svc` / `cmd` invocation
+/// dispatches to system_server over binder, and system_server inherits
+/// our stderr fd through the chain. Our stderr points at
+/// /data/peko/peko.log (service.sh's `2>&1` redirect), and sepolicy
+/// denies system_server writing to that file. Without the fix below,
+/// system_server aborts the binder transaction when it can't emit
+/// diagnostics, so every tool call silently no-ops.
+///
+/// We spawn with `Stdio::null()` on stderr at the Rust level — that
+/// replaces the inherited fd before sh even sees it, so anything
+/// further down the process tree (including async subprocesses spawned
+/// by `cmd`) writes to /dev/null. Shell-level `2>/dev/null` alone isn't
+/// enough because it only applies to the direct child, not to whatever
+/// `input`/`cmd` fan out to internally.
 fn sh(cmd: &str) -> String {
-    Command::new("sh").arg("-c").arg(cmd).output()
+    Command::new("sh")
+        .arg("-c").arg(cmd)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+/// Fire-and-forget variant — same fd hygiene as `sh`, but we don't need
+/// the output. Used for side-effect commands (wake, dismiss, input text)
+/// where we only care that they don't bleed errors into our log or trip
+/// the sepolicy fd-inheritance trap.
+fn sh_silent(cmd: &str) {
+    let _ = Command::new("sh")
+        .arg("-c").arg(cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Wake the screen and attempt to dismiss a non-secure lockscreen.
@@ -95,6 +127,16 @@ pub fn ensure_awake() -> bool {
     // always pick up /system/bin — Command's own PATH resolution can
     // miss it on Magisk-seeded environments.
     //
+    // CRITICAL: redirect stdout+stderr to /dev/null. `input`, `wm`, and
+    // `svc` all dispatch to system_server over binder. system_server
+    // runs in u:r:system_server:s0 and inherits our file descriptors.
+    // Without redirects, system_server tries to write status/error to
+    // our fd 1/2 (which point to /data/peko/peko.log). SELinux denies
+    // system_server → system_data_root_file WRITE, which aborts the
+    // entire binder transaction with "Failed transaction (2147483646)".
+    // Net effect before this fix: every unlock_device call silently
+    // no-op'd while the agent was told everything worked.
+    //
     // Three commands, in order:
     //   1. KEYCODE_WAKEUP       — flip mWakefulness to Awake
     //   2. wm dismiss-keyguard  — remove the keyguard overlay. On sdm845
@@ -109,11 +151,7 @@ pub fn ensure_awake() -> bool {
     //                              is typical when peko is in use), and
     //                              idempotent so calling every time is
     //                              fine. We never clear it — no point.
-    let _ = Command::new("sh").args(["-c", "\
-        input keyevent KEYCODE_WAKEUP; \
-        wm dismiss-keyguard; \
-        svc power stayon true \
-    "]).status();
+    sh_silent("input keyevent KEYCODE_WAKEUP; wm dismiss-keyguard; svc power stayon true");
 
     // Poll until PowerManager reports Awake. Usually 300–500ms after
     // dismiss-keyguard on sdm845.
@@ -163,8 +201,12 @@ fn is_awake() -> bool {
 pub fn enter_pin_now() -> bool {
     ensure_awake();
     let Some(pin) = lock_pin() else { return false; };
-    let cmd = format!("input text {}; sleep 0.2; input keyevent KEYCODE_ENTER", pin);
-    let _ = Command::new("sh").arg("-c").arg(&cmd).status();
+    // Use sh_silent so the child inherits /dev/null for stderr rather
+    // than our peko.log fd — otherwise system_server's binder response
+    // trips the sepolicy denial and the input transaction aborts.
+    sh_silent(&format!("input text {}", pin));
+    std::thread::sleep(Duration::from_millis(200));
+    sh_silent("input keyevent KEYCODE_ENTER");
     std::thread::sleep(Duration::from_millis(600));
     true
 }
