@@ -292,6 +292,8 @@ pub struct ToolsConfig {
     pub filesystem_config: FilesystemConfig,
     #[serde(default)]
     pub shell_config: ShellConfig,
+    #[serde(default)]
+    pub sms_config: SmsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -305,6 +307,54 @@ pub struct ShellConfig {
     #[serde(default = "default_shell_timeout")]
     pub timeout_seconds: u64,
 }
+
+/// Settings for the framework-backed SMS tool. Only applies when the
+/// `com.peko.shim.sms` priv-app is installed (otherwise the tool
+/// refuses to register at all). Defaults are deliberately cautious —
+/// raise them in config.toml if you actually want peko to fire off
+/// a lot of SMS on its own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmsConfig {
+    /// Which backend to register under the "sms" tool name:
+    ///   "framework" — via the SMS shim priv-app (recommended, default)
+    ///   "modem"     — legacy AT-over-serial; only works if /dev/smd*
+    ///                 is accessible, i.e. niche rooted devices where
+    ///                 RILD isn't holding the AT channel.
+    ///   "off"       — never register SMS at all.
+    #[serde(default = "default_sms_backend")]
+    pub backend: String,
+
+    /// Sliding-window rate limit. Hits from the autonomy loop AND from
+    /// user-initiated chat tasks both count against the same pool.
+    #[serde(default = "default_sms_per_hour")]
+    pub max_per_hour: u32,
+    #[serde(default = "default_sms_per_day")]
+    pub max_per_day: u32,
+
+    /// How long the Rust tool waits for the shim's result file to
+    /// reach a terminal state (sent/delivered/error) before giving up.
+    /// "queued" arrives within ~100ms; the radio typically moves to
+    /// "sent" within 2–5s; "delivered" may never arrive (carriers
+    /// vary) so the tool accepts "sent" as success.
+    #[serde(default = "default_sms_timeout")]
+    pub send_timeout_secs: u64,
+}
+
+impl Default for SmsConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_sms_backend(),
+            max_per_hour: default_sms_per_hour(),
+            max_per_day: default_sms_per_day(),
+            send_timeout_secs: default_sms_timeout(),
+        }
+    }
+}
+
+fn default_sms_backend()    -> String { "framework".into() }
+fn default_sms_per_hour()   -> u32    { 5 }
+fn default_sms_per_day()    -> u32    { 20 }
+fn default_sms_timeout()    -> u64    { 15 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HardwareConfig {
@@ -372,6 +422,7 @@ impl Default for ToolsConfig {
             shell: true,
             filesystem_config: FilesystemConfig::default(),
             shell_config: ShellConfig::default(),
+            sms_config: SmsConfig::default(),
         }
     }
 }

@@ -92,12 +92,41 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
     // (it only uses shell primitives + the PIN static).
     registry.register(peko_tools_android::UnlockDeviceTool::new());
 
-    // SMS tool — AT commands via serial modem
+    // SMS tool — register one of two backends under the same tool name
+    // ("sms") based on config.tools.sms_config.backend:
+    //   - "framework" (default): use the priv-app shim that talks to
+    //     SmsManager.sendTextMessage(). Works on every modern Android
+    //     device with a SIM. No hardware access needed.
+    //   - "modem": legacy AT-over-serial. Requires an accessible modem
+    //     path (/dev/smd*, /dev/ttyUSB*). Fails on OnePlus / Pixel /
+    //     Samsung because RILD owns the AT channel.
+    //   - "off": never register; tool absent from the agent's manifest.
     if config.tools.sms {
-        if let Some(ref path) = modem_path {
-            match SerialModem::open(path) {
-                Ok(modem) => registry.register(SmsTool::new(modem)),
-                Err(e) => warn!(error = %e, path = %path.display(), "modem open failed, sms tool disabled"),
+        let backend = config.tools.sms_config.backend.as_str();
+        match backend {
+            "off" => {
+                info!("SMS tool disabled by config (sms_config.backend = \"off\")");
+            }
+            "modem" => {
+                if let Some(ref path) = modem_path {
+                    match SerialModem::open(path) {
+                        Ok(modem) => {
+                            info!(path = %path.display(), "SMS tool: modem (AT) backend");
+                            registry.register(SmsTool::new(modem));
+                        }
+                        Err(e) => warn!(error = %e, path = %path.display(),
+                            "modem open failed, sms tool disabled"),
+                    }
+                } else {
+                    warn!("SMS backend=modem but no modem_device resolved; tool disabled");
+                }
+            }
+            _ => {
+                // default / "framework"
+                info!("SMS tool: framework (priv-app shim) backend");
+                registry.register(peko_tools_android::SmsFrameworkTool::new(
+                    config.tools.sms_config.clone(),
+                ));
             }
         }
     }

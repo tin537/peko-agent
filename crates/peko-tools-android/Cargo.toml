@@ -15,4 +15,6 @@ tracing.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 base64.workspace = true
+uuid.workspace = true
+chrono.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

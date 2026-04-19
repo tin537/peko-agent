@@ -26,14 +26,38 @@ ZIP="$OUT_DIR/peko-magisk-${VERSION}.zip"
 SKIP_BUILD=false
 DO_INSTALL=false
 WITH_OVERLAY=false
+WITH_SMS_SHIM=false
 for a in "$@"; do
     case "$a" in
-        --skip-build)   SKIP_BUILD=true ;;
-        --install)      DO_INSTALL=true ;;
-        --with-overlay) WITH_OVERLAY=true ;;
+        --skip-build)    SKIP_BUILD=true ;;
+        --install)       DO_INSTALL=true ;;
+        --with-overlay)  WITH_OVERLAY=true ;;
+        --with-sms-shim) WITH_SMS_SHIM=true ;;
         *) echo "unknown arg: $a"; exit 1 ;;
     esac
 done
+
+# Factored out because we now build two APKs the same way. Takes a
+# project dir + the display name, expects the output APK to land at
+# app/build/outputs/apk/release/app-release-unsigned.apk.
+build_gradle_apk() {
+    local dir="$1"
+    local label="$2"
+    echo "[+] Building $label APK (Gradle, release) in $dir"
+    (
+        cd "$dir"
+        if [ -x ./gradlew ]; then
+            ./gradlew :app:assembleRelease
+        elif command -v gradle >/dev/null 2>&1; then
+            gradle :app:assembleRelease
+        else
+            echo "[x] Neither ./gradlew nor 'gradle' found."
+            echo "    Install Gradle 8.7+ (brew install gradle) or run 'gradle wrapper'"
+            echo "    in $dir to generate the wrapper, then retry."
+            exit 1
+        fi
+    )
+}
 
 # ─── Cross-compile peko-agent for aarch64-linux-android ───────────
 if [ "$SKIP_BUILD" = false ]; then
@@ -73,36 +97,48 @@ fi
 # ─── Optional: Android overlay APK as priv-app ────────────────────
 OVERLAY_DIR="$REPO_ROOT/android/peko-overlay"
 OVERLAY_APK="$OVERLAY_DIR/app/build/outputs/apk/release/app-release-unsigned.apk"
-PRIV_APP_DIR="$MODULE_DIR/system/priv-app/PekoOverlay"
+OVERLAY_PRIV_DIR="$MODULE_DIR/system/priv-app/PekoOverlay"
 
 if [ "$WITH_OVERLAY" = true ]; then
-    echo "[+] Building peko-overlay APK (Gradle, release)"
-    (
-        cd "$OVERLAY_DIR"
-        if [ -x ./gradlew ]; then
-            ./gradlew :app:assembleRelease
-        elif command -v gradle >/dev/null 2>&1; then
-            # No wrapper checked in — fall back to the host Gradle install.
-            # Run `gradle wrapper` once to materialise gradlew/ for future builds.
-            gradle :app:assembleRelease
-        else
-            echo "[x] Neither ./gradlew nor 'gradle' found."
-            echo "    Install Gradle 8.7+ (brew install gradle) or run 'gradle wrapper'"
-            echo "    in $OVERLAY_DIR to generate the wrapper, then retry."
-            exit 1
-        fi
-    )
+    build_gradle_apk "$OVERLAY_DIR" "peko-overlay"
 fi
 
 if [ -f "$OVERLAY_APK" ]; then
     echo "[+] Including PekoOverlay.apk as priv-app"
-    mkdir -p "$PRIV_APP_DIR"
-    install -m 0644 "$OVERLAY_APK" "$PRIV_APP_DIR/PekoOverlay.apk"
+    mkdir -p "$OVERLAY_PRIV_DIR"
+    install -m 0644 "$OVERLAY_APK" "$OVERLAY_PRIV_DIR/PekoOverlay.apk"
 else
     # Clean out any stale copy so we don't ship an old APK silently.
-    rm -rf "$PRIV_APP_DIR"
+    rm -rf "$OVERLAY_PRIV_DIR"
     if [ "$WITH_OVERLAY" = true ]; then
         echo "[x] --with-overlay set but APK not produced at $OVERLAY_APK"
+        exit 1
+    fi
+fi
+
+# ─── Optional: SMS shim APK as priv-app ───────────────────────────
+# This is the privileged app that lets peko-agent send SMS via
+# SmsManager.sendTextMessage() without needing access to the carrier's
+# AT channel (which RILD owns exclusively on most modern phones).
+# The matching privapp-permissions-peko.xml is already tracked inside
+# the module tree at system/etc/permissions/ — we just need to stage
+# the APK here and everything lines up at boot.
+SMS_SHIM_DIR="$REPO_ROOT/android/peko-sms-shim"
+SMS_SHIM_APK="$SMS_SHIM_DIR/app/build/outputs/apk/release/app-release-unsigned.apk"
+SMS_SHIM_PRIV_DIR="$MODULE_DIR/system/priv-app/PekoSmsShim"
+
+if [ "$WITH_SMS_SHIM" = true ]; then
+    build_gradle_apk "$SMS_SHIM_DIR" "peko-sms-shim"
+fi
+
+if [ -f "$SMS_SHIM_APK" ]; then
+    echo "[+] Including PekoSmsShim.apk as priv-app"
+    mkdir -p "$SMS_SHIM_PRIV_DIR"
+    install -m 0644 "$SMS_SHIM_APK" "$SMS_SHIM_PRIV_DIR/PekoSmsShim.apk"
+else
+    rm -rf "$SMS_SHIM_PRIV_DIR"
+    if [ "$WITH_SMS_SHIM" = true ]; then
+        echo "[x] --with-sms-shim set but APK not produced at $SMS_SHIM_APK"
         exit 1
     fi
 fi
