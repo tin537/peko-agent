@@ -12,6 +12,7 @@
 - [[architecture/Architecture-Overview]] — System design at a glance
 - [[architecture/Boot-Sequence]] — From power-on to agent loop
 - [[architecture/Crate-Map]] — Cargo workspace structure and dependency graph
+- [[architecture/Curiosity-Learning-Backbone]] — Novelty / surprise / risk / policy / world model / intrinsic reward (design)
 
 ### Core Systems
 - [[implementation/peko-core]] — Agent runtime and orchestration
