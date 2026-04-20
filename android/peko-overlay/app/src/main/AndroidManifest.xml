@@ -20,6 +20,11 @@
          loopback, which networkSecurityConfig whitelists. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- BOOT_COMPLETED: bring the overlay up on every boot without the
+         user having to open the launcher. This is the "agent as OS"
+         contract — peko should be ambient, not a manually-relaunched app. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:name=".PekoOverlayApp"
         android:label="@string/app_name"
@@ -49,5 +54,18 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="draggable agent overlay that must stay resident while user navigates other apps" />
         </service>
+
+        <!-- Auto-start the overlay on every boot. See BootReceiver.kt for
+             the full rationale; TL;DR: "agent as OS" means peko should
+             be ambient, not something the user has to relaunch. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:directBootAware="false">
+            <intent-filter android:priority="999">
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

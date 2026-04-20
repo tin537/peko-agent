@@ -18,6 +18,23 @@ cmd deviceidle whitelist +bin.peko-llm-daemon >/dev/null 2>&1
 # doesn't have to trek through Settings after a fresh install.
 if pm list packages 2>/dev/null | grep -q '^package:com.peko.overlay$'; then
     appops set com.peko.overlay SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
+
+    # Grant the runtime perms the overlay wants. POST_NOTIFICATIONS is
+    # required on Android 13+ for the FGS notification to show; without
+    # it the service still runs but has no shade entry. Cheap to grant
+    # unconditionally.
+    pm grant com.peko.overlay android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+
+    # Kick the overlay now. Belt-and-braces on top of the app's own
+    # BootReceiver: the receiver races with this appops grant, so on a
+    # cold first boot canDrawOverlays() can return false when BOOT_
+    # COMPLETED fires and the receiver silently bails. By the time we
+    # reach this line service.sh has already waited `sleep 8`, which
+    # is plenty for the appops write to settle. Starting MainActivity
+    # re-runs the same permission-check → service-start flow, so it's
+    # idempotent if the overlay is already up.
+    am start-foreground-service --user 0 -n com.peko.overlay/.OverlayService >/dev/null 2>&1 \
+        || am start -n com.peko.overlay/.MainActivity >/dev/null 2>&1 || true
 fi
 
 # If the Peko SMS shim shipped alongside, make it the default SMS app
