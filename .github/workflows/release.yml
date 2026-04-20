@@ -22,10 +22,10 @@ permissions:
   contents: write
 
 env:
-  # Pin the toolchains so builds reproduce. The daemon's build-android.sh
-  # probes multiple NDK versions; we pick one here and export its path
-  # explicitly so nothing has to probe.
-  NDK_VERSION: "r27c"
+  # Pin the toolchains so builds reproduce. Using the SDK-Manager package
+  # id format (not the r27c alias) because we install via sdkmanager —
+  # the third-party setup-ndk action breaks clang symlinks when caching.
+  NDK_VERSION: "27.2.12479018"   # = NDK r27c
   ANDROID_API: 31
   RUST_TOOLCHAIN: stable
 
@@ -52,23 +52,35 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # setup-android provisions the SDK (cmdline-tools, platform-tools, build-tools)
-      # at /usr/local/lib/android/sdk and licenses it. It does NOT install the NDK;
-      # nttld/setup-ndk below owns that.
-      - name: Set up Android SDK
+      # setup-android provisions the SDK (cmdline-tools, platform-tools,
+      # build-tools) at $ANDROID_SDK_ROOT, licenses it, then installs the
+      # NDK via sdkmanager. Done in one step because it's the only path
+      # that produces a layout with intact clang / clang++ wrappers —
+      # third-party NDK cache actions (tested: nttld/setup-ndk) lose the
+      # symlinks / exec bits and CMake rejects the compilers at configure
+      # time with "is not a full path to an existing compiler tool".
+      - name: Set up Android SDK + NDK ${{ env.NDK_VERSION }}
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: "11076708"
+          packages: |
+            platforms;android-${{ env.ANDROID_API }}
+            ndk;${{ env.NDK_VERSION }}
 
-      - name: Set up Android NDK ${{ env.NDK_VERSION }}
+      - name: Resolve NDK path
         id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: ${{ env.NDK_VERSION }}
-          # Keep the NDK around across subsequent workflow runs on the same runner
-          # image — CI runners are ephemeral but this helps local act runs.
-          add-to-path: false
-          local-cache: true
+        run: |
+          NDK_PATH="$ANDROID_SDK_ROOT/ndk/${{ env.NDK_VERSION }}"
+          BIN="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          if [ ! -x "$BIN/clang" ]; then
+            echo "NDK clang not executable at $NDK_PATH" >&2
+            find "$BIN" -maxdepth 1 -name 'clang*' | head -20
+            exit 1
+          fi
+          echo "ndk-path=$NDK_PATH" >> "$GITHUB_OUTPUT"
+          echo "ANDROID_NDK_HOME=$NDK_PATH"       >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_PATH"       >> "$GITHUB_ENV"
+          echo "$NDK_PATH"
 
       - name: Install Rust toolchain + aarch64-linux-android target
         uses: dtolnay/rust-toolchain@stable
