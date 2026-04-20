@@ -76,7 +76,10 @@ cmake -S . -B "$BUILD_DIR" \
     -DVulkan_GLSLC_EXECUTABLE="$GLSLC"
 
 # ── Build ───────────────────────────────────────────────────────
-cmake --build "$BUILD_DIR" -j "$JOBS"
+# VERBOSE=1 makes CMake echo every compile + link command. Without it,
+# a failed target just prints `make: *** Error 2` with no context, which
+# burned an hour of CI debugging. Cost: ~30% larger log files. Accept.
+cmake --build "$BUILD_DIR" -j "$JOBS" --verbose
 
 # ── Report ──────────────────────────────────────────────────────
 BIN="$BUILD_DIR/peko-llm-daemon"

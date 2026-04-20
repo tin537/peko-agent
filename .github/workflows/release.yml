@@ -165,13 +165,16 @@ jobs:
           # Ubuntu 24.04 folded vulkan-headers into libvulkan-dev (it's
           # marked Provides: vulkan-headers). Installing just libvulkan-dev
           # is enough to get vulkan.h + vulkan.hpp under /usr/include/vulkan/.
+          # spirv-headers ships /usr/include/spirv/unified1/*.h which
+          # ggml-vulkan #includes at compile time for SPIR-V reflection —
+          # separate Ubuntu package from libvulkan-dev.
           sudo apt-get install -y --no-install-recommends \
             libvulkan-dev \
+            spirv-headers \
             glslang-tools \
             spirv-tools
-          # Confirm vulkan.hpp is where we think it is so a future Ubuntu
-          # image bump can't silently relocate it and re-break the build.
-          test -f /usr/include/vulkan/vulkan.hpp || { echo 'vulkan.hpp missing' >&2; exit 1; }
+          test -f /usr/include/vulkan/vulkan.hpp          || { echo 'vulkan.hpp missing' >&2; exit 1; }
+          test -f /usr/include/spirv/unified1/spirv.h     || { echo 'spirv headers missing' >&2; exit 1; }
 
       - name: Build peko-llm-daemon (aarch64, Vulkan)
         env:
