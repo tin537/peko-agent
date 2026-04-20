@@ -3,24 +3,20 @@ Peko Agent — License Summary
 
 Copyright 2024-2026 Tanuphat Chainaloedwong / ftmstars
 
-CURRENT LICENSE
----------------
+LICENSE
+-------
 
 Peko Agent is licensed under the **GNU Affero General Public License v3.0 or
-later (AGPL-3.0-or-later)**. The full text is in `LICENSE-AGPL`.
+later (AGPL-3.0-or-later)**, and only under that license. The full text is
+in `LICENSE-AGPL`.
 
 Under AGPL, any software that uses, modifies, or distributes Peko Agent —
 including over a network (see AGPL §13) — must also be released under the
 AGPL and make its Corresponding Source Code available to users.
 
-COMMERCIAL LICENSE (PLANNED, NOT YET AVAILABLE)
------------------------------------------------
-
-A commercial license allowing proprietary use without AGPL's source-disclosure
-requirements is planned but has not been finalized or reviewed by counsel.
-Until then, **no commercial license is available**, and the only way to use
-Peko Agent is under AGPL-3.0-or-later. See `LICENSE-COMMERCIAL` for status and
-contact information.
+If the AGPL's source-disclosure requirements do not fit your deployment
+(for example, a proprietary SaaS product), you cannot use Peko Agent.
+No alternative commercial license is offered.
 
 THIRD-PARTY SOFTWARE
 --------------------

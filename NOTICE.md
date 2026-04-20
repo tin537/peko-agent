@@ -100,9 +100,9 @@ See `LICENSE-AGPL` §13 for the precise terms.
 
 ---
 
-## Commercial Licensing
+## No Commercial License
 
-A separate commercial license is *planned* but not yet finalized. Until the
-commercial terms are drafted and reviewed by counsel, this project is
-effectively distributed under AGPL-3.0-or-later only. See `LICENSE-COMMERCIAL`
-for the current status and contact information for inquiries.
+This project is distributed under AGPL-3.0-or-later **only**. There is no
+proprietary or commercial alternative license. If the AGPL's source-disclosure
+requirements (including §13 for network use) do not fit your deployment, you
+cannot use Peko Agent.

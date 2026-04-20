@@ -329,11 +329,18 @@ notify = "telegram"
 
 ## License
 
-Peko Agent is licensed under **[AGPL-3.0-or-later](LICENSE-AGPL)**.
+Peko Agent is licensed under **[AGPL-3.0-or-later](LICENSE-AGPL)**, and only under
+that license — there is no commercial alternative.
 
 - Any use, modification, or distribution — including over a network (AGPL §13) — must comply with the AGPL, meaning Corresponding Source must be offered to all users of the service.
-- A **commercial license** is *planned* but not yet finalized. Until then, only the AGPL is available. See [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL) for status and contact info.
+- If your deployment cannot meet AGPL's source-disclosure requirement (for example, a proprietary SaaS product), you cannot use Peko Agent.
 - For the consolidated license summary, see [LICENSE](LICENSE).
+
+## Community
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to file bugs, propose changes, and send PRs
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — expected conduct in issues, PRs, and chats
+- [SECURITY.md](SECURITY.md) — responsible disclosure for security issues
 
 ### Third-party software
 
