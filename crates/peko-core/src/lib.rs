@@ -21,6 +21,7 @@ pub mod curiosity;
 pub mod goal;
 pub mod gardener;
 pub mod hardware;
+pub mod call_pipeline;
 
 pub use message::{Message, ToolCall};
 pub use tool::{Tool, ToolRegistry, ToolResult};
@@ -46,6 +47,7 @@ pub use curiosity::Curiosity;
 pub use goal::{GoalGenerator, Pattern, PatternKind};
 pub use gardener::{GardenerConfig, spawn as spawn_gardener};
 pub use hardware::{resolve_modem, DetectedHardware};
+pub use call_pipeline::{CallStore, CallRecord, CallMetadata, spawn as spawn_call_pipeline};
 
 #[cfg(test)]
 mod runtime_tests;

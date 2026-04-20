@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use peko_config::PekoConfig;
-use peko_core::{ToolRegistry, MemoryStore, SkillStore, SystemPrompt, Scheduler, ScheduledTask, TelegramSender, UserModel, McpServerConfig, register_mcp_tools, TaskQueue, DualBrain, Reflector};
+use peko_core::{ToolRegistry, MemoryStore, SkillStore, SystemPrompt, Scheduler, ScheduledTask, TelegramSender, UserModel, McpServerConfig, register_mcp_tools, TaskQueue, DualBrain, Reflector, CallStore, spawn_call_pipeline};
 use peko_core::runtime::{build_dual_brain, build_provider_helper};
 use peko_llm::{EmbeddedProvider, LlmEngineConfig};
 use peko_hal::{FramebufferDevice, InputDevice, SerialModem, UInputDevice};
@@ -365,6 +365,40 @@ async fn main() -> anyhow::Result<()> {
         info!("autonomy.memory_gardener=false — gardener disabled");
     }
 
+    // Voice-call pipeline — opt-in via [calls].enabled. Picks up
+    // recordings the Android shim drops into its private files
+    // dir, transcribes via OpenAI-compatible STT, and summarises
+    // via whichever LLM provider the config resolves. Independent
+    // of the life loop because a call can come in any time, not
+    // just during the autonomy tick cadence.
+    let call_store_arc: Option<Arc<Mutex<CallStore>>> = if config.calls.enabled {
+        let path = config.agent.data_dir.join("calls.db");
+        match CallStore::open(&path) {
+            Ok(store) => {
+                let store_arc = Arc::new(Mutex::new(store));
+                let cfg_val = config_arc.lock().await.clone();
+                let provider_arc: Option<Arc<dyn peko_transport::LlmProvider>> =
+                    build_provider_helper(&cfg_val).ok()
+                        .map(|p| Arc::from(p) as Arc<dyn peko_transport::LlmProvider>);
+                let _handle = spawn_call_pipeline(
+                    config.calls.clone(),
+                    store_arc.clone(),
+                    memory_store.clone(),
+                    provider_arc,
+                );
+                info!(db = %path.display(), "call pipeline enabled");
+                Some(store_arc)
+            }
+            Err(e) => {
+                warn!(error = %e, "call store open failed, pipeline disabled");
+                None
+            }
+        }
+    } else {
+        info!("calls.enabled=false — voice call pipeline disabled");
+        None
+    };
+
     // Life loop (Phase B) — spawned only when autonomy is enabled.
     let life_loop_handle = {
         let life = peko_core::LifeLoop::new(
@@ -396,6 +430,7 @@ async fn main() -> anyhow::Result<()> {
         autonomy: config.autonomy.clone(),
         life_loop: life_loop_handle,
         scheduler_tasks: None,
+        calls: call_store_arc,
     };
 
     // Start Telegram bot if configured

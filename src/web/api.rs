@@ -36,6 +36,9 @@ pub struct AppState {
     pub autonomy: peko_config::AutonomyConfig,
     pub life_loop: peko_core::life_loop::LifeLoopHandle,
     pub scheduler_tasks: Option<Arc<Mutex<Vec<peko_core::ScheduledTask>>>>,
+    /// CallStore is `Some` only when `[calls].enabled=true` at startup.
+    /// `/api/calls` returns an empty list when it's `None`.
+    pub calls: Option<Arc<Mutex<peko_core::CallStore>>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -81,6 +84,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/autonomy/resume", post(resume_autonomy))
         // Screenshots
         .route("/api/screenshots/{filename}", get(serve_screenshot))
+        // Calls (voice-call recording pipeline)
+        .route("/api/calls", get(list_calls))
         // AGPL §13 compliance — source offer + third-party licenses
         .route("/source", get(source_offer))
         .route("/licenses", get(third_party_licenses))
@@ -918,4 +923,19 @@ async fn resume_autonomy(State(state): State<AppState>) -> StatusCode {
     state.life_loop.resume();
     info!("autonomy resumed by user");
     StatusCode::OK
+}
+
+/// Recent calls with transcript/summary state. Returns an empty list
+/// when the call pipeline is disabled at startup — the UI decides
+/// whether to show the Calls tab based on the response.
+async fn list_calls(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let Some(store) = state.calls.as_ref() else {
+        return Json(serde_json::json!({ "enabled": false, "calls": [] }));
+    };
+    let s = store.lock().await;
+    let records = s.recent(50).unwrap_or_default();
+    Json(serde_json::json!({
+        "enabled": true,
+        "calls":   records,
+    }))
 }

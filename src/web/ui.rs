@@ -82,6 +82,7 @@ tailwind.config = {
         <button id="tabMonitor" onclick="showTab('monitor')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Monitor</button>
         <button id="tabApps" onclick="showTab('apps')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Apps</button>
         <button id="tabMsgs" onclick="showTab('messages')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Messages</button>
+        <button id="tabCalls" onclick="showTab('calls')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200 hidden" title="Voice call transcripts + summaries">Calls</button>
         <button id="tabMemory" onclick="showTab('memory')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Memory</button>
         <button id="tabSkills" onclick="showTab('skills')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200">Skills</button>
         <button id="tabLife" onclick="showTab('life')" role="tab" class="px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200" title="Autonomous mind — drives + proposals">Life</button>
@@ -504,6 +505,24 @@ tailwind.config = {
         </div>
       </div>
 
+      <!-- Calls Panel — voice call recordings + transcripts + summaries -->
+      <div id="callsPanel" class="hidden flex-1 overflow-y-auto p-4">
+        <div class="max-w-4xl mx-auto space-y-4">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-bold text-zinc-300 uppercase tracking-wider">Voice Calls</h2>
+            <span id="callsBadge" class="text-[10px] text-zinc-500"></span>
+          </div>
+          <p class="text-[11px] text-zinc-500 leading-relaxed">
+            When a call starts, the shim plays two consent beeps on the voice channel,
+            records the conversation, and saves a transcript + summary here once it ends.
+            Enable via <code class="text-zinc-400">[calls] enabled = true</code> in config.
+          </p>
+          <div id="callsList" class="space-y-3">
+            <p class="text-zinc-600 text-xs text-center py-8">Loading call history...</p>
+          </div>
+        </div>
+      </div>
+
       <!-- Memory Panel -->
       <div id="memoryPanel" class="hidden flex-1 overflow-y-auto p-4">
         <div class="max-w-4xl mx-auto space-y-4">
@@ -664,8 +683,8 @@ let sidebarOpen = false;
 
 /* ── Tabs ── */
 function showTab(tab) {
-  const panels = {chat:'chatPanel',config:'cfgPanel',monitor:'monitorPanel',apps:'appsPanel',messages:'messagesPanel',memory:'memoryPanel',skills:'skillsPanel',life:'lifePanel'};
-  const tabs = {chat:'tabChat',config:'tabCfg',monitor:'tabMonitor',apps:'tabApps',messages:'tabMsgs',memory:'tabMemory',skills:'tabSkills',life:'tabLife'};
+  const panels = {chat:'chatPanel',config:'cfgPanel',monitor:'monitorPanel',apps:'appsPanel',messages:'messagesPanel',calls:'callsPanel',memory:'memoryPanel',skills:'skillsPanel',life:'lifePanel'};
+  const tabs = {chat:'tabChat',config:'tabCfg',monitor:'tabMonitor',apps:'tabApps',messages:'tabMsgs',calls:'tabCalls',memory:'tabMemory',skills:'tabSkills',life:'tabLife'};
   const onClass = 'px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 bg-violet-600 text-white shadow-sm';
   const offClass = 'px-3.5 py-1.5 rounded-md text-xs font-semibold transition-all duration-200 text-zinc-400 hover:text-zinc-200';
 
@@ -694,6 +713,7 @@ function showTab(tab) {
   if (tab === 'monitor') { refreshStats(); loadBrain(); startMonitorAutoRefresh(); }
   if (tab === 'apps') loadApps();
   if (tab === 'messages') { if (!msgES) startMsgStream(); }
+  if (tab === 'calls') loadCalls();
   if (tab === 'memory') loadMemories();
   if (tab === 'skills') loadSkills();
   if (tab === 'life') loadAutonomy();
@@ -1649,6 +1669,83 @@ function renderNotifs(items) {
   }).join('');
 }
 
+/* ── Calls UI ── */
+async function loadCalls() {
+  try {
+    var r = await fetch(API+'/api/calls');
+    var d = await r.json();
+    var list = document.getElementById('callsList');
+    var badge = document.getElementById('callsBadge');
+    // Show/hide the desktop tab button based on whether the pipeline is enabled.
+    var tab = document.getElementById('tabCalls');
+    if (tab) tab.classList.toggle('hidden', !d.enabled);
+
+    if (!d.enabled) {
+      badge.textContent = 'disabled';
+      list.innerHTML = '<p class="text-zinc-600 text-xs text-center py-8">Voice call pipeline is not enabled. Turn on [calls].enabled in config.</p>';
+      return;
+    }
+    var calls = d.calls || [];
+    badge.textContent = calls.length + ' calls';
+    if (calls.length === 0) {
+      list.innerHTML = '<p class="text-zinc-600 text-xs text-center py-8">No calls recorded yet.</p>';
+      return;
+    }
+    list.innerHTML = '';
+    calls.forEach(function(c) {
+      var card = document.createElement('div');
+      card.className = 'bg-zinc-900 border border-zinc-800 rounded-xl p-4';
+      var dir = c.direction === 'incoming' ? '↓' : (c.direction === 'outgoing' ? '↑' : '•');
+      var mins = Math.floor((c.duration_ms||0) / 60000);
+      var secs = Math.floor(((c.duration_ms||0) % 60000) / 1000);
+      var durStr = mins > 0 ? (mins + 'm ' + secs + 's') : (secs + 's');
+      var stateColor = {
+        'summarised':  'text-emerald-400',
+        'transcribed': 'text-sky-400',
+        'recorded':    'text-amber-400',
+        'skipped':     'text-zinc-500',
+        'error':       'text-rose-400',
+      }[c.state] || 'text-zinc-500';
+      var parts = [
+        '<div class="flex items-center justify-between mb-2">',
+          '<div class="flex items-center gap-2">',
+            '<span class="text-lg font-mono">', dir, '</span>',
+            '<span class="text-sm font-semibold text-zinc-200">', escapeHtml(c.number || 'unknown'), '</span>',
+            '<span class="text-[10px] text-zinc-500">', durStr, '</span>',
+          '</div>',
+          '<div class="flex items-center gap-2">',
+            '<span class="text-[10px] uppercase ', stateColor, '">', c.state, '</span>',
+            '<span class="text-[10px] text-zinc-500">', escapeHtml(c.started_at || ''), '</span>',
+          '</div>',
+        '</div>',
+      ];
+      if (c.summary) {
+        parts.push('<p class="text-sm text-zinc-300 leading-relaxed mb-2">', escapeHtml(c.summary), '</p>');
+      }
+      if (c.transcript) {
+        var id = 'tr-' + c.id;
+        parts.push(
+          '<details class="mt-1">',
+            '<summary class="text-[11px] text-zinc-500 cursor-pointer hover:text-zinc-300">transcript</summary>',
+            '<pre class="text-[11px] text-zinc-400 whitespace-pre-wrap mt-1 font-mono">', escapeHtml(c.transcript), '</pre>',
+          '</details>'
+        );
+      }
+      if (c.error) {
+        parts.push('<p class="text-[11px] text-rose-400 mt-1">', escapeHtml(c.error), '</p>');
+      }
+      card.innerHTML = parts.join('');
+      list.appendChild(card);
+    });
+  } catch (e) { console.error('calls', e); }
+}
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 /* ── Memory UI ── */
 var allMemories = [];
 var memFilter = 'all';
@@ -1965,6 +2062,8 @@ async function autonomyResume() {
 checkStatus();
 loadSessions();
 loadBrain();
+// Probe the call pipeline so the Calls tab only appears when it's enabled.
+loadCalls();
 setInterval(checkStatus, 8000);
 setInterval(loadBrain, 30000);  // refresh brain badge every 30s
 document.getElementById('inp').focus();

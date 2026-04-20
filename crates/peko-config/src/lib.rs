@@ -30,6 +30,10 @@ pub struct PekoConfig {
     /// populated when the user wants auto-unlock.
     #[serde(default)]
     pub security: Option<SecurityConfig>,
+    /// Voice-call recording + transcription pipeline. Opt-in; default
+    /// is disabled because it records audio.
+    #[serde(default)]
+    pub calls: CallsConfig,
 }
 
 /// Lockscreen auto-unlock. If `lock_pin` is set, `ensure_awake()` will
@@ -355,6 +359,87 @@ fn default_sms_backend()    -> String { "framework".into() }
 fn default_sms_per_hour()   -> u32    { 5 }
 fn default_sms_per_day()    -> u32    { 20 }
 fn default_sms_timeout()    -> u64    { 15 }
+
+/// Voice-call pipeline. The Android shim's CallRecorderService writes
+/// `.m4a` + metadata JSON + `.done` sentinel files into
+/// `recordings_dir`; the Rust pipeline polls the dir, uploads audio
+/// to an OpenAI-compatible `/audio/transcriptions` endpoint, then
+/// asks the configured LLM provider to summarise the transcript.
+///
+/// The `stt_*` fields mirror the existing provider-entry shape so a
+/// user can reuse their OpenAI key for STT without duplicating creds.
+/// `stt_provider` acts as a discriminator in case the user wants a
+/// dedicated STT endpoint (e.g. a local whisper.cpp server) separate
+/// from the summary LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallsConfig {
+    /// Master switch. DEFAULT FALSE — recording is privacy-sensitive,
+    /// opt-in only. Turning this on also requires the SMS shim to
+    /// hold RECORD_AUDIO / CAPTURE_AUDIO_OUTPUT (see service.sh).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Where CallRecorderService drops files. Must match the shim's
+    /// `ctx.filesDir/calls/` resolved path.
+    #[serde(default = "default_calls_recordings_dir")]
+    pub recordings_dir: String,
+
+    /// Base URL for the STT endpoint. Default is OpenAI's public
+    /// endpoint; any `/audio/transcriptions` implementation works
+    /// (Groq, self-hosted faster-whisper, etc.).
+    #[serde(default = "default_stt_base_url")]
+    pub stt_base_url: String,
+
+    /// API key for STT. Falls back to `OPENAI_API_KEY` env var when
+    /// empty. If both are empty, the pipeline stages the recording
+    /// but leaves transcript blank (summary step is skipped).
+    #[serde(default)]
+    pub stt_api_key: Option<String>,
+
+    /// STT model name — Whisper ID in OpenAI's case ("whisper-1"),
+    /// whatever the self-hosted server expects otherwise.
+    #[serde(default = "default_stt_model")]
+    pub stt_model: String,
+
+    /// Language hint for STT (ISO-639-1). Empty = auto-detect.
+    #[serde(default)]
+    pub stt_language: Option<String>,
+
+    /// Skip recordings shorter than this many milliseconds. Pocket
+    /// dials + butt-dials tend to last under 2s and aren't worth
+    /// burning STT credits on.
+    #[serde(default = "default_min_duration_ms")]
+    pub min_duration_ms: u64,
+
+    /// How long to keep processed `.m4a` files on disk before the
+    /// pipeline deletes them. Transcripts + summaries are kept in
+    /// the DB regardless.
+    #[serde(default = "default_retain_days")]
+    pub retain_audio_days: i64,
+}
+
+impl Default for CallsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            recordings_dir: default_calls_recordings_dir(),
+            stt_base_url: default_stt_base_url(),
+            stt_api_key: None,
+            stt_model: default_stt_model(),
+            stt_language: None,
+            min_duration_ms: default_min_duration_ms(),
+            retain_audio_days: default_retain_days(),
+        }
+    }
+}
+
+fn default_calls_recordings_dir() -> String {
+    "/data/data/com.peko.shim.sms/files/calls".to_string()
+}
+fn default_stt_base_url() -> String { "https://api.openai.com/v1".into() }
+fn default_stt_model()    -> String { "whisper-1".into() }
+fn default_min_duration_ms() -> u64 { 2000 }
+fn default_retain_days()     -> i64 { 7 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HardwareConfig {
