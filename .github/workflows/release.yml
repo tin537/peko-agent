@@ -145,9 +145,11 @@ jobs:
       - name: Install Vulkan C++ headers + shader tools
         run: |
           sudo apt-get update
+          # Ubuntu 24.04 folded vulkan-headers into libvulkan-dev (it's
+          # marked Provides: vulkan-headers). Installing just libvulkan-dev
+          # is enough to get vulkan.h + vulkan.hpp under /usr/include/vulkan/.
           sudo apt-get install -y --no-install-recommends \
             libvulkan-dev \
-            vulkan-headers \
             glslang-tools \
             spirv-tools
           # Confirm vulkan.hpp is where we think it is so a future Ubuntu
