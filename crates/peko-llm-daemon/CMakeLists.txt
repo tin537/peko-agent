@@ -26,19 +26,27 @@ add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-unused-f
 
 # ── Android pthread shim (CMake 3.31 + NDK r27 workaround) ────────────────
 # bionic libc ships pthread built-in — there's no libpthread.so to link
-# against on Android. CMake's FindThreads module still tries a try_compile
-# with `-lpthread`, which fails, so find_package(Threads) returns
-# Threads_FOUND=FALSE and ggml's find_package(Threads REQUIRED) aborts the
-# configure. Pre-populate the cache entries FindThreads would have filled
-# in so the probe is skipped and callers (ours + ggml's) see threads as
-# available with no link flag required.
+# against on Android. CMake's FindThreads module still runs a
+# check_symbol_exists(pthread_create, pthread.h, CMAKE_HAVE_LIBC_PTHREAD)
+# probe whose try_compile fails on NDK r27 + CMake 3.31 (linker flag
+# interaction we don't control). Once that probe fails, find_package
+# falls back to -pthread / -lpthread probes which also fail, and ggml's
+# find_package(Threads REQUIRED) aborts the configure.
+#
+# FindThreads short-circuits if its probe-result cache entries are
+# already set, so we pre-populate them. The first attempt used plain
+# `set(var …)` which FindThreads ignores — these MUST be CACHE entries
+# to take effect. `INTERNAL` keeps them out of cmake-gui while still
+# making them cache-resident.
 if(ANDROID)
+    set(CMAKE_HAVE_PTHREAD_H          1 CACHE INTERNAL "Android bionic ships pthread.h")
+    set(CMAKE_HAVE_LIBC_PTHREAD        1 CACHE INTERNAL "Android bionic libc has pthread_create")
     set(THREADS_PREFER_PTHREAD_FLAG  ON)
-    set(CMAKE_HAVE_THREADS_LIBRARY    1)
-    set(CMAKE_USE_WIN32_THREADS_INIT  0)
-    set(CMAKE_USE_PTHREADS_INIT       1)
-    set(CMAKE_THREAD_LIBS_INIT       "")
-    set(Threads_FOUND                TRUE)
+    set(CMAKE_THREAD_LIBS_INIT        "")
+    set(CMAKE_HAVE_THREADS_LIBRARY     1)
+    set(CMAKE_USE_WIN32_THREADS_INIT   0)
+    set(CMAKE_USE_PTHREADS_INIT        1)
+    set(Threads_FOUND               TRUE)
 endif()
 
 # ── Fetch llama.cpp (pinned tag) ───────────────────────────────────────────
