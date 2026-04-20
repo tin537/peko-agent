@@ -68,6 +68,24 @@ timeout_seconds = 30
 [startup]
 # Optional: run a task immediately on boot
 # task = "Check for new SMS messages and summarize them"
+
+[security]
+# Optional lockscreen auto-unlock. Plaintext; anyone with root
+# already can read it, so no additional exposure. Omit or leave
+# empty to disable.
+# lock_pin = "1234"
+
+[calls]
+# Voice-call recording + transcription + summary pipeline.
+# Opt-in; default false.
+enabled           = false
+recordings_dir    = "/data/data/com.peko.shim.sms/files/calls"
+stt_base_url      = "https://api.openai.com/v1"
+stt_model         = "whisper-1"
+# stt_api_key     = "sk-..."        # blank -> reads OPENAI_API_KEY env
+# stt_language    = "en"            # blank -> auto-detect
+min_duration_ms   = 2000            # skip pocket dials
+retain_audio_days = 7               # .m4a retention; transcripts live forever in DB
 ```
 
 ## Config Struct
@@ -97,8 +115,36 @@ pub struct ProviderConfig {
     pub openrouter: Option<ProviderEntry>,
     pub local: Option<ProviderEntry>,
     pub priority: Vec<String>,
+    // …openai / groq / deepseek / mistral / together / embedded +
+    // a #[serde(flatten)] `extra: HashMap<String, Value>` catch-all
+    // so user-named custom providers (e.g. `[provider.xiaomi]`) are
+    // preserved through a get_config → set_config round-trip.
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SecurityConfig {
+    // Digits only. set_lock_pin() validates.
+    pub lock_pin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CallsConfig {
+    pub enabled: bool,
+    pub recordings_dir: String,
+    pub stt_base_url: String,
+    pub stt_api_key: Option<String>,
+    pub stt_model: String,
+    pub stt_language: Option<String>,
+    pub min_duration_ms: u64,
+    pub retain_audio_days: i64,
 }
 ```
+
+`[calls]` is read by `crates/peko-core/src/call_pipeline.rs` every poll tick
+from the shared `Arc<Mutex<Value>>` — so toggling `enabled` from the web UI
+takes effect on the next 10 s cycle without restarting the daemon. The STT
+key is masked (`first4...last4`) in `GET /api/config`; the UI sends `****`
+back on save to signal "keep existing" without round-tripping the secret.
 
 ## Environment Variable Overrides
 

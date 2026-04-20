@@ -5,6 +5,14 @@ other app. Tap the cat to open a chat card that streams replies from
 `peko-agent` running on localhost (bound by the Magisk module or a plain
 `adb forward`). Long-press the cat to shut the overlay down.
 
+**Auto-starts on every boot.** The app's `BootReceiver` listens for
+`BOOT_COMPLETED` / `QUICKBOOT_POWERON` and kicks `OverlayService` as soon as
+user-credential-encrypted storage unlocks. The Magisk module's `service.sh`
+grants `SYSTEM_ALERT_WINDOW` + `POST_NOTIFICATIONS` via `appops`/`pm grant`
+and fires a redundant `am start-foreground-service` for cold-first-boot races
+where the receiver beats the appops grant. Net effect: peko is ambient —
+you never have to open the launcher to bring it back.
+
 ```
    ┌─ collapsed ─┐      ┌───────── expanded ─────────┐
    │     😺      │  →   │  😺  peko peko…        ✕   │
@@ -77,10 +85,17 @@ Build the module with the overlay bundled in:
 
 This runs `./gradlew :app:assembleRelease`, then stages the APK into
 `system/priv-app/PekoOverlay/PekoOverlay.apk` inside the module zip. On boot,
-Magisk mounts it into `/system/priv-app/…`; the module's `service.sh` runs
-`appops set com.peko.overlay SYSTEM_ALERT_WINDOW allow` so the user never has
-to open Settings. Priv-apps also can't be uninstalled from the launcher —
-the only way to remove it is to disable the Magisk module.
+Magisk mounts it into `/system/priv-app/…`; the module's `service.sh`:
+
+1. `appops set com.peko.overlay SYSTEM_ALERT_WINDOW allow` — auto-grant the
+   draw-over-apps perm so the user never opens Settings.
+2. `pm grant com.peko.overlay android.permission.POST_NOTIFICATIONS` —
+   required on Android 13+ for the FGS notification to show.
+3. `am start-foreground-service -n com.peko.overlay/.OverlayService` —
+   belt-and-braces in case `BootReceiver` fired before step 1 completed.
+
+Priv-apps also can't be uninstalled from the launcher — the only way to
+remove it is to disable the Magisk module.
 
 ## How it's wired
 

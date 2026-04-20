@@ -1,6 +1,6 @@
 # peko-sms-shim
 
-A headless priv-app that exists for exactly one reason: **give peko-agent a path to send SMS on modern phones where the modem's AT channel is owned by RILD**.
+A tiny priv-app that gives peko-agent framework-level access to the telephony stack: **send/receive SMS, record phone calls, and notify the other party via consent beeps** — on modern phones where the modem's AT channel is owned by RILD and nothing short of holding `android.app.role.SMS` + `CAPTURE_AUDIO_OUTPUT` works.
 
 ## Why this exists
 
@@ -23,14 +23,21 @@ That's what this shim is.
 
 ## What it does
 
-Single Kotlin app. No Activities, no notifications, no UI. Just two BroadcastReceivers:
+A small Kotlin app with no user-facing Activity (a no-display `SendToActivity` stub for
+role qualification only). Core pieces:
 
-| Receiver | Job |
+| Component | Job |
 |---|---|
-| `SmsCommandReceiver` (exported, `permission="SEND_SMS"`) | Accepts `am broadcast -a com.peko.shim.sms.SEND --es id <uuid> --es to <phone> --es body <text>`, calls `SmsManager.sendTextMessage(to, null, body, sentPI, deliveredPI)`, writes status to `/data/peko/sms_out/<id>.json`. |
+| `SmsCommandReceiver` (exported, `permission="SEND_SMS"`) | Accepts `am broadcast -a com.peko.shim.sms.SEND --es id <uuid> --es to <phone> --es body <text>`, calls `SmsManager.sendTextMessage(to, null, body, sentPI, deliveredPI)`, inserts the outgoing row into `content://sms/sent` so the stock Messages app shows it in the thread, writes status to `<filesDir>/sms_out/<id>.json`. |
 | `SmsResultReceiver` (not exported) | Fires when the radio reports the message was sent/delivered via the PendingIntents from the first receiver. Updates the same JSON file. |
+| `SmsDeliverReceiver` | Incoming-SMS handler (required for the default-SMS role). Writes arrivals to `content://sms/inbox` and posts a BigTextStyle notification. |
+| `CallStateReceiver` | Listens for `android.intent.action.PHONE_STATE`. On `RINGING → OFFHOOK` (incoming) or outgoing `OFFHOOK`, kicks off `CallRecorderService`; on `IDLE` stops it. |
+| `OutgoingCallReceiver` | Listens for `ACTION_NEW_OUTGOING_CALL` and latches the dialed target so the OFFHOOK branch has a real number for outgoing calls. |
+| `CallRecorderService` (foreground, `type=microphone`) | Plays **two 440 Hz consent beeps** on `STREAM_VOICE_CALL`, starts a MediaRecorder (tries `VOICE_CALL` → `VOICE_COMMUNICATION` → `MIC` in order), writes `<filesDir>/calls/<id>.m4a` + `<id>.json` metadata, then atomically creates `<id>.done` so peko-agent only picks up fully-flushed recordings. |
 
-peko-agent polls that file and returns the final state to the LLM.
+peko-agent polls the sms_out / calls directories from the Rust side and returns
+results to the LLM (SMS) or summarises into the memory store (calls — see
+`crates/peko-core/src/call_pipeline.rs`).
 
 ## Result file protocol
 
@@ -46,6 +53,40 @@ peko-agent polls that file and returns the final state to the LLM.
 ```
 
 `queued` is written synchronously inside `onReceive` the moment `SmsManager` accepts the call. `sent` / `delivered` / `error` replace it later via atomic `tmp → rename`. peko-agent treats `sent` as a success terminal — some carriers never deliver the `delivered` ACK.
+
+## Call recording protocol
+
+For each completed call, three files land in the shim's private `<filesDir>/calls/`:
+
+```
+<id>.m4a        — AAC/MPEG-4 audio at 16 kHz / 64 kbps
+<id>.json       — metadata (direction, number, duration_ms, audio_src, …)
+<id>.done       — zero-byte sentinel, created last via atomic write
+```
+
+The `.done` file is the handshake: peko-agent only processes a recording
+after `.done` appears, guaranteeing both `.m4a` and `.json` are fully flushed.
+After STT + LLM summary succeed, the pipeline deletes all three.
+
+Metadata shape:
+```json
+{
+  "id": "call-<timestamp>-<rand>",
+  "direction": "incoming" | "outgoing" | "unknown",
+  "number": "+66812345678",
+  "started_at_ms": 1776620000000,
+  "duration_ms": 42000,
+  "audio_src": "VOICE_CALL" | "VOICE_COMMUNICATION" | "MIC" | "none",
+  "audio_path": "/data/data/com.peko.shim.sms/files/calls/<id>.m4a",
+  "audio_bytes": 512000,
+  "partial": false,
+  "error": "...set only if recording failed..."
+}
+```
+
+**Consent beeps.** Two short 150 ms tones on `STREAM_VOICE_CALL` at the start
+of every recording. Played via `ToneGenerator`, audible to both parties over
+the voice path. This is deliberate — peko records *openly*, never covertly.
 
 ## Build
 
@@ -93,5 +134,6 @@ Then in peko's Chat tab: `"send an SMS to +... saying hello"`. The agent will ca
 
 - **No MMS.** `SmsManager.sendMultimediaMessage()` requires more ceremony (configuring the carrier MMSC, building the PDU). Not implemented.
 - **No delivery-receipt guarantees.** `status=delivered` depends on the carrier honouring the SMS-STATUS-REPORT. Many don't. `sent` is the realistic terminal state.
-- **Single SIM by default.** Multi-SIM devices can route by passing `sub_id` in the broadcast; peko-tools-android doesn't expose that parameter yet.
+- **Single SIM by default.** Multi-SIM devices can route by passing `sub_id` in the broadcast; peko-tools-android doesn't expose that parameter yet. `PHONE_STATE` is delivered per-subscription on multi-SIM, so the call recorder may see the transition twice; the in-memory dedup guard handles identical states but not concurrent calls on different SIMs.
 - **No send-as-default-app semantics.** Android considers us a "background SMS app" for policy purposes. The OS may rate-limit us globally after ~30 messages in a short window regardless of our own config — that's the `RESULT_ERROR_LIMIT_EXCEEDED` case in `SmsResultReceiver`.
+- **VOICE_CALL recording is OEM-gated.** Even with `CAPTURE_AUDIO_OUTPUT` as a privileged permission, some chipsets (common on Samsung, some Mediatek boards) reject `AudioSource.VOICE_CALL` at the HAL. The recorder falls back to `VOICE_COMMUNICATION` (local-side only) and finally `MIC` (only works on speakerphone). The metadata `audio_src` field reports which source won. The OnePlus 6T (sdm845) on LineageOS 20 accepts `VOICE_CALL` in practice.

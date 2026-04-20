@@ -101,6 +101,18 @@ adb shell su -c 'mkdir -p /data/peko/models && mv /sdcard/your-model.gguf /data/
 adb shell su -c 'am kill bin.peko-agent ; sleep 2'    # or reboot
 ```
 
+**Floating Peko overlay** ships in the same module. On the first reboot after
+install, the overlay's `BootReceiver` fires, `service.sh` grants it
+`SYSTEM_ALERT_WINDOW` + `POST_NOTIFICATIONS`, and the draggable cat mascot
+appears on top of every app — no launcher tap required. Tap to open the chat
+card, long-press to dismiss. See [`android/peko-overlay/README.md`](android/peko-overlay/README.md).
+
+**SMS + Voice calls**: the bundled `com.peko.shim.sms` priv-app takes the
+default-SMS role at boot (granted via `cmd role add-role-holder`), which
+unlocks `SEND_SMS` / `RECEIVE_SMS` / `READ_SMS` and installs the incoming-SMS
+receiver. The same shim hosts the call recording pipeline — see section
+6 below for the config UI flow.
+
 ### Brain mode picker (Settings → Brain Mode in the web UI)
 
 Three cards:
@@ -218,7 +230,40 @@ notify = "telegram"
 
 Go to **Config** tab > scroll to **SOUL.md** section > edit and save.
 
-### 6. Turn on Autonomy (Full Life)
+### 6. (Optional) Voice-call recording + summary
+
+Requires the Magisk install path — the SMS shim priv-app (`com.peko.shim.sms`)
+holds the privileged perms (`CAPTURE_AUDIO_OUTPUT`, `RECORD_AUDIO`,
+`READ_CALL_LOG`) and also provides the SMS send/receive path. Once the module
+is installed and the device rebooted:
+
+1. Open **Config** tab → **Voice Calls** section.
+2. Toggle **Record & summarise phone calls** on.
+3. Paste an STT API key (any OpenAI-compatible `/audio/transcriptions`
+   endpoint works — defaults target OpenAI's public Whisper).
+4. Click **Save Changes**. The daemon re-reads `[calls]` from the live config
+   on its next ~10s tick — no restart.
+
+Now every call:
+- plays two short 440 Hz beeps on the voice channel at the start (consent
+  signal for both parties),
+- records the audio to the shim's private files dir,
+- is transcribed once the call ends,
+- gets a one-paragraph LLM summary,
+- lands in the **Calls** tab (web UI) and as an `Observation` memory keyed
+  by `call:<number>:<timestamp>` so the agent remembers what was discussed.
+
+State transitions: `recorded → transcribed → summarised`. Short calls
+(< `min_duration_ms`) are marked `skipped`. STT / LLM failures surface as
+`error` with a reason. The `.m4a` is kept until `retain_audio_days` passes
+(default 7 days); transcripts + summaries are retained in the DB indefinitely.
+
+Hardware caveat: `VOICE_CALL` source is OEM-gated on some chipsets — on the
+OnePlus 6T the HAL accepts it, but if it ever refuses the pipeline falls back
+to `VOICE_COMMUNICATION` / `MIC` which only captures the local side (audible
+on speakerphone). See `android/peko-sms-shim/README.md`.
+
+### 7. Turn on Autonomy (Full Life)
 
 `[autonomy]` section of `config.toml`:
 

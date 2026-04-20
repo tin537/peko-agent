@@ -18,7 +18,7 @@ Traditional Android:  App -> Framework -> Binder -> Kernel -> Hardware
 Peko Agent:        Agent -> Kernel -> Hardware
 ```
 
-The agent sees the screen (framebuffer/screencap), touches it (evdev injection), sends SMS (AT commands), installs apps (pm/installd), and learns from every interaction.
+The agent sees the screen (framebuffer/screencap), touches it (evdev injection), sends SMS + places calls through a bundled priv-app shim, **records + transcribes + summarises phone calls** into memory, installs apps (pm/installd), and learns from every interaction.
 
 ## Architecture
 
@@ -102,17 +102,20 @@ Two cooperating processes on the device, linked by a Unix Domain Socket. The age
 - **Propose-only by default** — queues for user approval; flip to auto-execute after trust is established
 
 ### Interfaces
-- **Web UI** (port 8080) — Chat, Device monitor, Apps manager, Messages, Memory, Skills, **Life** tab (drives + proposals + rate limits), Config editor with **Brain Mode picker** (Dual / Local only / Cloud only)
+- **Web UI** (port 8080) — Chat, Device monitor, Apps manager, Messages, **Calls** (voice-call transcripts + summaries, hidden when pipeline disabled), Memory, Skills, **Life** tab (drives + proposals + rate limits), Config editor with **Brain Mode picker** (Dual / Local only / Cloud only) + **Voice Calls** section (enable toggle, STT endpoint/model/key, retention) + **Security** section (lockscreen PIN)
+- **Floating Peko overlay** (`com.peko.overlay`) — draggable cat mascot that auto-starts on every boot via `BootReceiver`, streams chat from `peko-agent` over localhost SSE. No user relaunch needed.
 - **Telegram Bot** — Send tasks, receive responses + screenshots, /status /memories /skills commands
 - **Cron Scheduler** — Autonomous recurring tasks with Telegram delivery
 
 ### Hardware Access
 - **Touch injection** via evdev (`/dev/input/event*`) and uinput virtual devices
 - **Screen capture** via framebuffer mmap or screencap fallback
-- **SMS/Calls** via AT commands to serial modem — **modem path auto-probed** on first boot (`/dev/smd11`, `/dev/smd1`, `/dev/ttyUSB*`, cached to `detected_hardware.json`)
+- **SMS send + receive** via a bundled priv-app (`com.peko.shim.sms`) that holds the default-SMS role; `SmsManager.sendTextMessage()` under the hood, same code path as stock Messages. Falls back to AT-over-serial on old dev boards where RILD isn't holding the modem.
+- **Voice calls** — place via `am start ACTION_CALL`, answer / hang up via KEYCODE_CALL / KEYCODE_ENDCALL. **Call recording + STT + LLM summary** via the same shim: two consent beeps play on the voice channel at the start of every call, audio is captured from the VOICE_CALL source, uploaded to an OpenAI-compatible `/audio/transcriptions` endpoint, summarised by the configured brain, and stored as an `Observation` memory keyed by caller + timestamp. Opt-in via `[calls].enabled` (Config UI).
 - **Text input** via synthetic key injection
 - **UI inspection** via uiautomator XML dump
 - **Package management** via pm/am/installd
+- **Lockscreen auto-unlock** via a configured PIN (Config UI → Security) so tasks can run on a dozing phone.
 
 ### Deploy Paths
 - **Magisk module** ([`magisk/`](magisk/)) — works on any rooted ROM (stock, LineageOS, Pixel Experience). `./magisk/build-module.sh --install` builds + pushes + shows Magisk install steps. ~10 MB zip.
@@ -241,7 +244,7 @@ peko-agent/
 | Agent tools | 13 |
 | Cloud LLM providers supported | 7 (anthropic, openrouter, openai, groq, deepseek, mistral, together) + generic OpenAI-compat |
 | Deploy paths | 4 (Magisk module, LineageOS overlay, stripped AOSP, rooted ADB) |
-| Web UI tabs | 8 (Chat, Device, Apps, Messages, Memory, Skills, Life, Config) |
+| Web UI tabs | 9 (Chat, Device, Apps, Messages, Calls, Memory, Skills, Life, Config) — Calls visible only when `[calls].enabled` |
 | Autonomy phases shipped | 7/7 (A–G + token budget + proposal expiry) |
 
 ## Configuration
@@ -288,6 +291,27 @@ The `unix://` scheme routes through `UnixSocketProvider` which speaks HTTP/1.1 o
 abstract UDS — no TCP, no ports, no SELinux pain. The C++ daemon implements the OpenAI
 Chat Completions protocol, so it's trivial to swap for any other OpenAI-compatible local
 server (Ollama, llama.cpp server, vLLM).
+
+### Voice-call recording + summary
+
+Opt-in; two short consent beeps play at the start of every recorded call so the
+remote party is notified.
+
+```toml
+[calls]
+enabled       = true
+stt_base_url  = "https://api.openai.com/v1"   # any /audio/transcriptions endpoint
+stt_model     = "whisper-1"
+stt_api_key   = "sk-..."                       # or leave blank to read OPENAI_API_KEY
+stt_language  = "en"                           # optional — blank = auto-detect
+min_duration_ms   = 2000                       # skip pocket dials
+retain_audio_days = 7                          # transcripts + summaries kept forever
+```
+
+Summaries land in both a dedicated `calls.db` table (visible in the **Calls**
+tab of the web UI) and the main memory store as an `Observation` keyed by
+`call:<number>:<ts>`, so the agent can bring up "you mentioned X on that call
+last week" in later conversations.
 
 ### Telegram + scheduler
 
