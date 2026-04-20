@@ -52,20 +52,25 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # setup-android provisions the SDK (cmdline-tools, platform-tools,
-      # build-tools) at $ANDROID_SDK_ROOT, licenses it, then installs the
-      # NDK via sdkmanager. Done in one step because it's the only path
-      # that produces a layout with intact clang / clang++ wrappers —
-      # third-party NDK cache actions (tested: nttld/setup-ndk) lose the
-      # symlinks / exec bits and CMake rejects the compilers at configure
-      # time with "is not a full path to an existing compiler tool".
-      - name: Set up Android SDK + NDK ${{ env.NDK_VERSION }}
+      # setup-android@v3 provisions cmdline-tools + accepts licenses at
+      # $ANDROID_SDK_ROOT. We do NOT use its `packages:` input — v3 passes
+      # a multi-line block to sdkmanager as a single argv, and sdkmanager
+      # then fails with `Failed to find package '…\n…'`. Installing each
+      # package in a separate sdkmanager call is unambiguous.
+      - name: Set up Android SDK cmdline-tools
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: "11076708"
-          packages: |
-            platforms;android-${{ env.ANDROID_API }}
-            ndk;${{ env.NDK_VERSION }}
+
+      # NDK install goes through sdkmanager, which produces the standard
+      # $ANDROID_SDK_ROOT/ndk/<id> layout with working clang / clang++
+      # wrappers (the third-party nttld/setup-ndk tarball cache we tried
+      # first lost symlinks + exec bits and CMake rejected the compilers).
+      - name: Install NDK ${{ env.NDK_VERSION }} + Android platform
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager --install "ndk;${{ env.NDK_VERSION }}"
+          sdkmanager --install "platforms;android-${{ env.ANDROID_API }}"
 
       - name: Resolve NDK path
         id: ndk
