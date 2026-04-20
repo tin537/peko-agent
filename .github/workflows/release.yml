@@ -187,6 +187,12 @@ jobs:
           # header-only C++ wrapper; the linker still resolves against
           # the NDK's libvulkan.so.
           CPATH: /usr/include
+          # Force serial make. Previous CI run showed vulkan-shaders-gen
+          # finishing cleanly followed by a bare `Error 2` from the top
+          # level — parallel make had interleaved the failing target's
+          # output out of view. Serial builds on a 4-core runner take
+          # ~5 min longer; readable logs matter more.
+          JOBS: "1"
         run: |
           cd crates/peko-llm-daemon
           ./build-android.sh
