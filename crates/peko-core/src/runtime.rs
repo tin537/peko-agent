@@ -407,6 +407,33 @@ impl AgentRuntime {
                     }
                 }
 
+                // Save image + compute URL before moving `result` into
+                // the Message (symmetric to the run_turn path above —
+                // see detailed comment there). Without this block, the
+                // non-stream code path also dropped images on session
+                // write.
+                let image_url = result.image.as_ref().and_then(|img| {
+                    let ext = if img.media_type.contains("jpeg") { "jpg" } else { "png" };
+                    let filename = format!("screenshot_{}.{}", chrono::Utc::now().timestamp_millis(), ext);
+                    let dir = std::path::Path::new("/data/peko/screenshots");
+                    let _ = std::fs::create_dir_all(dir);
+                    let path = dir.join(&filename);
+                    let decoded = base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD, &img.base64,
+                    ).ok()?;
+                    let written = std::fs::write(&path, &decoded).is_ok()
+                        || std::fs::write(
+                            std::path::Path::new("/tmp").join(&filename), &decoded,
+                        ).is_ok();
+                    if written {
+                        Some(format!("/api/screenshots/{}", filename))
+                    } else { None }
+                });
+
+                let has_image = result.image.is_some();
+                let stored_content = result.content.clone();
+                let stored_is_error = result.is_error;
+
                 let tool_msg = if let Some(img) = result.image {
                     Message::tool_result_with_image(
                         tc.id.clone(),
@@ -425,7 +452,18 @@ impl AgentRuntime {
                 };
 
                 conversation.push(tool_msg.clone());
-                self.session.append_message(&session_id, &tool_msg)?;
+                if has_image {
+                    self.session.append_tool_result(
+                        &session_id,
+                        &tc.id,
+                        &tc.name,
+                        &stored_content,
+                        stored_is_error,
+                        image_url.as_deref(),
+                    )?;
+                } else {
+                    self.session.append_message(&session_id, &tool_msg)?;
+                }
             }
 
             if escalated {
@@ -724,7 +762,14 @@ impl AgentRuntime {
                     }
                 }
 
-                // Save image to a temp file and send URL instead of inline base64
+                // Save image to disk once, reuse the URL for both the
+                // live stream and the session store. Previously the
+                // stream path got the URL but the session store only
+                // got the raw ImageData (dropped on floor by
+                // session.append_message), so resuming an old chat
+                // showed the text "Screenshot captured..." with no
+                // image. We now persist image_url in the messages
+                // table via append_tool_result.
                 let img_for_ui = result.image.as_ref().and_then(|img| {
                     let ext = if img.media_type.contains("jpeg") { "jpg" } else { "png" };
                     let filename = format!("screenshot_{}.{}", chrono::Utc::now().timestamp_millis(), ext);
@@ -733,7 +778,7 @@ impl AgentRuntime {
                     let path = dir.join(&filename);
 
                     // Try data dir, fallback to /tmp
-                    let (save_path, url_path) = if let Ok(decoded) = base64::Engine::decode(
+                    let (_save_path, url_path) = if let Ok(decoded) = base64::Engine::decode(
                         &base64::engine::general_purpose::STANDARD, &img.base64
                     ) {
                         if std::fs::write(&path, &decoded).is_ok() {
@@ -754,8 +799,18 @@ impl AgentRuntime {
                     name: tc.name.clone(),
                     content: result.content.clone(),
                     is_error: result.is_error,
-                    image: img_for_ui,
+                    image: img_for_ui.clone(),
                 }).await;
+
+                // Persist BEFORE moving `result.image` into `tool_msg`
+                // for the in-memory LLM context — we need `result.content`
+                // and the URL (if any) on the session row, and we also
+                // need the full Message with embedded ImageData for
+                // LLM conversation continuity.
+                let has_image = result.image.is_some();
+                let stored_content = result.content.clone();
+                let stored_is_error = result.is_error;
+                let stored_url = img_for_ui.as_ref().map(|(u, _)| u.clone());
 
                 let tool_msg = if let Some(img) = result.image {
                     Message::tool_result_with_image(
@@ -767,7 +822,21 @@ impl AgentRuntime {
                     )
                 };
                 conversation.push(tool_msg.clone());
-                self.session.append_message(session_id, &tool_msg)?;
+
+                if has_image {
+                    // New image-aware path: store the URL in messages.image_url
+                    // so the resume render can load <img src=...>.
+                    self.session.append_tool_result(
+                        session_id,
+                        &tc.id,
+                        &tc.name,
+                        &stored_content,
+                        stored_is_error,
+                        stored_url.as_deref(),
+                    )?;
+                } else {
+                    self.session.append_message(session_id, &tool_msg)?;
+                }
             }
 
             total_iterations += 1;

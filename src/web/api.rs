@@ -353,6 +353,7 @@ async fn get_session_messages(
                     "tool_name": m.tool_name,
                     "tool_args": m.tool_args,
                     "is_error": m.is_error,
+                    "image_url": m.image_url,
                     "created_at": m.created_at,
                 })
             }).collect();

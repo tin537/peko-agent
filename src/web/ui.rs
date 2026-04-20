@@ -1053,10 +1053,18 @@ async function loadSession(id) {
           if (m.is_error) {
             addMsg('error', esc((m.tool_name || 'tool') + ': ' + m.content));
           } else {
-            addMsg('tool',
-              '<div class="text-emerald-400 text-[11px] font-semibold font-mono mb-1.5">' + esc(m.tool_name || 'tool') + '</div>' +
-              '<pre class="text-zinc-300 font-mono text-xs whitespace-pre-wrap break-all leading-relaxed">' + esc(m.content) + '</pre>'
-            );
+            // Mirror the live-stream render: if image_url is stored
+            // on the row, show it above the text. Without this, resumed
+            // chats would show only the "Screenshot captured ..." line
+            // with no actual image — which is exactly the bug that
+            // was reported.
+            var html = '<div class="text-emerald-400 text-[11px] font-semibold font-mono mb-1.5">' + esc(m.tool_name || 'tool') + '</div>';
+            if (m.image_url) {
+              var src = m.image_url.indexOf('data:') === 0 ? m.image_url : (API + m.image_url);
+              html += '<img src="' + escAttr(src) + '" class="rounded-lg max-w-full max-h-80 mb-2 border border-zinc-700/30" alt="screenshot" loading="lazy">';
+            }
+            html += '<pre class="text-zinc-300 font-mono text-xs whitespace-pre-wrap break-all leading-relaxed">' + esc(m.content) + '</pre>';
+            addMsg('tool', html);
           }
         }
       }

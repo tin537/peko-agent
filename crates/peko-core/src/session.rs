@@ -18,6 +18,12 @@ pub struct StoredMessage {
     pub tool_use_id: Option<String>,
     pub is_error: bool,
     pub created_at: String,
+    /// Path served by /api/screenshots/<filename> — set for tool_result
+    /// messages that produced an image (screenshot, ui_inspect/
+    /// screenshot_sf, etc.). Runtime writes the image to disk when the
+    /// tool returns, then passes the URL through append_tool_result so
+    /// the resume path can re-render it. None for text-only results.
+    pub image_url: Option<String>,
 }
 
 #[derive(Debug)]
@@ -64,6 +70,7 @@ impl SessionStore {
                 tool_args TEXT,
                 tool_use_id TEXT,
                 is_error INTEGER DEFAULT 0,
+                image_url TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id)
             );
@@ -71,6 +78,12 @@ impl SessionStore {
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
             "
         )?;
+        // Migrate old DBs: ADD COLUMN is idempotent via the try/ignore
+        // pattern — it errors with "duplicate column" when already
+        // present, which we discard. Fresh installs hit the CREATE
+        // TABLE above with the column already included, so this is a
+        // no-op on them.
+        let _ = self.conn.execute("ALTER TABLE messages ADD COLUMN image_url TEXT", []);
         Ok(())
     }
 
@@ -123,6 +136,37 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Specialised path for tool-result messages that produced an image
+    /// (screenshot, ui_inspect screenshot_sf). Stores `image_url`
+    /// alongside the usual columns so the resume path can render the
+    /// image — the default `append_message` route above leaves
+    /// image_url NULL because the `Message::ToolResult` enum carries
+    /// raw ImageData (base64) that's not suitable for sqlite storage,
+    /// and runtime.rs already saves the decoded bytes to a file whose
+    /// URL we accept here.
+    ///
+    /// Separate from `append_message` to avoid changing that method's
+    /// signature (6 call sites, only 2 of which deal with images).
+    pub fn append_tool_result(
+        &self,
+        session_id: &str,
+        tool_use_id: &str,
+        tool_name: &str,
+        content: &str,
+        is_error: bool,
+        image_url: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let id = Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT INTO messages \
+               (id, session_id, role, content, tool_name, tool_use_id, is_error, image_url, created_at) \
+               VALUES (?1, ?2, 'tool_result', ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, session_id, content, tool_name, tool_use_id, is_error as i32, image_url, now],
+        )?;
+        Ok(())
+    }
+
     pub fn update_status(&self, session_id: &str, status: &str, iterations: usize) -> anyhow::Result<()> {
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
@@ -134,7 +178,7 @@ impl SessionStore {
 
     pub fn load_messages(&self, session_id: &str) -> anyhow::Result<Vec<StoredMessage>> {
         let mut stmt = self.conn.prepare(
-            "SELECT role, content, tool_name, tool_args, tool_use_id, is_error, created_at \
+            "SELECT role, content, tool_name, tool_args, tool_use_id, is_error, image_url, created_at \
              FROM messages WHERE session_id = ?1 ORDER BY created_at ASC"
         )?;
         let rows = stmt.query_map(params![session_id], |row| {
@@ -145,7 +189,10 @@ impl SessionStore {
                 tool_args: row.get(3)?,
                 tool_use_id: row.get(4)?,
                 is_error: row.get::<_, i32>(5).unwrap_or(0) != 0,
-                created_at: row.get(6)?,
+                // image_url at position 6; row.get will return None for
+                // older rows that predate the column.
+                image_url: row.get::<_, Option<String>>(6).ok().flatten(),
+                created_at: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
