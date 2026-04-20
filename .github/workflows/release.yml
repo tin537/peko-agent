@@ -1,0 +1,230 @@
+# Builds a complete Peko Agent Magisk module zip.
+#
+# Triggers:
+#   - push of a `v*` tag              → build + attach to a new GitHub Release
+#   - push / PR to main               → build + upload as a workflow artifact
+#   - manual workflow_dispatch        → build + upload as an artifact
+#
+# The final zip is the same shape produced locally by `./magisk/build-module.sh`
+# (binaries + priv-app APKs + privapp-permissions + service.sh + sepolicy.rule).
+name: Build Magisk release zip
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  # Needed so softprops/action-gh-release can attach assets to the tag's release.
+  contents: write
+
+env:
+  # Pin the toolchains so builds reproduce. The daemon's build-android.sh
+  # probes multiple NDK versions; we pick one here and export its path
+  # explicitly so nothing has to probe.
+  NDK_VERSION: "r27c"
+  ANDROID_API: 31
+  RUST_TOOLCHAIN: stable
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read module.prop version
+        id: ver
+        run: |
+          v=$(grep -E '^version=' magisk/peko-module/module.prop | cut -d= -f2)
+          echo "module_version=$v" >> "$GITHUB_OUTPUT"
+          echo "module version: $v"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # setup-android provisions the SDK (cmdline-tools, platform-tools, build-tools)
+      # at /usr/local/lib/android/sdk and licenses it. It does NOT install the NDK;
+      # nttld/setup-ndk below owns that.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: "11076708"
+
+      - name: Set up Android NDK ${{ env.NDK_VERSION }}
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          # Keep the NDK around across subsequent workflow runs on the same runner
+          # image — CI runners are ephemeral but this helps local act runs.
+          add-to-path: false
+          local-cache: true
+
+      - name: Install Rust toolchain + aarch64-linux-android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: aarch64-linux-android
+
+      - name: Cache Cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          # Invalidate when Cargo.lock or any toolchain-related file changes.
+          # PR builds reuse main's cache via restore-keys.
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Cache Gradle home
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # Both priv-app APKs sign with the ~/.android/debug.keystore — the
+      # signature itself doesn't need to be a platform key (Magisk priv-app
+      # install is the trust boundary), but Android 13's PackageManager
+      # silently rejects unsigned APKs from /system/priv-app. A fresh runner
+      # has no ~/.android/, so synthesise the standard debug keystore now.
+      - name: Create debug keystore
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair \
+              -alias androiddebugkey \
+              -keypass android \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -dname "CN=Android Debug,O=Android,C=US" \
+              -validity 30000 \
+              -keyalg RSA \
+              -keysize 2048
+          fi
+
+      - name: Set up .cargo linker for Android
+        run: |
+          NDK="${{ steps.ndk.outputs.ndk-path }}"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          echo "$TC" >> "$GITHUB_PATH"
+          # Tell Cargo + cc-rs about the cross-compile toolchain explicitly,
+          # so native deps (e.g. rusqlite's bundled sqlite) don't fall back
+          # to the host's gcc.
+          {
+            echo "CC_aarch64_linux_android=$TC/aarch64-linux-android${ANDROID_API}-clang"
+            echo "CXX_aarch64_linux_android=$TC/aarch64-linux-android${ANDROID_API}-clang++"
+            echo "AR_aarch64_linux_android=$TC/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TC/aarch64-linux-android${ANDROID_API}-clang"
+          } >> "$GITHUB_ENV"
+
+      - name: Build peko-llm-daemon (aarch64, Vulkan)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          ANDROID_ABI: arm64-v8a
+          VULKAN: "ON"
+        run: |
+          cd crates/peko-llm-daemon
+          ./build-android.sh
+          ls -lh build-android-arm64-v8a/peko-llm-daemon
+
+      - name: Build peko-agent (aarch64-linux-android, release)
+        run: |
+          cargo build \
+            --bin peko-agent \
+            --release \
+            --target aarch64-linux-android
+          ls -lh target/aarch64-linux-android/release/peko-agent
+
+      - name: Build peko-overlay APK (release, signed with debug key)
+        run: |
+          cd android/peko-overlay
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon
+          ls -lh app/build/outputs/apk/release
+
+      - name: Build peko-sms-shim APK (release, signed with debug key)
+        run: |
+          cd android/peko-sms-shim
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon
+          ls -lh app/build/outputs/apk/release
+
+      # build-module.sh stages every artifact into magisk/peko-module/ and
+      # zips the tree. --skip-build means "binaries are already built" — we
+      # rebuild them ourselves above so CI caching can hit per-stage.
+      - name: Package Magisk zip
+        run: |
+          ./magisk/build-module.sh --skip-build
+          ls -lh magisk/out/
+
+      - name: Compute SHA256
+        id: sha
+        run: |
+          zip=$(find magisk/out -maxdepth 1 -name 'peko-magisk-*.zip' -print -quit)
+          [ -n "$zip" ] || { echo "no zip produced" >&2; exit 1; }
+          sha=$(sha256sum "$zip" | awk '{print $1}')
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "$sha  $(basename "$zip")" > magisk/out/SHA256SUMS
+          cat magisk/out/SHA256SUMS
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: peko-magisk-${{ steps.ver.outputs.module_version }}
+          path: |
+            magisk/out/peko-magisk-*.zip
+            magisk/out/SHA256SUMS
+          retention-days: 30
+
+      # Release step only fires on tag pushes. The tag name (refs/tags/v0.3.0)
+      # becomes the release name; module.prop version should match but we use
+      # the tag name as the canonical release label since that's what users see.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            magisk/out/peko-magisk-*.zip
+            magisk/out/SHA256SUMS
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          generate_release_notes: true
+          body: |
+            Peko Agent Magisk module — ${{ github.ref_name }}
+
+            **Install**
+            ```
+            adb push peko-magisk-*.zip /sdcard/Download/
+            # Magisk app → Modules → Install from storage → pick the zip → Reboot
+            adb forward tcp:8080 tcp:8080 && open http://localhost:8080
+            ```
+
+            **What's inside**
+            - `peko-agent` (Rust binary, aarch64, release)
+            - `peko-llm-daemon` (C++ + llama.cpp + Vulkan backend, aarch64)
+            - `com.peko.overlay` priv-app (floating chat overlay — auto-starts on boot)
+            - `com.peko.shim.sms` priv-app (default-SMS role + voice call recording)
+            - `privapp-permissions-peko.xml`, `service.sh`, `post-fs-data.sh`, `sepolicy.rule`
+
+            SHA256 of the release asset is in `SHA256SUMS`.
+
+            See `CHANGELOG.md` / commit log for what changed; `QUICKSTART.md`
+            for first-boot setup; `SECURITY.md` for disclosure policy.
