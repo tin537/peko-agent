@@ -30,6 +30,13 @@
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.WRITE_SMS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- MMS filters are required for SMS-role qualification even though
+         we don't actually handle MMS; see WapPushDeliverReceiver.kt. -->
+    <uses-permission android:name="android.permission.RECEIVE_WAP_PUSH" />
+    <uses-permission android:name="android.permission.RECEIVE_MMS" />
 
     <!-- Picking the right SIM on multi-SIM devices -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
@@ -39,6 +46,10 @@
     <uses-permission
         android:name="android.permission.MODIFY_PHONE_STATE"
         tools:ignore="ProtectedPermissions" />
+
+    <!-- Required for posting incoming-SMS notifications once we hold
+         the default SMS role. Runtime-granted on Android 13+. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="Peko SMS Shim"
@@ -84,5 +95,75 @@
                 <action android:name="com.peko.shim.sms.RESULT" />
             </intent-filter>
         </receiver>
+
+        <!--  ─── Default-SMS-app role qualification ────────────────────
+              The four declarations below are required by
+              android.app.role.SMS per RoleController's role.xml. Without
+              all four present, `cmd role add-role-holder` silently fails
+              and SEND_SMS stays APPLY_RESTRICTION=true, which throws a
+              SecurityException at SmsManager.sendTextMessage().
+
+              Functional job: the SmsDeliverReceiver writes incoming SMS
+              to content://sms/inbox so the user's stock Messaging app
+              keeps showing them. Everything else is stubbed — we only
+              want the role for the permission grants it unlocks. -->
+
+        <!-- Activity for ACTION_SENDTO sms:/smsto:. Required for role
+             qualification; we finish immediately in onCreate(). -->
+        <activity
+            android:name=".SendToActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay"
+            android:excludeFromRecents="true">
+            <intent-filter>
+                <action android:name="android.intent.action.SENDTO" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+        </activity>
+
+        <!-- Incoming SMS. Priority=1 so other receivers in the chain
+             don't race us for the (ordered) broadcast. -->
+        <receiver
+            android:name=".SmsDeliverReceiver"
+            android:exported="true"
+            android:directBootAware="true"
+            android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter android:priority="1">
+                <action android:name="android.provider.Telephony.SMS_DELIVER" />
+            </intent-filter>
+        </receiver>
+
+        <!-- MMS (WAP Push). Stubbed. Required for role qualification. -->
+        <receiver
+            android:name=".WapPushDeliverReceiver"
+            android:exported="true"
+            android:directBootAware="true"
+            android:permission="android.permission.BROADCAST_WAP_PUSH">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
+                <data android:mimeType="application/vnd.wap.mms-message" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Quick-reply service fired from the incoming-call screen.
+             Also stubbed; see RespondViaMessageService.kt comment. -->
+        <service
+            android:name=".RespondViaMessageService"
+            android:exported="true"
+            android:permission="android.permission.SEND_RESPOND_VIA_MESSAGE">
+            <intent-filter>
+                <action android:name="android.intent.action.RESPOND_VIA_MESSAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+        </service>
     </application>
 </manifest>

@@ -59,9 +59,14 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use uuid::Uuid;
 
-/// Where the shim writes result files. Mirrors the constant in
-/// `SmsCommandReceiver.kt`; must be kept in sync if ever changed.
-const RESULT_DIR: &str = "/data/peko/sms_out";
+/// Where the shim writes result files. Must mirror the Kotlin side in
+/// `SmsCommandReceiver.kt::writeResult` — which uses `ctx.filesDir`
+/// pointing at the shim package's own private data directory. We
+/// can't put this under /data/peko/ because Android sandboxes apps
+/// out of paths outside /data/data/<their pkg>/ regardless of UNIX
+/// perms. peko-agent reads these files as root so sandbox doesn't
+/// apply on our side; the shim owns the write side.
+const RESULT_DIR: &str = "/data/data/com.peko.shim.sms/files/sms_out";
 
 /// Flat-file audit trail. Append-only; peko-agent creates the file at
 /// startup if missing, and we never rotate — operators are expected to
@@ -78,11 +83,11 @@ pub struct SmsFrameworkTool {
 
 impl SmsFrameworkTool {
     pub fn new(cfg: SmsConfig) -> Self {
-        // Make the result + audit paths exist so we don't race with the
-        // shim on the first send. 0770 gives the shim's appuid (granted
-        // system-like via priv-app) plus root write; peko-agent runs as
-        // root under Magisk so it can create these regardless.
-        let _ = std::fs::create_dir_all(RESULT_DIR);
+        // Don't try to pre-create RESULT_DIR from here — it lives
+        // inside the shim's private storage (/data/data/<pkg>/files/).
+        // If peko-agent (root) creates it first, the ownership ends
+        // up wrong and the shim can't write to it. Let the Kotlin
+        // side mkdirs() on first use; we only ever read.
         let _ = std::fs::File::options().create(true).append(true).open(AUDIT_LOG);
         Self {
             cfg,

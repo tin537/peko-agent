@@ -155,12 +155,16 @@ class SmsCommandReceiver : BroadcastReceiver() {
             body_len: Int? = null,
             error: String? = null,
         ) {
-            val dir = File("/data/peko/sms_out")
-            // The dir is created by peko-agent at startup with 0770 and the
-            // appropriate group. If it doesn't exist the shim is running
-            // without peko, just skip — nothing to do anyway.
-            if (!dir.isDirectory) {
-                Log.w(TAG, "sms_out dir missing, dropping result id=$id status=$status")
+            // Write inside the shim's own private dir (ctx.filesDir ≈
+            // /data/data/com.peko.shim.sms/files/). Apps on Android
+            // can't cross-write to /data/peko/ — app UID is sandboxed
+            // out of paths outside /data/data/<pkg>/ regardless of
+            // UNIX perms. peko-agent runs as root under Magisk so
+            // reading the shim's filesDir is trivial from the poller
+            // side. Matching path is in sms_framework.rs.
+            val dir = File(ctx.filesDir, "sms_out")
+            if (!dir.isDirectory && !dir.mkdirs()) {
+                Log.w(TAG, "failed to create ${dir.absolutePath}, dropping result id=$id status=$status")
                 return
             }
 

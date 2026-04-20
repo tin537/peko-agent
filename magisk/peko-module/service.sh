@@ -20,22 +20,57 @@ if pm list packages 2>/dev/null | grep -q '^package:com.peko.overlay$'; then
     appops set com.peko.overlay SYSTEM_ALERT_WINDOW allow >/dev/null 2>&1 || true
 fi
 
-# If the Peko SMS shim shipped alongside, grant its runtime permissions at
-# boot. These are NOT granted automatically even for priv-apps — they're
-# "hard-restricted" dangerous permissions (SEND_SMS and friends). The
-# privapp-permissions-peko.xml whitelists them so they're RESTRICTION_-
-# SYSTEM_EXEMPT and `pm grant` can actually stick; without that XML,
-# this grant silently no-ops. Make the result dir world-writable too
-# so the shim's app-UID can write JSON status files that peko-agent polls.
+# If the Peko SMS shim shipped alongside, make it the default SMS app
+# and grant its runtime permissions at boot. This is load-bearing:
+#
+#   - SEND_SMS on Android 13 is hard-restricted. Even for a priv-app
+#     with privapp-permissions.xml entries, `pm grant` silently no-ops
+#     and SmsManager.sendTextMessage throws SecurityException.
+#   - The ONLY way to lift APPLY_RESTRICTION on this ROM is to hold
+#     android.app.role.SMS. RoleController grants the exempt flags
+#     automatically when the role is assigned.
+#   - Once the role is held, peko can send SMS. Incoming SMS flow
+#     through SmsDeliverReceiver which writes them to content://sms/
+#     inbox, so the user's existing Messaging app keeps showing them.
+#
+# If the user manually revokes the SMS role via Settings, SMS sending
+# will start failing again on the next boot. In that case, re-run this
+# service.sh or reboot.
 if pm list packages 2>/dev/null | grep -q '^package:com.peko.shim.sms$'; then
+    # First, grant the permissions that are "normal" enough that pm
+    # grant will actually stick. These lift independently of SMS role.
+    for perm in \
+        android.permission.READ_PHONE_STATE \
+        android.permission.READ_PHONE_NUMBERS \
+        android.permission.POST_NOTIFICATIONS; do
+        pm grant com.peko.shim.sms "$perm" >/dev/null 2>&1 || true
+    done
+
+    # Now the SMS role. This is the magic step — once granted,
+    # RoleController stamps SEND_SMS / RECEIVE_SMS / READ_SMS with
+    # RESTRICTION_SYSTEM_EXEMPT + GRANTED_BY_DEFAULT, which is exactly
+    # the combo the stock Messaging app gets and what we need for
+    # SmsManager.sendTextMessage to work.
+    #
+    # We wait briefly for RoleService to come up — on cold boot it's
+    # not always ready when service.sh runs.
+    for attempt in 1 2 3 4 5; do
+        if cmd role add-role-holder android.app.role.SMS com.peko.shim.sms >/dev/null 2>&1; then
+            break
+        fi
+        sleep 2
+    done
+
+    # Also grant the dangerous SMS perms explicitly so they're active
+    # immediately (role grant can race with pm's grant propagation
+    # on some ROMs).
     for perm in \
         android.permission.SEND_SMS \
         android.permission.RECEIVE_SMS \
-        android.permission.READ_SMS \
-        android.permission.READ_PHONE_STATE \
-        android.permission.READ_PHONE_NUMBERS; do
+        android.permission.READ_SMS; do
         pm grant com.peko.shim.sms "$perm" >/dev/null 2>&1 || true
     done
+
     # AppOps matches — package-level AND uid-level so runtime checks
     # can't fall back to "ignore" for the shim's UID.
     SHIM_UID=$(dumpsys package com.peko.shim.sms 2>/dev/null | awk -F'=' '/userId=/ {print $2; exit}' | awk '{print $1}')
@@ -43,12 +78,16 @@ if pm list packages 2>/dev/null | grep -q '^package:com.peko.shim.sms$'; then
         appops set com.peko.shim.sms "$op" allow >/dev/null 2>&1 || true
         [ -n "$SHIM_UID" ] && appops set --uid "$SHIM_UID" "$op" allow >/dev/null 2>&1 || true
     done
-    # /data/peko/sms_out is peko-agent's result directory; shim needs
-    # to write to it as an app UID. 0777 is fine on a rooted device —
-    # the directory only contains ephemeral JSON status files, and
-    # peko-agent cleans its own stale ones.
-    mkdir -p /data/peko/sms_out
-    chmod 0777 /data/peko/sms_out
+
+    # The shim writes result files inside its own private storage
+    # (/data/data/com.peko.shim.sms/files/sms_out/) — apps are sandboxed
+    # out of /data/peko/ regardless of UNIX perms. peko-agent reads
+    # those files as root, so no shared dir is needed. The old
+    # /data/peko/sms_out/ setup was a dead end; left intentionally
+    # unseeded here so nothing hints at a path that won't work.
+    # sms_in.log remains as peko-agent's audit trail for messages it
+    # has seen arrive; shim can't write to it directly but peko-agent
+    # queries the content provider periodically anyway.
 fi
 
 # Rotate the log so we don't bloat — keep last 5 runs.
