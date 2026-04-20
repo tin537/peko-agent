@@ -64,6 +64,17 @@ echo "→ build dir:  $BUILD_DIR"
 echo "→ build type: $BUILD_TYPE"
 echo
 
+# ── Vulkan headers path (optional) ───────────────────────────────
+# On CI we isolate vulkan.hpp + spirv/ into a scratch dir so the cross-
+# compile doesn't accidentally inherit glibc system headers alongside
+# them. Locally the host's standard /usr/include or the Vulkan SDK
+# layout usually works without this, hence the optional env var.
+VULKAN_INC_ARG=()
+if [ -n "${VULKAN_INCLUDE_DIR:-}" ]; then
+    VULKAN_INC_ARG=(-DVulkan_INCLUDE_DIR="$VULKAN_INCLUDE_DIR")
+    echo "→ Vulkan_INCLUDE_DIR: $VULKAN_INCLUDE_DIR"
+fi
+
 # ── Configure ───────────────────────────────────────────────────
 cmake -S . -B "$BUILD_DIR" \
     -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
@@ -73,7 +84,8 @@ cmake -S . -B "$BUILD_DIR" \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/out" \
     -DPEKO_VULKAN="$VULKAN" \
-    -DVulkan_GLSLC_EXECUTABLE="$GLSLC"
+    -DVulkan_GLSLC_EXECUTABLE="$GLSLC" \
+    "${VULKAN_INC_ARG[@]}"
 
 # ── Build ───────────────────────────────────────────────────────
 # VERBOSE=1 makes CMake echo every compile + link command. Without it,

@@ -176,23 +176,38 @@ jobs:
           test -f /usr/include/vulkan/vulkan.hpp          || { echo 'vulkan.hpp missing' >&2; exit 1; }
           test -f /usr/include/spirv/unified1/spirv.h     || { echo 'spirv headers missing' >&2; exit 1; }
 
+      # Clone only the vulkan/ and spirv/ subtrees out of /usr/include into
+      # an isolated dir so the cross-compile can find vulkan.hpp WITHOUT
+      # exposing /usr/include wholesale. The previous CPATH=/usr/include
+      # approach pulled in the host's glibc stdint.h (which includes
+      # bits/libc-header-start.h, absent from the NDK sysroot) and killed
+      # ggml-base's C compile:
+      #     /usr/include/stdint.h:26:
+      #     fatal error: 'bits/libc-header-start.h' file not found
+      # This isolated tree contains only Khronos headers, no glibc
+      # system headers, so pointing Vulkan_INCLUDE_DIR at it is safe.
+      - name: Stage isolated Vulkan + SPIR-V include dir
+        run: |
+          rm -rf /tmp/vulkan-inc
+          mkdir -p /tmp/vulkan-inc
+          cp -r /usr/include/vulkan /tmp/vulkan-inc/
+          cp -r /usr/include/spirv  /tmp/vulkan-inc/
+          echo "VULKAN_INCLUDE_DIR=/tmp/vulkan-inc" >> "$GITHUB_ENV"
+
       - name: Build peko-llm-daemon (aarch64, Vulkan)
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_ABI: arm64-v8a
           VULKAN: "ON"
-          # NDK cross-compile sysroot has no vulkan.hpp; add the host's
-          # include dir. clang consults CPATH after the sysroot, so this
-          # doesn't risk pulling in host-only symbols — we only get the
-          # header-only C++ wrapper; the linker still resolves against
-          # the NDK's libvulkan.so.
-          CPATH: /usr/include
           # Force serial make. Previous CI run showed vulkan-shaders-gen
           # finishing cleanly followed by a bare `Error 2` from the top
           # level — parallel make had interleaved the failing target's
           # output out of view. Serial builds on a 4-core runner take
           # ~5 min longer; readable logs matter more.
           JOBS: "1"
+          # build-android.sh reads VULKAN_INCLUDE_DIR and forwards it to
+          # cmake as -DVulkan_INCLUDE_DIR. Set by the Stage step above.
+          # VULKAN_INCLUDE_DIR: /tmp/vulkan-inc   # exported via GITHUB_ENV
         run: |
           cd crates/peko-llm-daemon
           ./build-android.sh
