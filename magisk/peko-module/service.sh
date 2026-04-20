@@ -79,6 +79,27 @@ if pm list packages 2>/dev/null | grep -q '^package:com.peko.shim.sms$'; then
         [ -n "$SHIM_UID" ] && appops set --uid "$SHIM_UID" "$op" allow >/dev/null 2>&1 || true
     done
 
+    # Call-recording pipeline: RECORD_AUDIO + READ_CALL_LOG are
+    # dangerous runtime perms. Grant at boot so CallRecorderService
+    # doesn't SecurityException the first time PHONE_STATE fires.
+    # RECORD_AUDIO gates MediaRecorder; READ_CALL_LOG gates the
+    # EXTRA_INCOMING_NUMBER extra on Android 13+.
+    # CAPTURE_AUDIO_OUTPUT is signature|privileged — `pm grant`
+    # no-ops for runtime, but the privapp XML entry is what matters
+    # and that took effect at boot. We also flip the RECORD_AUDIO
+    # appops to allow both at package and uid level to match the
+    # stock Phone app's state.
+    for perm in \
+        android.permission.RECORD_AUDIO \
+        android.permission.READ_CALL_LOG \
+        android.permission.PROCESS_OUTGOING_CALLS; do
+        pm grant com.peko.shim.sms "$perm" >/dev/null 2>&1 || true
+    done
+    for op in RECORD_AUDIO READ_CALL_LOG; do
+        appops set com.peko.shim.sms "$op" allow >/dev/null 2>&1 || true
+        [ -n "$SHIM_UID" ] && appops set --uid "$SHIM_UID" "$op" allow >/dev/null 2>&1 || true
+    done
+
     # The shim writes result files inside its own private storage
     # (/data/data/com.peko.shim.sms/files/sms_out/) — apps are sandboxed
     # out of /data/peko/ regardless of UNIX perms. peko-agent reads

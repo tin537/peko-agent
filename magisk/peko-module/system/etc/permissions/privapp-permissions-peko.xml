@@ -37,6 +37,14 @@
   - SEND_SMS / RECEIVE_SMS / READ_SMS: the shim's whole purpose.
     Without these whitelisted, the shim installs but every send
     throws `uid ... does not have android.permission.SEND_SMS`.
+  - CAPTURE_AUDIO_OUTPUT: signature|privileged perm that unlocks
+    MediaRecorder.AudioSource.VOICE_CALL so CallRecorderService
+    can capture both uplink and downlink audio. Without it, the
+    recorder silently falls back to MIC and only captures the
+    local side (and only when on speakerphone).
+  - READ_CALL_LOG: required by CallStateReceiver to read
+    EXTRA_INCOMING_NUMBER on Android 13+ (it was made call-log-
+    gated by the Privacy Sandbox rollup).
 -->
 <permissions>
     <privapp-permissions package="com.peko.shim.sms">
@@ -44,5 +52,7 @@
         <permission name="android.permission.SEND_SMS" />
         <permission name="android.permission.RECEIVE_SMS" />
         <permission name="android.permission.READ_SMS" />
+        <permission name="android.permission.CAPTURE_AUDIO_OUTPUT" />
+        <permission name="android.permission.READ_CALL_LOG" />
     </privapp-permissions>
 </permissions>

@@ -51,6 +51,31 @@
          the default SMS role. Runtime-granted on Android 13+. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Voice-call recording pipeline.
+
+         PHONE_STATE broadcasts are what CallStateReceiver listens for;
+         READ_CALL_LOG gives us the caller number on OFFHOOK transitions
+         (EXTRA_INCOMING_NUMBER requires it on Android 13+).
+
+         RECORD_AUDIO is the dangerous runtime perm MediaRecorder checks.
+         FOREGROUND_SERVICE + FOREGROUND_SERVICE_MICROPHONE are required
+         by Android 13+ for a service that records audio.
+
+         CAPTURE_AUDIO_OUTPUT is signature|privileged — it's the only
+         perm that unlocks MediaRecorder.AudioSource.VOICE_CALL, which
+         captures both uplink and downlink. Without it, recording
+         silently falls back to MIC (only local side audible). Granted
+         via privapp-permissions-peko.xml; see service.sh for the
+         runtime `pm grant RECORD_AUDIO` step. -->
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission
+        android:name="android.permission.CAPTURE_AUDIO_OUTPUT"
+        tools:ignore="ProtectedPermissions" />
+
     <application
         android:label="Peko SMS Shim"
         android:description="@string/app_desc"
@@ -165,5 +190,26 @@
                 <data android:scheme="mmsto" />
             </intent-filter>
         </service>
+
+        <!-- ─── Voice call recording ─────────────────────────────────
+             CallStateReceiver observes phone-call state transitions
+             (RINGING → OFFHOOK → IDLE). On OFFHOOK it spins up
+             CallRecorderService which plays two consent beeps, starts
+             a MediaRecorder against the voice-call audio path, and
+             writes an .m4a + metadata .json to the shim's private
+             files dir. peko-agent polls that dir for transcription +
+             LLM summary. -->
+        <receiver
+            android:name=".CallStateReceiver"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PHONE_STATE" />
+            </intent-filter>
+        </receiver>
+        <service
+            android:name=".CallRecorderService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
     </application>
 </manifest>
