@@ -314,6 +314,54 @@ tailwind.config = {
             </div>
           </section>
 
+          <!-- Voice calls — recording, transcription, summary. Opt-in. -->
+          <section>
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-violet-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z"/></svg>
+              <h3 class="text-xs font-bold uppercase tracking-wider text-violet-400">Voice Calls</h3>
+            </div>
+            <div class="bg-zinc-900/80 rounded-xl border border-zinc-800/80 p-5 space-y-4">
+              <label class="flex items-center gap-2.5 px-3 py-2.5 rounded-lg bg-zinc-800/50 border border-zinc-700/30 cursor-pointer hover:border-zinc-600/50 transition-colors">
+                <input type="checkbox" id="callsEnabled" class="w-4 h-4 rounded accent-violet-500">
+                <span class="text-sm text-zinc-300">Record &amp; summarise phone calls</span>
+              </label>
+              <p class="text-[11px] text-zinc-500 leading-relaxed -mt-2">
+                When on, the shim plays two short consent beeps at the start of every call, records the voice channel, and drops an .m4a + metadata for this daemon to transcribe and summarise. The summary lands in memory keyed by caller. Takes effect within ~10s of saving — no restart needed.
+              </p>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label for="stt_base_url" class="block text-xs font-medium text-zinc-400 mb-1.5">STT base URL</label>
+                  <input type="text" id="stt_base_url" placeholder="https://api.openai.com/v1" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60">
+                </div>
+                <div>
+                  <label for="stt_model" class="block text-xs font-medium text-zinc-400 mb-1.5">STT model</label>
+                  <input type="text" id="stt_model" placeholder="whisper-1" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60">
+                </div>
+              </div>
+              <div>
+                <label for="stt_api_key" class="block text-xs font-medium text-zinc-400 mb-1.5">STT API key</label>
+                <input type="password" id="stt_api_key" placeholder="sk-..." class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60">
+                <p class="text-[11px] text-zinc-500 mt-1.5">
+                  Falls back to the <code class="text-zinc-400">OPENAI_API_KEY</code> env var when blank. Leave a saved key field empty to keep what's already stored.
+                </p>
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label for="stt_language" class="block text-xs font-medium text-zinc-400 mb-1.5">Language</label>
+                  <input type="text" id="stt_language" placeholder="auto" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60">
+                </div>
+                <div>
+                  <label for="calls_min_ms" class="block text-xs font-medium text-zinc-400 mb-1.5">Min duration (ms)</label>
+                  <input type="number" id="calls_min_ms" placeholder="2000" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60">
+                </div>
+                <div>
+                  <label for="calls_retain_days" class="block text-xs font-medium text-zinc-400 mb-1.5">Retain audio (days)</label>
+                  <input type="number" id="calls_retain_days" placeholder="7" class="w-full bg-zinc-800 border border-zinc-700/60 rounded-lg px-3 py-2.5 text-sm text-zinc-200 outline-none focus:border-violet-500/60">
+                </div>
+              </div>
+            </div>
+          </section>
+
           <!-- Tools -->
           <section>
             <div class="flex items-center gap-2 mb-4">
@@ -1244,6 +1292,27 @@ async function loadCfg() {
       pinEl.placeholder = '1234';
     }
 
+    // ─ Voice Calls ─
+    var calls = c.calls || {};
+    document.getElementById('callsEnabled').checked = calls.enabled === true;
+    document.getElementById('stt_base_url').value = calls.stt_base_url || '';
+    document.getElementById('stt_model').value = calls.stt_model || '';
+    document.getElementById('stt_language').value = calls.stt_language || '';
+    document.getElementById('calls_min_ms').value = (typeof calls.min_duration_ms === 'number') ? calls.min_duration_ms : 2000;
+    document.getElementById('calls_retain_days').value = (typeof calls.retain_audio_days === 'number') ? calls.retain_audio_days : 7;
+    var sk = calls.stt_api_key || '';
+    var skEl = document.getElementById('stt_api_key');
+    // Same masking convention as provider api_key: truncated "abcd...wxyz"
+    // means a key is stored; leave the input blank and hint via placeholder
+    // so saving without retyping keeps the existing one.
+    if (sk && sk.indexOf('...') >= 0) {
+      skEl.value = '';
+      skEl.placeholder = 'Key saved (enter new to change)';
+    } else {
+      skEl.value = sk;
+      skEl.placeholder = 'sk-...';
+    }
+
     // ─ Agent + tools (unchanged) ─
     document.getElementById('cIter').value = (c.agent && c.agent.max_iterations) || 50;
     document.getElementById('cCtx').value = (c.agent && c.agent.context_window) || 200000;
@@ -1331,6 +1400,28 @@ async function saveCfg() {
     return;
   }
 
+  // Voice calls config — STT key follows the api_key convention:
+  //   - input left blank while placeholder shows "saved" → keep existing
+  //   - non-empty text → new key
+  //   - explicit empty (placeholder reset to "sk-...") → clear
+  var sttInput = document.getElementById('stt_api_key').value.trim();
+  var sttSavedShown = document.getElementById('stt_api_key').placeholder.indexOf('saved') >= 0;
+  var sttKeyField;
+  if (sttSavedShown && sttInput === '') {
+    sttKeyField = '****';               // keep existing
+  } else {
+    sttKeyField = sttInput;              // new key or clear
+  }
+  var calls = {
+    enabled:            document.getElementById('callsEnabled').checked,
+    stt_base_url:       document.getElementById('stt_base_url').value.trim() || 'https://api.openai.com/v1',
+    stt_model:          document.getElementById('stt_model').value.trim() || 'whisper-1',
+    stt_language:       document.getElementById('stt_language').value.trim() || null,
+    min_duration_ms:    parseInt(document.getElementById('calls_min_ms').value) || 2000,
+    retain_audio_days:  parseInt(document.getElementById('calls_retain_days').value) || 7,
+    stt_api_key:        sttKeyField,
+  };
+
   var cfg = {
     agent: {
       max_iterations: parseInt(document.getElementById('cIter').value) || 50,
@@ -1338,6 +1429,7 @@ async function saveCfg() {
     },
     provider: provider,
     security: { lock_pin: lockPinField },
+    calls: calls,
     tools: {
       shell: document.getElementById('tShell').checked,
       filesystem: document.getElementById('tFs').checked,

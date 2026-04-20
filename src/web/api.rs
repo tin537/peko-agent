@@ -148,6 +148,18 @@ async fn get_config(State(state): State<AppState>) -> Json<serde_json::Value> {
             }
         }
     }
+    // Same treatment for the STT key under [calls]. The UI's placeholder
+    // logic looks at the truncated form (first4...last4) to decide
+    // whether to show "key saved".
+    if let Some(calls) = safe.get_mut("calls") {
+        if let Some(key) = calls.get("stt_api_key").and_then(|v| v.as_str()) {
+            if key.len() > 8 {
+                calls["stt_api_key"] = serde_json::Value::String(
+                    format!("{}...{}", &key[..4], &key[key.len()-4..])
+                );
+            }
+        }
+    }
     Json(safe)
 }
 
@@ -237,6 +249,25 @@ async fn set_config(
     }
     if let Some(tools) = new_config.get("tools") {
         config["tools"] = tools.clone();
+    }
+
+    // Calls — voice call pipeline. The STT key follows the same
+    // "****" / "...truncated..." preserve convention as provider
+    // api_keys so the UI can hide the actual secret and still let
+    // the user tweak other fields without clobbering the key.
+    if let Some(calls) = new_config.get("calls") {
+        let mut merged = calls.clone();
+        let incoming = calls.get("stt_api_key").and_then(|v| v.as_str()).unwrap_or("");
+        let keep_existing = incoming.is_empty() || incoming.contains("...") || incoming.contains("****");
+        if keep_existing {
+            if let Some(existing_key) = config.get("calls")
+                .and_then(|c| c.get("stt_api_key"))
+                .cloned()
+            {
+                merged["stt_api_key"] = existing_key;
+            }
+        }
+        config["calls"] = merged;
     }
 
     // Security — lockscreen PIN. The UI re-sends "****" as a sentinel

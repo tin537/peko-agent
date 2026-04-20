@@ -208,21 +208,21 @@ impl CallStore {
 }
 
 /// Spawn the watcher loop. Returns the handle so main.rs can
-/// `.await` or drop it at shutdown. Pattern mirrors
-/// `gardener::spawn`.
+/// `.await` or drop it at shutdown.
+///
+/// Takes the shared live config (the same `Arc<Mutex<Value>>` the web
+/// API mutates) rather than a snapshot so the user can toggle
+/// `[calls].enabled` or swap the STT key from the Config UI and see
+/// it take effect on the next tick (within `POLL_INTERVAL_SECS`) —
+/// no daemon restart needed.
 pub fn spawn(
-    cfg: CallsConfig,
+    live_config: Arc<Mutex<serde_json::Value>>,
     call_store: Arc<Mutex<CallStore>>,
     memory_store: Arc<Mutex<MemoryStore>>,
     provider: Option<Arc<dyn LlmProvider>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        info!(
-            recordings_dir = %cfg.recordings_dir,
-            stt_base_url   = %cfg.stt_base_url,
-            stt_model      = %cfg.stt_model,
-            "call pipeline started"
-        );
+        info!("call pipeline started (will read [calls] from live config each tick)");
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
             .connect_timeout(Duration::from_secs(30))
@@ -230,12 +230,27 @@ pub fn spawn(
             .expect("failed to build reqwest Client");
 
         loop {
-            if let Err(e) = tick(&cfg, &http, &call_store, &memory_store, provider.as_deref()).await {
-                warn!(error = %e, "call pipeline tick failed");
+            let cfg_opt = resolve_calls_cfg(&live_config).await;
+            if let Some(cfg) = cfg_opt {
+                if let Err(e) = tick(&cfg, &http, &call_store, &memory_store, provider.as_deref()).await {
+                    warn!(error = %e, "call pipeline tick failed");
+                }
             }
             tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
         }
     })
+}
+
+/// Read `[calls]` out of the live config JSON, returning `None` if
+/// the user has (re-)disabled it. Tolerates missing fields — serde's
+/// Default impl fills in any gaps so the pipeline still has a
+/// sensible recordings_dir, STT base URL, etc. even when the user
+/// only flipped `enabled`.
+async fn resolve_calls_cfg(live_config: &Arc<Mutex<serde_json::Value>>) -> Option<CallsConfig> {
+    let snapshot = live_config.lock().await.clone();
+    let calls_val = snapshot.get("calls")?;
+    let cfg: CallsConfig = serde_json::from_value(calls_val.clone()).ok()?;
+    if cfg.enabled { Some(cfg) } else { None }
 }
 
 async fn tick(

@@ -365,13 +365,13 @@ async fn main() -> anyhow::Result<()> {
         info!("autonomy.memory_gardener=false — gardener disabled");
     }
 
-    // Voice-call pipeline — opt-in via [calls].enabled. Picks up
-    // recordings the Android shim drops into its private files
-    // dir, transcribes via OpenAI-compatible STT, and summarises
-    // via whichever LLM provider the config resolves. Independent
-    // of the life loop because a call can come in any time, not
-    // just during the autonomy tick cadence.
-    let call_store_arc: Option<Arc<Mutex<CallStore>>> = if config.calls.enabled {
+    // Voice-call pipeline — always spawned, always has a CallStore.
+    // The watcher re-reads `[calls]` from the live config each tick,
+    // so toggling `enabled` from the Config UI takes effect on the
+    // next poll (~10s) without a daemon restart. When disabled it
+    // idles. Store is opened unconditionally so `/api/calls` can
+    // surface historical records even while the pipeline is off.
+    let call_store_arc: Option<Arc<Mutex<CallStore>>> = {
         let path = config.agent.data_dir.join("calls.db");
         match CallStore::open(&path) {
             Ok(store) => {
@@ -381,22 +381,20 @@ async fn main() -> anyhow::Result<()> {
                     build_provider_helper(&cfg_val).ok()
                         .map(|p| Arc::from(p) as Arc<dyn peko_transport::LlmProvider>);
                 let _handle = spawn_call_pipeline(
-                    config.calls.clone(),
+                    config_arc.clone(),
                     store_arc.clone(),
                     memory_store.clone(),
                     provider_arc,
                 );
-                info!(db = %path.display(), "call pipeline enabled");
+                info!(db = %path.display(), enabled = config.calls.enabled,
+                      "call pipeline spawned (hot-reloads [calls] from live config)");
                 Some(store_arc)
             }
             Err(e) => {
-                warn!(error = %e, "call store open failed, pipeline disabled");
+                warn!(error = %e, "call store open failed, /api/calls will return empty");
                 None
             }
         }
-    } else {
-        info!("calls.enabled=false — voice call pipeline disabled");
-        None
     };
 
     // Life loop (Phase B) — spawned only when autonomy is enabled.
