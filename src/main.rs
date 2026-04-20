@@ -131,12 +131,37 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
         }
     }
 
-    // Call tool — AT commands via serial modem
+    // Call tool — prefer the framework path (am start ACTION_CALL,
+    // works on every modern Android with a Dialer and a SIM) over the
+    // AT-over-serial path, which requires modem access RILD denies us.
+    // Symmetric to the SMS backend switch above; modem fallback lives
+    // here for the rare rooted dev boards where /dev/smd* actually
+    // talks back.
     if config.tools.call {
-        if let Some(ref path) = modem_path {
-            match SerialModem::open(path) {
-                Ok(modem) => registry.register(CallTool::new(modem)),
-                Err(e) => warn!(error = %e, path = %path.display(), "modem open failed, call tool disabled"),
+        // Borrow the SMS backend setting — one "framework" / "modem" /
+        // "off" knob controls both so the config stays tidy.
+        let backend = config.tools.sms_config.backend.as_str();
+        match backend {
+            "off" => {
+                info!("Call tool disabled by config (sms_config.backend = \"off\")");
+            }
+            "modem" => {
+                if let Some(ref path) = modem_path {
+                    match SerialModem::open(path) {
+                        Ok(modem) => {
+                            info!(path = %path.display(), "Call tool: modem (AT) backend");
+                            registry.register(CallTool::new(modem));
+                        }
+                        Err(e) => warn!(error = %e, path = %path.display(),
+                            "modem open failed, call tool disabled"),
+                    }
+                } else {
+                    warn!("Call backend=modem but no modem_device resolved; tool disabled");
+                }
+            }
+            _ => {
+                info!("Call tool: framework (am start ACTION_CALL) backend");
+                registry.register(peko_tools_android::CallFrameworkTool::new());
             }
         }
     }
