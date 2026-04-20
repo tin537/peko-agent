@@ -2,11 +2,14 @@ package com.peko.shim.sms
 
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.Process
+import android.provider.Telephony
 import android.telephony.SmsManager
 import android.telephony.SubscriptionManager
 import android.util.Log
@@ -117,6 +120,42 @@ class SmsCommandReceiver : BroadcastReceiver() {
             )
             writeResult(ctx, id, "queued", to = to, body_len = body.length)
             Log.i(TAG, "queued SMS id=$id to=$to len=${body.length}")
+
+            // Persist the outgoing message to the sms provider so the
+            // user's stock Messages app shows it in the thread. When
+            // peko holds android.app.role.SMS, SmsManager.sendTextMessage
+            // does the radio TX but doesn't touch the content provider —
+            // we're expected to write to content://sms/sent ourselves,
+            // just like we write incoming traffic to content://sms/inbox
+            // in SmsDeliverReceiver. Without this, autonomously-sent
+            // messages vanish from the UI even though the carrier
+            // delivered them.
+            //
+            // Inserted as MESSAGE_TYPE_SENT (= 2) with read=1 so the
+            // Messages app doesn't badge it as an unread incoming.
+            // SmsResultReceiver could later flip to MESSAGE_TYPE_FAILED
+            // if the radio returns an error — we keep the row either
+            // way so the user can see what was attempted.
+            try {
+                val values = ContentValues().apply {
+                    put(Telephony.Sms.ADDRESS, to)
+                    put(Telephony.Sms.BODY,    body)
+                    val now = System.currentTimeMillis()
+                    put(Telephony.Sms.DATE,      now)
+                    put(Telephony.Sms.DATE_SENT, now)
+                    put(Telephony.Sms.READ, 1)
+                    put(Telephony.Sms.SEEN, 1)
+                    put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT)
+                }
+                val uri: Uri? = ctx.contentResolver.insert(Telephony.Sms.Sent.CONTENT_URI, values)
+                Log.i(TAG, "outgoing persisted to sms/sent: uri=$uri id=$id")
+            } catch (e: Throwable) {
+                // Non-fatal — the radio send already succeeded. Log and
+                // continue. Users who care about reconciling sends with
+                // the carrier bill have the /data/peko/sms_sent.log
+                // audit trail peko-agent writes.
+                Log.w(TAG, "sms/sent insert failed (radio TX still succeeded)", e)
+            }
         } catch (e: Throwable) {
             writeResult(ctx, id, "error", to = to, error = e.message ?: e.javaClass.simpleName)
             Log.e(TAG, "send failed id=$id", e)
