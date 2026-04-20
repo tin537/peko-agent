@@ -167,9 +167,33 @@ impl Motivation {
             _ => {}
         }
     }
+    /// Weber-Fechner-style update: dampen the effective delta as the
+    /// drive approaches whichever extreme it's moving toward.
+    ///
+    /// Without this, a drive that's been repeatedly reinforced pins at
+    /// the boundary (we saw competence=0.9997 after 20 successful tests
+    /// and never budged from there regardless of later behaviour). The
+    /// linear +0.05 clamps to 1.0 whenever the previous value was ≥ 0.95,
+    /// which makes every subsequent update a no-op — the drive becomes
+    /// a signal flag rather than a gradient.
+    ///
+    /// Scaling: `room = 1-v` when going up, `v` when going down. At the
+    /// midpoint v=0.5, room=0.5, we multiply by 2 so behaviour matches
+    /// the old linear model exactly. Away from midpoint the scaling
+    /// shrinks the delta proportionally, so reinforcement converges to
+    /// the asymptote instead of landing on it.
+    ///
+    /// Verified by the existing `record_clamps_drives` test: competence
+    /// stays within [0, 1] after 100 TaskSucceeded + 100 TaskFailed.
     fn adjust(&mut self, name: &str, delta: f32) {
-        let v = self.get(name) + delta;
-        self.set(name, v);
+        if delta == 0.0 { return; }
+        let v = self.get(name);
+        let room = if delta > 0.0 { 1.0 - v } else { v };
+        // 2.0 factor so v=0.5 midpoint preserves the previous linear
+        // delta magnitude exactly — callers calibrated their deltas
+        // against that baseline, no need to re-tune numbers in record().
+        let effective = delta * 2.0 * room;
+        self.set(name, v + effective);
     }
 }
 

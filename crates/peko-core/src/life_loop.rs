@@ -172,6 +172,13 @@ fn estimate_prompt_tokens(prompt: &str) -> u64 {
 /// prevents burst spend from a single chatty task.
 const OUTPUT_TOKEN_ESTIMATE: u64 = 1_000;
 
+/// Number of consecutive idle ticks before the loop starts firing
+/// StalePatterns to nudge curiosity up. 3 ticks × 5-min default
+/// interval = 15 minutes of real idle time before the nudge kicks in.
+/// Prevents spurious fires right after a restart (when drives might
+/// still be settling) while keeping recovery-from-idle quick.
+const STALE_TICK_THRESHOLD: u32 = 3;
+
 /// The life loop runtime. Construct one, call `.spawn()`, and it drives itself.
 pub struct LifeLoop {
     config:       AutonomyConfig,
@@ -261,6 +268,16 @@ impl LifeLoop {
         tokio::spawn(async move {
             let cfg = cfg_task;
             let mut interval = tokio::time::interval(Duration::from_secs(tick_secs));
+
+            // Consecutive ticks where suggest_action() returned None.
+            // After STALE_TICK_THRESHOLD idle ticks, the loop starts
+            // firing DriveEvent::StalePatterns every subsequent idle
+            // tick — a small +0.02 nudge to curiosity. Without this
+            // bootstrap the loop is a closed circuit: nothing can move
+            // curiosity out of baseline → no proposals → no user
+            // engagement → nothing ever moves the other drives either.
+            let mut stale_ticks: u32 = 0;
+
             loop {
                 interval.tick().await;
                 if pa.load(std::sync::atomic::Ordering::Relaxed) {
@@ -308,9 +325,29 @@ impl LifeLoop {
                     mot.suggest_action()
                 };
                 let Some(action) = action else {
-                    debug!("no action this tick (drives at baseline)");
+                    stale_ticks = stale_ticks.saturating_add(1);
+                    // Fire StalePatterns once we've been idle for long
+                    // enough that we're confident no drive will organically
+                    // cross its threshold. Every subsequent idle tick also
+                    // fires it — curiosity climbs asymptotically toward
+                    // 1.0 (Weber-damped), crossing the 0.70 Explore bar
+                    // after ~12 fires, so ~60 minutes of real idle time
+                    // at the default 5-min interval before the loop
+                    // starts generating proposals.
+                    if stale_ticks >= STALE_TICK_THRESHOLD {
+                        let mut mot = motivation.lock().await;
+                        mot.record(crate::motivation::DriveEvent::StalePatterns);
+                        let _ = mot.save(&mot_path);
+                        debug!(stale_ticks, curiosity = mot.curiosity,
+                            "life loop: firing StalePatterns to nudge curiosity");
+                    } else {
+                        debug!(stale_ticks, "no action this tick (drives at baseline)");
+                    }
                     continue;
                 };
+                // Any concrete action resets the counter — the loop is
+                // no longer stale.
+                stale_ticks = 0;
 
                 // Build task prompt based on chosen action
                 let (prompt, reasoning) = match action {
