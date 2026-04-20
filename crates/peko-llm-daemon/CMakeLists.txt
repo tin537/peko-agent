@@ -24,6 +24,23 @@ endif()
 
 add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-parameter -Wno-unused-function)
 
+# ── Android pthread shim (CMake 3.31 + NDK r27 workaround) ────────────────
+# bionic libc ships pthread built-in — there's no libpthread.so to link
+# against on Android. CMake's FindThreads module still tries a try_compile
+# with `-lpthread`, which fails, so find_package(Threads) returns
+# Threads_FOUND=FALSE and ggml's find_package(Threads REQUIRED) aborts the
+# configure. Pre-populate the cache entries FindThreads would have filled
+# in so the probe is skipped and callers (ours + ggml's) see threads as
+# available with no link flag required.
+if(ANDROID)
+    set(THREADS_PREFER_PTHREAD_FLAG  ON)
+    set(CMAKE_HAVE_THREADS_LIBRARY    1)
+    set(CMAKE_USE_WIN32_THREADS_INIT  0)
+    set(CMAKE_USE_PTHREADS_INIT       1)
+    set(CMAKE_THREAD_LIBS_INIT       "")
+    set(Threads_FOUND                TRUE)
+endif()
+
 # ── Fetch llama.cpp (pinned tag) ───────────────────────────────────────────
 # Using CMake FetchContent keeps the project a single clone — no submodule dance.
 include(FetchContent)
