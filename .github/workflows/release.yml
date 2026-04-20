@@ -134,11 +134,37 @@ jobs:
             echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TC/aarch64-linux-android${ANDROID_API}-clang"
           } >> "$GITHUB_ENV"
 
+      # The NDK ships the C Vulkan header (vulkan.h) + libvulkan.so but NOT
+      # the C++ wrapper (vulkan.hpp) that ggml-vulkan depends on. vulkan.hpp
+      # is header-only + architecture-agnostic, so the host's libvulkan-dev
+      # + vulkan-headers packages satisfy the include dep for the Android
+      # cross-compile. glslang-tools isn't strictly required (NDK bundles
+      # glslc under shader-tools), but installing it keeps the fallback
+      # path in build-android.sh working when the shader-tools glslc is
+      # missing from a given NDK drop.
+      - name: Install Vulkan C++ headers + shader tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev \
+            vulkan-headers \
+            glslang-tools \
+            spirv-tools
+          # Confirm vulkan.hpp is where we think it is so a future Ubuntu
+          # image bump can't silently relocate it and re-break the build.
+          test -f /usr/include/vulkan/vulkan.hpp || { echo 'vulkan.hpp missing' >&2; exit 1; }
+
       - name: Build peko-llm-daemon (aarch64, Vulkan)
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
           ANDROID_ABI: arm64-v8a
           VULKAN: "ON"
+          # NDK cross-compile sysroot has no vulkan.hpp; add the host's
+          # include dir. clang consults CPATH after the sysroot, so this
+          # doesn't risk pulling in host-only symbols — we only get the
+          # header-only C++ wrapper; the linker still resolves against
+          # the NDK's libvulkan.so.
+          CPATH: /usr/include
         run: |
           cd crates/peko-llm-daemon
           ./build-android.sh
