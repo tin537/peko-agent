@@ -179,6 +179,20 @@ const OUTPUT_TOKEN_ESTIMATE: u64 = 1_000;
 /// still be settling) while keeping recovery-from-idle quick.
 const STALE_TICK_THRESHOLD: u32 = 3;
 
+/// How long a past proposal blocks Curiosity from re-proposing the
+/// same exploration, in hours. Tuning notes:
+///   - Too short (e.g. 1h): agent keeps suggesting the user try
+///     ui_inspect three times in a row after each execution — the
+///     bug we had before this window existed.
+///   - Too long (e.g. 168h = 7 days): Curiosity runs out of "unseen"
+///     tools on phones with a short tool list, stalls exploration.
+///   - 24h balances: executed suggestions cool off for a day, then
+///     become fair game again so the agent keeps learning.
+///
+/// Stored as i64 hours rather than a chrono::Duration because
+/// Duration's constructors aren't const-fn in chrono 0.4.
+const RECENT_WINDOW_HOURS: i64 = 24;
+
 /// The life loop runtime. Construct one, call `.spawn()`, and it drives itself.
 pub struct LifeLoop {
     config:       AutonomyConfig,
@@ -352,18 +366,38 @@ impl LifeLoop {
                 // Build task prompt based on chosen action
                 let (prompt, reasoning) = match action {
                     LifeAction::Explore => {
-                        // Collect prompts from still-live proposals so Curiosity
-                        // doesn't re-propose the same exploration on every tick.
-                        // "Live" = pending or approved-but-unexecuted; once a
-                        // proposal is rejected/executed/expired the suggestion
-                        // becomes fair game again.
+                        // Collect prompts to exclude from Curiosity's next pick.
+                        //
+                        // Originally this filtered only Pending | Approved —
+                        // "still-live" suggestions. But as soon as the user
+                        // approved + executed a proposal it dropped out of
+                        // the filter and Curiosity re-picked it on the next
+                        // Explore tick. Symptom: three consecutive identical
+                        // "try the ui_inspect tool" proposals in a row.
+                        //
+                        // Widen the window: also exclude proposals that are
+                        // Executed or Rejected within the last RECENT_WINDOW.
+                        // This gives the agent meaningful rotation — once a
+                        // tool has been tried, it waits a day before
+                        // suggesting it again, by which time the user's
+                        // memory of trying it is presumably faded enough
+                        // that a fresh prompt is useful again.
+                        //
+                        // Expired proposals stay fair game right away —
+                        // they represent suggestions the user ignored, not
+                        // suggestions they acted on.
                         let recent_prompts: Vec<String> = {
                             let proposals = pr.lock().await;
+                            let cutoff = chrono::Utc::now()
+                                - chrono::Duration::hours(RECENT_WINDOW_HOURS);
                             proposals.iter()
-                                .filter(|p| matches!(
-                                    p.status,
-                                    ProposalStatus::Pending | ProposalStatus::Approved,
-                                ))
+                                .filter(|p| match p.status {
+                                    ProposalStatus::Pending
+                                    | ProposalStatus::Approved => true,
+                                    ProposalStatus::Executed
+                                    | ProposalStatus::Rejected => p.created_at >= cutoff,
+                                    ProposalStatus::Expired => false,
+                                })
                                 .map(|p| p.task_prompt.clone())
                                 .collect()
                         };
