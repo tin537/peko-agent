@@ -7,6 +7,30 @@ import android.telephony.TelephonyManager
 import android.util.Log
 
 /**
+ * Companion receiver for outgoing-call number capture. Registered
+ * separately so the OFFHOOK handler in [CallStateReceiver] can pull
+ * the dialed number out of a side channel rather than trying to
+ * mine it from the call log right as the call connects (which is
+ * racy — the log row is written after).
+ *
+ * The Intent extra lives under [Intent.EXTRA_PHONE_NUMBER] and is
+ * delivered strictly *before* the call is placed. We stash it on
+ * the same companion as the incoming number, and the OFFHOOK
+ * handler reads it when deciding what direction + number the
+ * recording belongs to.
+ */
+class OutgoingCallReceiver : BroadcastReceiver() {
+    override fun onReceive(ctx: Context, intent: Intent) {
+        if (intent.action != Intent.ACTION_NEW_OUTGOING_CALL) return
+        val num = intent.getStringExtra(Intent.EXTRA_PHONE_NUMBER)
+        if (!num.isNullOrBlank()) {
+            CallStateReceiver.latchOutgoing(num)
+            Log.i("PekoCallRcv", "NEW_OUTGOING_CALL to=${num.takeLast(4).padStart(num.length, '*')}")
+        }
+    }
+}
+
+/**
  * Listens for android.intent.action.PHONE_STATE and dispatches the
  * foreground CallRecorderService on call transitions.
  *
@@ -62,11 +86,11 @@ class CallStateReceiver : BroadcastReceiver() {
             }
             TelephonyManager.EXTRA_STATE_OFFHOOK -> {
                 // If we didn't see a RINGING first, this is an
-                // outgoing call. Number for outgoing isn't in the
-                // extras — we'd need NEW_OUTGOING_CALL, but for
-                // agent-initiated dials peko already knows the
-                // target, so "" is fine and the audit log will show
-                // it.
+                // outgoing call. The NEW_OUTGOING_CALL broadcast
+                // fires before PHONE_STATE=OFFHOOK and latches the
+                // number via OutgoingCallReceiver → latchOutgoing(),
+                // so by the time we're here latchedNumber may be
+                // populated with the dialed target.
                 if (latchedDirection == null) {
                     latchedDirection = "outgoing"
                 }
@@ -114,6 +138,17 @@ class CallStateReceiver : BroadcastReceiver() {
         private fun redact(n: String?): String {
             if (n.isNullOrBlank()) return "-"
             return if (n.length <= 4) "***" else "***" + n.takeLast(4)
+        }
+
+        /**
+         * Called from [OutgoingCallReceiver] on
+         * ACTION_NEW_OUTGOING_CALL. Runs before the PHONE_STATE =
+         * OFFHOOK transition on this thread, so by the time our
+         * OFFHOOK branch executes it has the target number in hand.
+         */
+        fun latchOutgoing(number: String) {
+            latchedNumber = number
+            latchedDirection = "outgoing"
         }
     }
 }

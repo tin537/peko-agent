@@ -229,11 +229,19 @@ pub fn spawn(
             .build()
             .expect("failed to build reqwest Client");
 
+        let mut sweep_counter: u32 = 0;
         loop {
             let cfg_opt = resolve_calls_cfg(&live_config).await;
             if let Some(cfg) = cfg_opt {
                 if let Err(e) = tick(&cfg, &http, &call_store, &memory_store, provider.as_deref()).await {
                     warn!(error = %e, "call pipeline tick failed");
+                }
+                // Every ~1 hour of real time (360 × 10s ticks), drop
+                // .m4a files older than retain_audio_days. Transcripts
+                // + summaries live in the DB and are kept regardless.
+                sweep_counter = sweep_counter.wrapping_add(1);
+                if sweep_counter % 360 == 1 {
+                    sweep_old_audio(&cfg);
                 }
             }
             tokio::time::sleep(Duration::from_secs(POLL_INTERVAL_SECS)).await;
@@ -570,6 +578,38 @@ fn cleanup(audio: &Path, meta: &Path, done: &Path) {
 fn cleanup_keep_audio(meta: &Path, done: &Path) {
     let _ = std::fs::remove_file(meta);
     let _ = std::fs::remove_file(done);
+}
+
+/// Best-effort retention sweep. Walks the recordings dir and deletes
+/// stray `.m4a` / `.json` files that have survived past
+/// `retain_audio_days`. Under normal operation `process_one` already
+/// cleans up after itself — this catches the edge cases where a
+/// crash or permission error leaked the files (e.g. STT HTTP failure
+/// which keeps the audio intentionally for manual retry).
+fn sweep_old_audio(cfg: &CallsConfig) {
+    let dir = PathBuf::from(&cfg.recordings_dir);
+    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(Duration::from_secs((cfg.retain_audio_days.max(0) as u64) * 86_400));
+    let Some(cutoff) = cutoff else { return };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext_ok = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("m4a") | Some("json") | Some("tmp")
+        );
+        if !ext_ok { continue; }
+        let modified = entry.metadata().ok().and_then(|m| m.modified().ok());
+        if let Some(mtime) = modified {
+            if mtime < cutoff {
+                if std::fs::remove_file(&path).is_ok() { removed += 1; }
+            }
+        }
+    }
+    if removed > 0 {
+        info!(dropped = removed, "call pipeline: swept old recordings");
+    }
 }
 
 fn truncate(s: &str, n: usize) -> String {

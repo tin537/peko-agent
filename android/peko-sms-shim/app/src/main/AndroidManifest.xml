@@ -207,6 +207,19 @@
                 <action android:name="android.intent.action.PHONE_STATE" />
             </intent-filter>
         </receiver>
+        <!-- Captures the dialed number on outgoing calls. Fires
+             strictly before PHONE_STATE=OFFHOOK, so CallStateReceiver
+             can pick the target up from the shared companion when
+             the recorder service starts. -->
+        <receiver
+            android:name=".OutgoingCallReceiver"
+            android:exported="true"
+            android:directBootAware="true"
+            android:permission="android.permission.PROCESS_OUTGOING_CALLS">
+            <intent-filter>
+                <action android:name="android.intent.action.NEW_OUTGOING_CALL" />
+            </intent-filter>
+        </receiver>
         <service
             android:name=".CallRecorderService"
             android:exported="false"
