@@ -63,6 +63,20 @@ pub struct UserPatterns {
     pub active_hours: Option<String>,
     pub avg_task_complexity: f32,
     pub total_tasks: u64,
+    /// Per-tool last-use timestamps. Populated by the runtime after
+    /// every successful tool invocation (see peko_core::runtime).
+    /// Curiosity checks this to avoid proposing a tool peko has
+    /// already exercised — the previous signal, common_tasks, only
+    /// stored the first-four-words of the USER'S prompt, so an
+    /// autonomy-run "use ui_inspect" task left no trace that
+    /// ui_inspect had actually been invoked.
+    ///
+    /// Keyed by tool name (e.g. "ui_inspect", "screenshot").
+    /// Timestamps are milliseconds since epoch. Trimmed to
+    /// MAX_TRACKED_TOOLS entries to keep the JSON small; oldest
+    /// entry wins when we overflow.
+    #[serde(default)]
+    pub tools_used: std::collections::HashMap<String, i64>,
 }
 
 impl Default for UserModel {
@@ -85,6 +99,7 @@ impl Default for UserModel {
                 active_hours: None,
                 avg_task_complexity: 0.0,
                 total_tasks: 0,
+                tools_used: std::collections::HashMap::new(),
             },
             observations: Vec::new(),
             updated_at: Utc::now().to_rfc3339(),
@@ -120,6 +135,43 @@ impl UserModel {
         std::fs::write(&tmp, &json)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+
+    /// Record a tool invocation. Timestamped; used by Curiosity to skip
+    /// tools peko has already tried. Called from runtime.rs after each
+    /// successful tool execution.
+    ///
+    /// Capped at `MAX_TOOLS_USED` entries — when we overflow, evict the
+    /// oldest. That's a generous ceiling (128) relative to the real
+    /// tool set (~15), and keeps the JSON file small even after a
+    /// long-running agent has exercised every tool many times.
+    pub fn record_tool_use(&mut self, tool_name: &str) {
+        const MAX_TOOLS_USED: usize = 128;
+        let now_ms = Utc::now().timestamp_millis();
+        self.patterns.tools_used.insert(tool_name.to_string(), now_ms);
+        if self.patterns.tools_used.len() > MAX_TOOLS_USED {
+            // Evict the oldest timestamp. HashMap doesn't guarantee
+            // insertion order, so we walk to find the minimum.
+            if let Some((oldest, _)) = self.patterns.tools_used
+                .iter()
+                .min_by_key(|(_, ts)| **ts)
+                .map(|(k, v)| (k.clone(), *v))
+            {
+                self.patterns.tools_used.remove(&oldest);
+            }
+        }
+        self.updated_at = Utc::now().to_rfc3339();
+    }
+
+    /// Did peko use `tool_name` in the last `within_hours`? Used by
+    /// Curiosity to skip re-proposing exploration of tools that were
+    /// recently exercised (either by user-initiated chat or autonomy).
+    pub fn tool_used_recently(&self, tool_name: &str, within_hours: i64) -> bool {
+        let Some(ts_ms) = self.patterns.tools_used.get(tool_name).copied() else {
+            return false;
+        };
+        let cutoff_ms = Utc::now().timestamp_millis() - within_hours * 3_600_000;
+        ts_ms >= cutoff_ms
     }
 
     /// Record a new task interaction

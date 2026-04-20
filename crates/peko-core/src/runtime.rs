@@ -390,6 +390,23 @@ impl AgentRuntime {
                     }
                 };
 
+                // Log this invocation to the user model so Curiosity
+                // stops re-proposing tools peko has actually exercised.
+                // We record on BOTH success and error outcomes — a
+                // failed execution still counts as "tried" from a
+                // novelty perspective, and the re-try loop is handled
+                // by the agent's reflection, not by Curiosity.
+                if !result.is_error {
+                    if let Some(ref user_model) = self.user_model {
+                        if let Ok(mut model) = user_model.try_lock() {
+                            model.record_tool_use(&tc.name);
+                            if let Some(ref path) = self.user_model_path {
+                                let _ = model.save(path);
+                            }
+                        }
+                    }
+                }
+
                 let tool_msg = if let Some(img) = result.image {
                     Message::tool_result_with_image(
                         tc.id.clone(),
@@ -692,6 +709,20 @@ impl AgentRuntime {
                     Ok(r) => r,
                     Err(e) => ToolResult::error(format!("Error: {}", e)),
                 };
+
+                // Track tool usage — mirrors the other execute path so
+                // autonomy-driven runs (which come through run_turn)
+                // populate tools_used too. See the other hook above.
+                if !result.is_error {
+                    if let Some(ref user_model) = self.user_model {
+                        if let Ok(mut model) = user_model.try_lock() {
+                            model.record_tool_use(&tc.name);
+                            if let Some(ref path) = self.user_model_path {
+                                let _ = model.save(path);
+                            }
+                        }
+                    }
+                }
 
                 // Save image to a temp file and send URL instead of inline base64
                 let img_for_ui = result.image.as_ref().and_then(|img| {

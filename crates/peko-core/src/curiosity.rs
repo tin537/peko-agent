@@ -9,6 +9,12 @@ use std::collections::HashSet;
 use crate::tool::ToolRegistry;
 use crate::user_model::UserModel;
 
+/// Don't propose exploring a tool that's been used within this many
+/// hours. Mirrors RECENT_WINDOW_HOURS in life_loop.rs — both windows
+/// represent "the agent recently exercised this capability, leave
+/// it alone for a day."
+const TOOL_USE_WINDOW_HOURS: i64 = 24;
+
 pub struct Curiosity;
 
 impl Curiosity {
@@ -40,12 +46,23 @@ impl Curiosity {
     pub fn candidates(user: &UserModel, tools: &ToolRegistry) -> Vec<String> {
         let mut out = Vec::new();
 
-        // 1. Registered tools that have never been used
+        // 1. Registered tools peko hasn't used within TOOL_USE_WINDOW_HOURS.
+        //
+        // The previous check was `common_tasks.contains(tool_name)` as a
+        // substring search — intended to mean "the user has asked about
+        // this tool" but in practice common_tasks only stores the first
+        // four words of user chat prompts, so autonomy-executed tool
+        // invocations never left a trace and Curiosity kept re-proposing
+        // the same four tools across agent restarts.
+        //
+        // `tool_used_recently` queries the dedicated tool-invocation
+        // history in UserPatterns.tools_used, which runtime.rs updates
+        // on every successful tool run regardless of who initiated the
+        // task. Persists across restarts via user_model.json.
         let registered: HashSet<String> = tools.available_tools()
             .into_iter()
             .map(String::from)
             .collect();
-        let used: HashSet<String> = user.patterns.common_tasks.iter().cloned().collect();
 
         // Prefer safe, read-only tools — never propose exploring dangerous ones.
         let safe_explore: &[&str] = &[
@@ -53,7 +70,7 @@ impl Curiosity {
         ];
         for tool_name in safe_explore {
             if registered.contains(*tool_name)
-                && !used.iter().any(|t| t.contains(tool_name))
+                && !user.tool_used_recently(tool_name, TOOL_USE_WINDOW_HOURS)
             {
                 out.push(format!(
                     "I've noticed I haven't used the `{}` tool yet. \
