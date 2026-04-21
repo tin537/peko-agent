@@ -78,6 +78,15 @@ fi
 AGENT_BIN="$REPO_ROOT/target/aarch64-linux-android/release/peko-agent"
 DAEMON_BIN="$REPO_ROOT/crates/peko-llm-daemon/build-android-arm64-v8a/peko-llm-daemon"
 
+# `system/bin` isn't tracked in git because it would otherwise ship an
+# empty dir. On a fresh clone (CI, new contributor) the dir doesn't
+# exist yet and `install` bails with "No such file or directory"; make
+# sure the staging tree is fully present before we copy into it.
+mkdir -p "$MODULE_DIR/system/bin" \
+         "$MODULE_DIR/system/priv-app/PekoOverlay" \
+         "$MODULE_DIR/system/priv-app/PekoSmsShim" \
+         "$MODULE_DIR/system/etc/peko"
+
 [ -f "$AGENT_BIN" ] || { echo "[x] peko-agent not built at $AGENT_BIN"; exit 1; }
 install -m 0755 "$AGENT_BIN" "$MODULE_DIR/system/bin/peko-agent"
 
