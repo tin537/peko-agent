@@ -15,7 +15,8 @@ use peko_llm::{EmbeddedProvider, LlmEngineConfig};
 use peko_hal::{InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
     CallTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool, ScreenshotTool,
-    DelegateTool, ShellTool, SkillsTool, SmsTool, TextInputTool, TouchTool, UiAutomationTool,
+    DelegateTool, SensorsTool, ShellTool, SkillsTool, SmsTool, TextInputTool, TouchTool,
+    UiAutomationTool,
 };
 
 fn register_tools(config: &PekoConfig) -> ToolRegistry {
@@ -170,6 +171,11 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
 
     // Package manager — direct pm/am/installd
     registry.register(PackageManagerTool::new());
+
+    // Sensors — direct IIO + power_supply + input subsystem reads.
+    // No config flag yet; sensors are read-only and harmless. Add a
+    // [tools] sensors = false override later if a user wants to disable.
+    registry.register(SensorsTool::new());
 
     registry
 }

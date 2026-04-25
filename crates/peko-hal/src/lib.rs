@@ -6,6 +6,9 @@ pub mod accessibility;
 pub mod package_manager;
 pub mod display;
 pub mod display_info;
+pub mod sensors;
+pub mod battery;
+pub mod light_prox;
 
 /// Portable ioctl request type — `c_ulong` on macOS, `c_int` on Linux/Android.
 #[cfg(target_os = "macos")]
@@ -37,6 +40,10 @@ pub use display::{
 };
 pub use display_info::{probe as probe_drm, probe_default as probe_drm_default, DrmConnector,
     DrmInfo, DrmInfoError, DrmMode};
+pub use sensors::{IioSensor, ScalarSample, SensorError, SensorKind, Vec3};
+pub use battery::{read as read_battery, BatteryError, BatteryHealth, BatteryState, ChargeStatus};
+pub use light_prox::{read as read_light_prox, LightProxError,
+    Reading as LightProxReading, SensorKind as LightProxKind};
 
 #[derive(Debug, Clone)]
 pub struct RgbaBuffer {

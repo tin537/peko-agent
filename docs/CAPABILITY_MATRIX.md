@@ -43,8 +43,9 @@ Status legend:
 | Capability | Lane B | Lane A | Phase | Notes |
 |------------|:------:|:------:|:-----:|-------|
 | Modem AT (`/dev/tty*`) | 🟡 | 🟡 | shipped | Blocked by RILD on stock devices |
-| Sensors (accel/gyro/mag/light/prox) | ⏳ | ⏳ | 2 | sysfs `iio:device*` + input subsystem |
-| Battery | ⏳ | ⏳ | 2 | `/sys/class/power_supply/battery/*` |
+| Sensors (accel/gyro/mag/pressure/temp) | ✅ | ✅ | 2 | sysfs `/sys/bus/iio/devices/iio:device*/` |
+| Light + proximity | ✅ | ✅ | 2 | `/sys/class/sensors/*` then input event poll |
+| Battery (capacity/status/health/V/I/T) | ✅ | ✅ | 2 | `/sys/class/power_supply/battery/*` |
 | Wi-Fi control | ⏳ | ⏳ | 3 | `wpa_supplicant` ctrl socket |
 | Audio capture/playback | ⏳ | ⏳ | 4 | tinyalsa over `/dev/snd/pcmC*` |
 | Self-rendered overlay UI | ⏳ | ⏳ | 5 | Text+rect renderer to fbdev/DRM |

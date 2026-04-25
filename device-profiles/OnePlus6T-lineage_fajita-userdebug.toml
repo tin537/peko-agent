@@ -1,0 +1,20 @@
+# Auto-refreshed by tests/device-test/phase1.sh on 2026-04-25T05:04:49Z
+# Device: OnePlus6T  ROM: lineage_fajita-userdebug  Android: 13
+
+device = "OnePlus6T"
+rom = "lineage_fajita-userdebug"
+
+[display]
+width = 1080
+height = 2340
+rotation_deg = 0
+prefer = "auto"
+
+[touch]
+abs_x_max = 1079
+abs_y_max = 2339
+touch_major_default = 16
+device_path = "/dev/input/event2"
+
+[wifi]
+ctrl_socket_path = "/data/vendor/wifi/wpa/sockets/wlan0"
