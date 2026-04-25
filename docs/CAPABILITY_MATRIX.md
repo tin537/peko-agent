@@ -46,7 +46,7 @@ Status legend:
 | Sensors (accel/gyro/mag/pressure/temp) | ✅ | 🟡 | 2 | IIO sysfs first, dumpsys sensorservice fallback. Lane A only sees IIO; Qualcomm SLPI sensors are dark without binder client |
 | Light + proximity | ✅ | 🟡 | 2 | input subsystem → `/sys/class/sensors/*` → dumpsys. Same Lane A caveat |
 | Battery (capacity/status/health/V/I/T) | ✅ | ✅ | 2 | `/sys/class/power_supply/battery/*` — fully kernel-direct |
-| Wi-Fi control | ⏳ | ⏳ | 3 | `wpa_supplicant` ctrl socket |
+| Wi-Fi control (status/scan/saved/connect/disconnect/enable/disable) | ✅ | ✅ | 3 | `cmd wifi` (Lane B) → wpa_supplicant ctrl socket (Lane A). Both backends, `WifiBackend` trait |
 | Audio capture/playback | ⏳ | ⏳ | 4 | tinyalsa over `/dev/snd/pcmC*` |
 | Self-rendered overlay UI | ⏳ | ⏳ | 5 | Text+rect renderer to fbdev/DRM |
 | Camera | ❌ | ❌ | — | Camera HAL is binder/vendor-blob only |

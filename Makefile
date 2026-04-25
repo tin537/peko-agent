@@ -42,6 +42,7 @@ device-test: adb-check
 	@case "$(PHASE)" in \
 	  1) $(MAKE) device-test-phase1 ;; \
 	  2) $(MAKE) device-test-phase2 ;; \
+	  3) $(MAKE) device-test-phase3 ;; \
 	  *) echo "no device-test for PHASE=$(PHASE) yet"; exit 1 ;; \
 	esac
 
@@ -50,3 +51,6 @@ device-test-phase1:
 
 device-test-phase2:
 	@bash tests/device-test/phase2.sh
+
+device-test-phase3:
+	@bash tests/device-test/phase3.sh

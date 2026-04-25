@@ -16,7 +16,7 @@ use peko_hal::{InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
     CallTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool, ScreenshotTool,
     DelegateTool, SensorsTool, ShellTool, SkillsTool, SmsTool, TextInputTool, TouchTool,
-    UiAutomationTool,
+    UiAutomationTool, WifiTool,
 };
 
 fn register_tools(config: &PekoConfig) -> ToolRegistry {
@@ -176,6 +176,12 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
     // No config flag yet; sensors are read-only and harmless. Add a
     // [tools] sensors = false override later if a user wants to disable.
     registry.register(SensorsTool::new());
+
+    // Wi-Fi — cmd wifi (Lane B) → wpa_supplicant ctrl socket (Lane A).
+    // Read paths (status/scan/list_networks) are harmless. Write paths
+    // (connect/disconnect/enable/disable) gate at the agent level via
+    // user approval rather than a config flag.
+    registry.register(WifiTool::new());
 
     registry
 }
