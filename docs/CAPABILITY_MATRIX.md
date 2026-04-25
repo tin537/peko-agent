@@ -25,7 +25,9 @@ Status legend:
 | `fbdev` mmap (`/dev/graphics/fb0`) | 🟡 | ✅ | unit + phase1.sh | Stale on sdm845 in Lane B; primary in Lane A |
 | `DRM` enumeration (no master) | ✅ | ✅ | unit + phase1.sh | Diagnostics only |
 | `DRM` pixel readback | ❌ | ⏳ | 8+ | Requires DRM master → Lane A only |
-| Framebuffer blit (write canvas → fb0) | 🟡 | ✅ | 7 | `peko_renderer::blit_to_framebuffer`; Lane B fb0 is stale, blit succeeds but isn't visible |
+| Framebuffer blit (write canvas → fb0) | 🟡 | 🟡 | 7 | Code shipped + tested. **sdm845 finding:** fb0 is a phantom AOD plane; blit succeeds but pixels never reach the panel — Lane A on sdm845 must use DRM. See `docs/architecture/lane-a-sdm845-finding.md` |
+| Framebuffer blit on devices where fb0 IS scanout | ✅ | ✅ | 7 | Pre-Treble vendor kernels + emulators; verified by unit tests, awaits hardware visual confirmation |
+| DRM master + dumb buffer write (Lane A on sdm845) | ❌ | ⏳ | 9 | Required to paint pixels in Lane A on Qualcomm SoCs |
 | Display rotation detection | ✅ | ✅ | unit + phase1.sh | sysfs `rotate` + device profile override |
 | `auto_capture()` backend pick | ✅ | ✅ | unit | screencap → fbdev fallback |
 
