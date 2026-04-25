@@ -1,24 +1,30 @@
 # Peko Agent
 
-**An autonomous AI agent that runs as the Android OS itself.**
+**A kernel-direct autonomous AI agent for Android.**
 
-Single Rust binary. PID-1 child. Direct kernel access. No framework. No Zygote. No ART.
-4MB binary, 6MB RSS, boots from `init.rc`.
+Single Rust binary. Talks to the hardware through Linux device files, not Java framework APIs.
+~7 MB ARM64 binary. Runs as a Magisk module on stock/LineageOS, or as an init service in a frameworkless Lane A boot mode.
 
-An Agent-as-OS architecture — a native Android system process with a closed learning loop, direct kernel hardware access, and autonomous task execution.
+An Agent-as-OS architecture — a native Android system process with a closed learning loop, kernel-level hardware access, and autonomous task execution.
+
+> **Honest status:** Lane B (hybrid with Android framework alive) is shipped and verified on real hardware. Lane A (frameworkless, PID-1) is implemented as a research scaffold — see [docs/AGENT_AS_OS_STATUS.md](docs/AGENT_AS_OS_STATUS.md) and [docs/CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) for the per-capability matrix that's the source of truth. If those disagree with this README, those win.
 
 ---
 
 ## What It Does
 
-Peko Agent replaces the Android application stack with a single AI agent that controls the device directly through Linux kernel interfaces:
+Peko Agent replaces the Android application stack with a single AI agent that controls the device directly through kernel interfaces wherever possible, and falls back to a documented framework path only where the kernel layer is genuinely empty (e.g., Qualcomm SLPI sensor DSP):
 
 ```
 Traditional Android:  App -> Framework -> Binder -> Kernel -> Hardware
-Peko Agent:        Agent -> Kernel -> Hardware
+Peko Agent (Lane B):  Agent ──────────────────────> Kernel -> Hardware
+                            └─ falls back to ─> Framework -> Hardware
+                               (only where kernel path is closed)
+Peko Agent (Lane A):  Agent ──────────────────────> Kernel -> Hardware
+                                                           (no Framework at all)
 ```
 
-The agent sees the screen (framebuffer/screencap), touches it (evdev injection), sends SMS + places calls through a bundled priv-app shim, **records + transcribes + summarises phone calls** into memory, installs apps (pm/installd), and learns from every interaction.
+The agent sees the screen (DRM/fbdev/screencap), touches it (evdev injection with EVIOCGABS-calibrated scaling), reads battery + sensors directly from sysfs, controls Wi-Fi via `cmd wifi` or the `wpa_supplicant` ctrl socket, inspects ALSA topology + mixer controls, sends SMS + places calls through a bundled priv-app shim, **records + transcribes + summarises phone calls** into memory, installs apps (pm/installd), renders its own status overlays via the `peko-renderer` crate (no SurfaceFlinger needed), and learns from every interaction.
 
 ## Architecture
 
@@ -37,7 +43,7 @@ Two cooperating processes on the device, linked by a Unix Domain Socket. The age
 │    │                                                           │
 │    ├─ Learning Loop: Memory (SQLite+FTS5), Skills, SOUL.md    │
 │    │                                                           │
-│    ├─ 13 Tools (screenshot/touch/shell/sms/…)                 │
+│    ├─ 18 Tools (screenshot/touch/shell/sms/sensors/wifi/…)    │
 │    │                                                           │
 │    └─ LLM Transport                                            │
 │        ├─ AnthropicProvider     (cloud, HTTPS)                │
@@ -80,7 +86,7 @@ Two cooperating processes on the device, linked by a Unix Domain Socket. The age
 - **ReAct loop** with streaming LLM calls (SSE)
 - **Dual-Brain router** — routes simple/skill-matched tasks to an on-device model, complex tasks to cloud; local brain can escalate
 - **Multi-provider cloud chain** — `brain = "local:anthropic,openrouter"` tries anthropic first, falls back to openrouter on rate-limit/error. 7 cloud providers supported: anthropic, openrouter, openai, groq, deepseek, mistral, together.
-- **13 tools** for full device control
+- **18 tools** for full device control: screenshot (auto/fb/screencap/drm/info), touch (with EVIOCGABS scaling + BTN_TOOL_FINGER), key_event (shell-first with raw evdev fallback), text_input, sensors (IIO + dumpsys fallback), wifi (cmd-wifi + wpa_supplicant ctrl socket), audio (ALSA + tinymix + media volume), draw (pure-Rust 2D renderer for Lane A overlays), ui_inspect (uiautomator XML parser), unlock_device, sms, call, shell, filesystem, package_manager, memory, skills, delegate
 - **Context compression** for long-running tasks
 - **Iteration budget** with atomic interrupt
 - **Session persistence** (SQLite)
