@@ -6,3 +6,4 @@ edition.workspace = true
 [dependencies]
 peko-hal = { path = "../peko-hal" }
 thiserror.workspace = true
+libc = "0.2"

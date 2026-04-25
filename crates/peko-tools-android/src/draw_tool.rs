@@ -1,8 +1,9 @@
 use peko_core::tool::{Tool, ToolResult};
-use peko_renderer::{Canvas, Rgba};
+use peko_renderer::{blit_to_framebuffer, Canvas, Rgba};
 use serde_json::json;
 use std::future::Future;
 use std::io::Cursor;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 /// Pure-Rust 2D drawing tool. Produces a PNG returned to the LLM (or
@@ -32,7 +33,8 @@ impl Tool for DrawTool {
          {type:'line_h'|'line_v', x,y, length, color}, \
          {type:'text', x,y, text, color, scale?:int}, \
          {type:'text_wrapped', x,y, text, max_width, color, scale?:int}. \
-         Colors accept '#RGB', '#RRGGBB', or '#RRGGBBAA'. Returns a PNG."
+         Colors accept '#RGB', '#RRGGBB', or '#RRGGBBAA'. Returns a PNG. \
+         Set blit=true (Lane A only) to also write the canvas to /dev/graphics/fb0."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -46,6 +48,14 @@ impl Tool for DrawTool {
                     "type": "array",
                     "items": { "type": "object" },
                     "description": "Ordered list of drawing operations"
+                },
+                "blit": {
+                    "type": "boolean",
+                    "description": "If true, also write the canvas to /dev/graphics/fb0 (Lane A only)."
+                },
+                "blit_path": {
+                    "type": "string",
+                    "description": "Override blit target path. Default: /dev/graphics/fb0."
                 }
             },
             "required": ["width", "height", "ops"]
@@ -88,6 +98,32 @@ fn render(args: serde_json::Value) -> anyhow::Result<ToolResult> {
     }
 
     let buf = canvas.into_buffer();
+
+    // Optional Lane A side-effect: also blit the canvas to a framebuffer.
+    let mut blit_status: Option<String> = None;
+    if args["blit"].as_bool().unwrap_or(false) {
+        let target = args["blit_path"]
+            .as_str()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/dev/graphics/fb0"));
+        match blit_to_framebuffer(&buf, &target, /* verify_dimensions */ false) {
+            Ok(written) => {
+                blit_status = Some(format!(
+                    "blitted {} bytes to {}",
+                    written,
+                    target.display()
+                ))
+            }
+            Err(e) => {
+                blit_status = Some(format!(
+                    "blit to {} failed: {} (Lane B fb0 is often a stale AOD buffer)",
+                    target.display(),
+                    e
+                ))
+            }
+        }
+    }
+
     let img = image::RgbaImage::from_raw(buf.width, buf.height, buf.data)
         .ok_or_else(|| anyhow::anyhow!("renderer produced mis-sized buffer"))?;
     let mut png = Vec::new();
@@ -98,11 +134,14 @@ fn render(args: serde_json::Value) -> anyhow::Result<ToolResult> {
         &png,
     );
     let kb = png.len() / 1024;
-    Ok(ToolResult::with_image(
-        format!("Rendered {width}x{height} canvas, {kb} KB PNG, {} ops", ops.len()),
-        b64,
-        "image/png".to_string(),
-    ))
+    let mut summary = format!(
+        "Rendered {width}x{height} canvas, {kb} KB PNG, {} ops",
+        ops.len()
+    );
+    if let Some(s) = blit_status {
+        summary.push_str(&format!("\n{s}"));
+    }
+    Ok(ToolResult::with_image(summary, b64, "image/png".to_string()))
 }
 
 fn apply_op(canvas: &mut Canvas, op: &serde_json::Value) -> anyhow::Result<()> {

@@ -24,7 +24,8 @@ Status legend:
 | `screencap` (SurfaceFlinger) | ✅ | ❌ | unit + phase1.sh | Disappears in Lane A |
 | `fbdev` mmap (`/dev/graphics/fb0`) | 🟡 | ✅ | unit + phase1.sh | Stale on sdm845 in Lane B; primary in Lane A |
 | `DRM` enumeration (no master) | ✅ | ✅ | unit + phase1.sh | Diagnostics only |
-| `DRM` pixel readback | ❌ | ⏳ | — | Requires DRM master → Lane A only (Phase 8) |
+| `DRM` pixel readback | ❌ | ⏳ | 8+ | Requires DRM master → Lane A only |
+| Framebuffer blit (write canvas → fb0) | 🟡 | ✅ | 7 | `peko_renderer::blit_to_framebuffer`; Lane B fb0 is stale, blit succeeds but isn't visible |
 | Display rotation detection | ✅ | ✅ | unit + phase1.sh | sysfs `rotate` + device profile override |
 | `auto_capture()` backend pick | ✅ | ✅ | unit | screencap → fbdev fallback |
 
@@ -101,7 +102,7 @@ Status legend:
 |------|:------:|------|
 | Magisk module | ✅ | CI build + manual flash |
 | LineageOS overlay (OnePlus 6T) | ✅ | manual |
-| Stripped AOSP (Lane A) | 🔧 | Phase 8 |
+| Stripped AOSP (Lane A) | 🟡 | Phase 7 ships boot scaffold (`init.peko.rc` + `--frameworkless` flag + fb blit). Real-device flash + boot still maintainer-managed |
 | Rooted ADB push | ✅ | manual |
 
 ## CI

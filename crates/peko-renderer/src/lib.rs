@@ -16,6 +16,8 @@
 //! display output and is only used in Lane A.
 
 pub mod font;
+pub mod blit;
+pub use blit::{blit_to_framebuffer, read_fb_info, BlitError, BlitFormat, FbInfo};
 
 use peko_hal::RgbaBuffer;
 

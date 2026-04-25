@@ -95,10 +95,20 @@ pub struct WifiHints {
     pub prefer_wpa_supplicant: bool,
 }
 
+/// Returns true when running in Lane A frameworkless mode.
+fn is_frameworkless() -> bool {
+    std::env::var("PEKO_FRAMEWORKLESS")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Pick the best available backend honouring hints. Falls through
-/// `cmd wifi` → wpa_supplicant.
+/// `cmd wifi` → wpa_supplicant. In Lane A (PEKO_FRAMEWORKLESS=1) we
+/// skip cmd wifi entirely because the framework isn't running.
 pub fn auto_backend(hints: &WifiHints) -> Result<Box<dyn WifiBackend>, WifiError> {
-    if !hints.prefer_wpa_supplicant && CmdWifiBackend::is_available() {
+    let lane_a = is_frameworkless();
+    if !lane_a && !hints.prefer_wpa_supplicant && CmdWifiBackend::is_available() {
         return Ok(Box::new(CmdWifiBackend));
     }
 
@@ -122,7 +132,7 @@ pub fn auto_backend(hints: &WifiHints) -> Result<Box<dyn WifiBackend>, WifiError
     if let Some(path) = socket {
         return Ok(Box::new(WpaSupplicantBackend::open(&path)?));
     }
-    if CmdWifiBackend::is_available() {
+    if !lane_a && CmdWifiBackend::is_available() {
         return Ok(Box::new(CmdWifiBackend));
     }
     Err(WifiError::NoBackend)

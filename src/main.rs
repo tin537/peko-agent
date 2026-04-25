@@ -210,6 +210,17 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
 
+    // Lane A boot mode flag. When set, the agent sets PEKO_FRAMEWORKLESS=1
+    // in its own env so individual tools that probe for framework
+    // services skip them up front instead of trying and timing out.
+    // Tools today read this via std::env in their fallback chains
+    // (see screenshot.rs, wifi.rs, sensors_tool.rs).
+    let frameworkless = args.iter().any(|a| a == "--frameworkless");
+    if frameworkless {
+        std::env::set_var("PEKO_FRAMEWORKLESS", "1");
+        info!("Lane A mode: frameworkless boot — framework fallbacks disabled");
+    }
+
     let config = PekoConfig::load(&config_path)
         .context(format!("failed to load config from {}", config_path.display()))?;
 
