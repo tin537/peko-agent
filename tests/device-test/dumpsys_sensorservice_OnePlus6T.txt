@@ -1,0 +1,200 @@
+Captured at: 12:24:49.919
+Sensor Device:
+Total 46 h/w sensors, 46 running 2 disabled clients:
+0x0000000b) active-count = 2; sampling_period(ms) = {200.0, 200.0}, selected = 200.00 ms; batching_period(ms) = {2000.0, 0.0}, selected = 0.00 ms
+0x00000029) active-count = 1; sampling_period(ms) = {200.0}, selected = 200.00 ms; batching_period(ms) = {0.0}, selected = 0.00 ms
+0x00000035) active-count = 3; sampling_period(ms) = {250.0, 200.0, 250.0}, selected = 200.00 ms; batching_period(ms) = {0.0, 0.0, 0.0}, selected = 0.00 ms
+0x00000054) active-count = 1; sampling_period(ms) = {20.0}, selected = 20.00 ms; batching_period(ms) = {0.0}, selected = 0.00 ms
+0x000000ac) active-count = 3; sampling_period(ms) = {1.0(disabled), 1.0(disabled), 1.0}, selected = 1.00 ms; batching_period(ms) = {0.0(disabled), 0.0(disabled), 0.0}, selected = 0.00 ms
+0x00000110) active-count = 1; sampling_period(ms) = {66.7}, selected = 66.67 ms; batching_period(ms) = {0.0}, selected = 0.00 ms
+Sensor List:
+0x0000000b) lsm6ds3c Accelerometer Non-wakeup | STMicro         | ver: 352 | type: android.sensor.accelerometer(1) | perm: n/a | flags: 0x00000980
+	continuous | minRate=1.00Hz | maxRate=415.97Hz | FIFO (max,reserved) = (10000, 3000) events | non-wakeUp | 
+	highest rate level = 3, support shared mem: gralloc, 
+0x0000000c) lsm6ds3c Accelerometer Wakeup | STMicro         | ver: 352 | type: android.sensor.accelerometer(1) | perm: n/a | flags: 0x00000981
+	continuous | minRate=1.00Hz | maxRate=415.97Hz | FIFO (max,reserved) = (10000, 3000) events | wakeUp | 
+	highest rate level = 3, support shared mem: gralloc, 
+0x00000015) ak0991x Magnetometer Non-wakeup | akm             | ver: 10063 | type: android.sensor.magnetic_field(2) | perm: n/a | flags: 0x00000880
+	continuous | minRate=1.00Hz | maxRate=100.00Hz | FIFO (max,reserved) = (10000, 600) events | non-wakeUp | 
+	highest rate level = 1, support shared mem: gralloc, 
+0x00000016) ak0991x Magnetometer Wakeup | akm             | ver: 10063 | type: android.sensor.magnetic_field(2) | perm: n/a | flags: 0x00000881
+	continuous | minRate=1.00Hz | maxRate=100.00Hz | FIFO (max,reserved) = (10000, 600) events | wakeUp | 
+	highest rate level = 1, support shared mem: gralloc, 
+0x0000001f) Orientation               | qualcomm        | ver: 1 | type: android.sensor.orientation(3) | perm: n/a | flags: 0x00000000
+	continuous | minRate=5.00Hz | maxRate=200.00Hz | FIFO (max,reserved) = (10000, 0) events | non-wakeUp | 
+0x00000029) lsm6ds3c Gyroscope Non-wakeup | STMicro         | ver: 352 | type: android.sensor.gyroscope(4) | perm: n/a | flags: 0x000009c0
+	continuous | minRate=1.00Hz | maxRate=415.97Hz | FIFO (max,reserved) = (10000, 0) events | non-wakeUp | has-additional-info, 
+	highest rate level = 3, support shared mem: gralloc, 
+0x0000002a) lsm6ds3c Gyroscope Wakeup | STMicro         | ver: 352 | type: android.sensor.gyroscope(4) | perm: n/a | flags: 0x000009c1
+	continuous | minRate=1.00Hz | maxRate=415.97Hz | FIFO (max,reserved) = (10000, 0) events | wakeUp | has-additional-info, 
+	highest rate level = 3, support shared mem: gralloc, 
+0x00000035) TMD3702_Light Ambient Light Sensor Non-wakeup | ams AG          | ver: 256 | type: android.sensor.light(5) | perm: n/a | flags: 0x00000002
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 0) events | non-wakeUp | 
+0x00000036) TMD3702_Light Ambient Light Sensor Wakeup | ams AG          | ver: 256 | type: android.sensor.light(5) | perm: n/a | flags: 0x00000003
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 0) events | wakeUp | 
+0x00000053) TMD3702_Proximity Proximity Sensor Non-wakeup | ams AG          | ver: 256 | type: android.sensor.proximity(8) | perm: n/a | flags: 0x00000002
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 300) events | non-wakeUp | 
+0x00000054) TMD3702_Proximity Proximity Sensor Wakeup | ams AG          | ver: 256 | type: android.sensor.proximity(8) | perm: n/a | flags: 0x00000003
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 300) events | wakeUp | 
+0x0000005b) gravity  Non-wakeup       | qualcomm        | ver: 1 | type: android.sensor.gravity(9) | perm: n/a | flags: 0x00000000
+	continuous | minRate=5.00Hz | maxRate=200.00Hz | FIFO (max,reserved) = (10000, 300) events | non-wakeUp | 
+0x0000005c) gravity  Wakeup           | qualcomm        | ver: 1 | type: android.sensor.gravity(9) | perm: n/a | flags: 0x00000001
+	continuous | minRate=5.00Hz | maxRate=200.00Hz | FIFO (max,reserved) = (10000, 300) events | wakeUp | 
+0x00000065) linear_acceleration       | qualcomm        | ver: 1 | type: android.sensor.linear_acceleration(10) | perm: n/a | flags: 0x00000000
+	continuous | minRate=5.00Hz | maxRate=200.00Hz | FIFO (max,reserved) = (10000, 300) events | non-wakeUp | 
+0x00000066) linear_acceleration_wakeup | qualcomm        | ver: 1 | type: android.sensor.linear_acceleration(10) | perm: n/a | flags: 0x00000001
+	continuous | minRate=5.00Hz | maxRate=200.00Hz | FIFO (max,reserved) = (10000, 300) events | wakeUp | 
+0x0000006f) Rotation Vector  Non-wakeup | qualcomm        | ver: 1 | type: android.sensor.rotation_vector(11) | perm: n/a | flags: 0x00000000
+	continuous | minRate=5.00Hz | maxRate=200.00Hz | FIFO (max,reserved) = (10000, 0) events | non-wakeUp | 
+0x00000070) Rotation Vector  Wakeup   | qualcomm        | ver: 1 | type: android.sensor.rotation_vector(11) | perm: n/a | flags: 0x00000001
+	continuous | minRate=5.00Hz | maxRate=200.00Hz | FIFO (max,reserved) = (10000, 0) events | wakeUp | 
+0x0000008d) ak0991x Magnetometer-Uncalibrated Non-wakeup | akm             | ver: 10063 | type: android.sensor.magnetic_field_uncalibrated(14) | perm: n/a | flags: 0x00000880
+	continuous | minRate=1.00Hz | maxRate=100.00Hz | FIFO (max,reserved) = (10000, 600) events | non-wakeUp | 
+	highest rate level = 1, support shared mem: gralloc, 
+0x0000008e) ak0991x Magnetometer-Uncalibrated Wakeup | akm             | ver: 10063 | type: android.sensor.magnetic_field_uncalibrated(14) | perm: n/a | flags: 0x00000881
+	continuous | minRate=1.00Hz | maxRate=100.00Hz | FIFO (max,reserved) = (10000, 600) events | wakeUp | 
+	highest rate level = 1, support shared mem: gralloc, 
+0x00000097) Game Rotation Vector  Non-wakeup | qualcomm        | ver: 1 | type: android.sensor.game_rotation_vector(15) | perm: n/a | flags: 0x00000000
+	continuous | minRate=5.00Hz | maxRate=200.00Hz | FIFO (max,reserved) = (10000, 300) events | non-wakeUp | 
+0x00000098) Game Rotation Vector  Wakeup | qualcomm        | ver: 1 | type: android.sensor.game_rotation_vector(15) | perm: n/a | flags: 0x00000001
+	continuous | minRate=5.00Hz | maxRate=200.00Hz | FIFO (max,reserved) = (10000, 300) events | wakeUp | 
+0x000000a1) lsm6ds3c Gyroscope-Uncalibrated Non-wakeup | STMicro         | ver: 352 | type: android.sensor.gyroscope_uncalibrated(16) | perm: n/a | flags: 0x000009c0
+	continuous | minRate=1.00Hz | maxRate=415.97Hz | FIFO (max,reserved) = (10000, 0) events | non-wakeUp | has-additional-info, 
+	highest rate level = 3, support shared mem: gralloc, 
+0x000000a2) lsm6ds3c Gyroscope-Uncalibrated Wakeup | STMicro         | ver: 352 | type: android.sensor.gyroscope_uncalibrated(16) | perm: n/a | flags: 0x000009c1
+	continuous | minRate=1.00Hz | maxRate=415.97Hz | FIFO (max,reserved) = (10000, 0) events | wakeUp | has-additional-info, 
+	highest rate level = 3, support shared mem: gralloc, 
+0x000000ac) sns_smd  Wakeup           | qualcomm        | ver: 1 | type: android.sensor.significant_motion(17) | perm: n/a | flags: 0x00000005
+	one-shot | maxDelay=0us | minDelay=-1us | no batching | wakeUp | 
+0x000000b5) pedometer  Non-wakeup     | qualcomm        | ver: 1 | type: android.sensor.step_detector(18) | perm: android.permission.ACTIVITY_RECOGNITION | flags: 0x00000006
+	special-trigger | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 300) events | non-wakeUp | 
+0x000000b6) pedometer  Wakeup         | qualcomm        | ver: 1 | type: android.sensor.step_detector(18) | perm: android.permission.ACTIVITY_RECOGNITION | flags: 0x00000007
+	special-trigger | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 300) events | wakeUp | 
+0x000000bf) pedometer  Non-wakeup     | qualcomm        | ver: 1 | type: android.sensor.step_counter(19) | perm: android.permission.ACTIVITY_RECOGNITION | flags: 0x00000002
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 300) events | non-wakeUp | 
+0x000000c0) pedometer  Wakeup         | qualcomm        | ver: 1 | type: android.sensor.step_counter(19) | perm: android.permission.ACTIVITY_RECOGNITION | flags: 0x00000003
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 300) events | wakeUp | 
+0x000000c9) sns_geomag_rv  Non-wakeup | qualcomm        | ver: 1 | type: android.sensor.geomagnetic_rotation_vector(20) | perm: n/a | flags: 0x00000000
+	continuous | minRate=5.00Hz | maxRate=100.00Hz | FIFO (max,reserved) = (10000, 0) events | non-wakeUp | 
+0x000000ca) sns_geomag_rv  Wakeup     | qualcomm        | ver: 1 | type: android.sensor.geomagnetic_rotation_vector(20) | perm: n/a | flags: 0x00000001
+	continuous | minRate=5.00Hz | maxRate=100.00Hz | FIFO (max,reserved) = (10000, 0) events | wakeUp | 
+0x000000de) sns_tilt  Wakeup          | qualcomm        | ver: 1 | type: android.sensor.tilt_detector(22) | perm: n/a | flags: 0x00000007
+	special-trigger | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 0) events | wakeUp | 
+0x00000110) device_orient  Wakeup     | OnePlus         | ver: 1 | type: android.sensor.device_orientation(27) | perm: n/a | flags: 0x00000003
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 0) events | wakeUp | 
+0x00000123) stationary_detect         | qualcomm        | ver: 1 | type: android.sensor.stationary_detect(29) | perm: n/a | flags: 0x00000004
+	one-shot | maxDelay=0us | minDelay=-1us | no batching | non-wakeUp | 
+0x00000124) stationary_detect_wakeup  | qualcomm        | ver: 1 | type: android.sensor.stationary_detect(29) | perm: n/a | flags: 0x00000005
+	one-shot | maxDelay=0us | minDelay=-1us | no batching | wakeUp | 
+0x0000012d) motion_detect             | qualcomm        | ver: 1 | type: android.sensor.motion_detect(30) | perm: n/a | flags: 0x00000004
+	one-shot | maxDelay=0us | minDelay=-1us | no batching | non-wakeUp | 
+0x0000012e) motion_detect_wakeup      | qualcomm        | ver: 1 | type: android.sensor.motion_detect(30) | perm: n/a | flags: 0x00000005
+	one-shot | maxDelay=0us | minDelay=-1us | no batching | wakeUp | 
+0x0000015f) lsm6ds3c Accelerometer-Uncalibrated Non-wakeup | STMicro         | ver: 352 | type: android.sensor.accelerometer_uncalibrated(35) | perm: n/a | flags: 0x00000980
+	continuous | minRate=1.00Hz | maxRate=415.97Hz | FIFO (max,reserved) = (10000, 3000) events | non-wakeUp | 
+	highest rate level = 3, support shared mem: gralloc, 
+0x00000160) lsm6ds3c Accelerometer-Uncalibrated Wakeup | STMicro         | ver: 352 | type: android.sensor.accelerometer_uncalibrated(35) | perm: n/a | flags: 0x00000981
+	continuous | minRate=1.00Hz | maxRate=415.97Hz | FIFO (max,reserved) = (10000, 3000) events | wakeUp | 
+	highest rate level = 3, support shared mem: gralloc, 
+0x000003f5) TMD3702_RGB RGB Sensor Non-wakeup | ams AG          | ver: 256 | type:       qti.sensor.rgb(33171001) | perm: n/a | flags: 0x00000002
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 0) events | non-wakeUp | 
+0x000003f6) TMD3702_RGB RGB Sensor Wakeup | ams AG          | ver: 256 | type:       qti.sensor.rgb(33171001) | perm: n/a | flags: 0x00000003
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 0) events | wakeUp | 
+0x0000041c) dpc  Wakeup               | qualcomm        | ver: 1 | type:       qti.sensor.dpc(33171005) | perm: n/a | flags: 0x00000003
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 0) events | wakeUp | 
+0x000004e4) pocket  Wakeup            | OnePlus         | ver: 1 | type: oneplus.sensor.pocket(33171025) | perm: n/a | flags: 0x00000003
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 0) events | wakeUp | 
+0x000004ee) pickup  Wakeup            | OnePlus         | ver: 1 | type: oneplus.sensor.pickup(33171026) | perm: n/a | flags: 0x00000003
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 0) events | wakeUp | 
+0x000004f7) SX9324_SAR SAR Sensor Non-wakeup | Semtech         | ver: 4096 | type:       qti.sensor.sar(33171027) | perm: n/a | flags: 0x00000002
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 300) events | non-wakeUp | 
+0x000004f8) SX9324_SAR SAR Sensor Wakeup | Semtech         | ver: 4096 | type:       qti.sensor.sar(33171027) | perm: n/a | flags: 0x00000003
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 300) events | wakeUp | 
+0x00000502) op_motion_detect  Wakeup  | OnePlus         | ver: 1 | type: oneplus.sensor.op_motion_detect(33171028) | perm: n/a | flags: 0x00000003
+	on-change | maxDelay=0us | minDelay=0us | FIFO (max,reserved) = (10000, 0) events | wakeUp | 
+0x5f636779) Corrected Gyroscope Sensor | AOSP            | ver: 1 | type: android.sensor.gyroscope(4) | perm: n/a | flags: 0x00000000
+	continuous | maxDelay=0us | maxRate=415.97Hz | no batching | non-wakeUp | 
+0x5f676172) Game Rotation Vector Sensor | AOSP            | ver: 3 | type: android.sensor.game_rotation_vector(15) | perm: n/a | flags: 0x00000000
+	continuous | maxDelay=0us | maxRate=415.97Hz | no batching | non-wakeUp | 
+0x5f676273) Gyroscope Bias (debug)    | AOSP            | ver: 1 | type: android.sensor.accelerometer(1) | perm: n/a | flags: 0x00000000
+	continuous | maxDelay=0us | maxRate=415.97Hz | no batching | non-wakeUp | 
+0x5f67656f) GeoMag Rotation Vector Sensor | AOSP            | ver: 3 | type: android.sensor.geomagnetic_rotation_vector(20) | perm: n/a | flags: 0x00000000
+	continuous | maxDelay=0us | maxRate=415.97Hz | no batching | non-wakeUp | 
+0x5f677276) Gravity Sensor            | AOSP            | ver: 3 | type: android.sensor.gravity(9) | perm: n/a | flags: 0x00000000
+	continuous | maxDelay=0us | maxRate=415.97Hz | no batching | non-wakeUp | 
+0x5f6c696e) Linear Acceleration Sensor | AOSP            | ver: 3 | type: android.sensor.linear_acceleration(10) | perm: n/a | flags: 0x00000000
+	continuous | maxDelay=0us | maxRate=415.97Hz | no batching | non-wakeUp | 
+0x5f726f76) Rotation Vector Sensor    | AOSP            | ver: 3 | type: android.sensor.rotation_vector(11) | perm: n/a | flags: 0x00000000
+	continuous | maxDelay=0us | maxRate=415.97Hz | no batching | non-wakeUp | 
+0x5f797072) Orientation Sensor        | AOSP            | ver: 1 | type: android.sensor.orientation(3) | perm: n/a | flags: 0x00000000
+	continuous | maxDelay=0us | maxRate=415.97Hz | no batching | non-wakeUp | 
+Fusion States:
+9-axis fusion disabled (0 clients), gyro-rate= 200.00Hz, q=< 0, 0, 0, 0 > (0), b=< 0, 0, 0 >
+game fusion(no mag) disabled (0 clients), gyro-rate= 200.00Hz, q=< 0, 0, 0, 0 > (0), b=< 0, 0, 0 >
+geomag fusion (no gyro) disabled (0 clients), gyro-rate= 200.00Hz, q=< 0, 0, 0, 0 > (0), b=< 0, 0, 0 >
+Recent Sensor events:
+ak0991x Magnetometer-Uncalibrated Non-wakeup: last 10 events
+	 1 (ts=170124.039536091, wall=14:58:32.100) 74.66, 91.88, -160.99, 66.52, 27.53, -175.76, 
+	 2 (ts=170124.059536091, wall=14:58:32.100) 74.49, 91.69, -160.95, 66.52, 27.53, -175.76, 
+	 3 (ts=170124.079536091, wall=14:58:32.100) 74.46, 91.82, -160.84, 66.52, 27.53, -175.76, 
+	 4 (ts=170124.099536091, wall=14:58:32.100) 74.33, 92.01, -160.73, 66.52, 27.53, -175.76, 
+	 5 (ts=170124.119536091, wall=14:58:32.100) 74.46, 92.29, -161.04, 66.52, 27.53, -175.76, 
+	 6 (ts=170124.139536091, wall=14:58:32.127) 74.36, 92.23, -161.16, 66.52, 27.53, -175.76, 
+	 7 (ts=170124.159536091, wall=14:58:32.132) 73.99, 92.42, -161.21, 66.52, 27.53, -175.76, 
+	 8 (ts=170124.179536091, wall=14:58:32.151) 73.82, 92.48, -161.18, 66.52, 27.53, -175.76, 
+	 9 (ts=170124.199536091, wall=14:58:32.172) 74.01, 92.31, -161.42, 66.52, 27.53, -175.76, 
+	10 (ts=170124.219536091, wall=14:58:32.193) 74.18, 92.29, -161.48, 66.52, 27.53, -175.76, 
+sns_tilt  Wakeup: last 5 events
+	 1 (ts=9752.584029788, wall=18:25:41.430) 1.00, 
+	 2 (ts=13542.484546566, wall=19:28:51.518) 1.00, 
+	 3 (ts=13543.232448649, wall=19:28:51.518) 1.00, 
+	 4 (ts=66556.578126151, wall=10:12:24.784) 1.00, 
+	 5 (ts=68201.707396023, wall=10:39:50.625) 1.00, 
+ak0991x Magnetometer Non-wakeup: last 10 events
+	 1 (ts=413842.504308892, wall=10:40:30.476) 68.38, 28.07, 4.93, 
+	 2 (ts=413842.514308892, wall=10:40:30.487) 68.36, 27.96, 4.84, 
+	 3 (ts=413842.524308892, wall=10:40:30.496) 68.23, 27.99, 4.74, 
+	 4 (ts=413842.534308892, wall=10:40:30.506) 67.95, 27.96, 4.88, 
+	 5 (ts=413842.544308892, wall=10:40:30.516) 68.04, 27.92, 4.88, 
+	 6 (ts=413842.554308892, wall=10:40:30.526) 67.97, 27.94, 5.01, 
+	 7 (ts=413842.564308892, wall=10:40:30.536) 68.23, 27.86, 5.14, 
+	 8 (ts=413842.574308892, wall=10:40:30.546) 68.19, 28.01, 5.18, 
+	 9 (ts=413842.584308892, wall=10:40:30.557) 68.25, 28.05, 5.38, 
+	10 (ts=413842.594308892, wall=10:40:30.567) 68.18, 28.03, 5.36, 
+lsm6ds3c Accelerometer Non-wakeup: last 50 events
+	 1 (ts=420092.549665968, wall=12:24:40.621) 1.03, -0.55, 10.01, 
+	 2 (ts=420092.738721385, wall=12:24:40.805) 1.02, -0.53, 10.00, 
+	 3 (ts=420092.927777635, wall=12:24:40.994) 1.05, -0.55, 10.02, 
+	 4 (ts=420093.116833833, wall=12:24:41.190) 1.02, -0.55, 9.97, 
+	 5 (ts=420093.305889302, wall=12:24:41.378) 1.04, -0.55, 10.01, 
+	 6 (ts=420093.494944770, wall=12:24:41.563) 1.04, -0.55, 9.99, 
+	 7 (ts=420093.684001020, wall=12:24:41.750) 1.04, -0.54, 9.99, 
+	 8 (ts=420093.873057218, wall=12:24:41.940) 1.03, -0.54, 10.00, 
+	 9 (ts=420094.062112635, wall=12:24:42.128) 1.04, -0.56, 10.00, 
+	10 (ts=420094.251168104, wall=12:24:42.317) 1.03, -0.52, 9.98, 
+	11 (ts=420094.440224302, wall=12:24:42.508) 1.03, -0.56, 10.02, 
+	12 (ts=420094.629280500, wall=12:24:42.702) 1.04, -0.54, 10.01, 
+	13 (ts=420094.818335968, wall=12:24:42.891) 1.03, -0.53, 10.01, 
+	14 (ts=420095.007391385, wall=12:24:43.074) 1.03, -0.54, 10.01, 
+	15 (ts=420095.196447583, wall=12:24:43.266) 1.02, -0.54, 10.00, 
+	16 (ts=420095.385503781, wall=12:24:43.454) 1.03, -0.56, 9.98, 
+	17 (ts=420095.574559250, wall=12:24:43.641) 1.00, -0.54, 9.99, 
+	18 (ts=420095.763614666, wall=12:24:43.836) 1.02, -0.53, 9.99, 
+	19 (ts=420095.952670916, wall=12:24:44.025) 1.02, -0.53, 9.98, 
+	20 (ts=420096.141727062, wall=12:24:44.210) 1.00, -0.53, 10.01, 
+	21 (ts=420096.330782531, wall=12:24:44.398) 0.99, -0.53, 10.03, 
+	22 (ts=420096.519837948, wall=12:24:44.586) 1.06, -0.51, 10.01, 
+	23 (ts=420096.708894145, wall=12:24:44.781) 1.01, -0.54, 9.98, 
+	24 (ts=420096.897950343, wall=12:24:44.969) 1.01, -0.52, 10.00, 
+	25 (ts=420097.087005760, wall=12:24:45.160) 1.01, -0.55, 10.01, 
+	26 (ts=420097.276061229, wall=12:24:45.342) 1.01, -0.55, 10.02, 
+	27 (ts=420097.465117427, wall=12:24:45.537) 1.00, -0.55, 10.00, 
+	28 (ts=420097.654173625, wall=12:24:45.722) 1.00, -0.55, 10.01, 
+	29 (ts=420097.843229041, wall=12:24:45.911) 1.00, -0.55, 9.99, 
+	30 (ts=420098.032284458, wall=12:24:46.100) 1.00, -0.54, 10.00, 
+	31 (ts=420098.221340708, wall=12:24:46.294) 1.03, -0.54, 10.03, 
+	32 (ts=420098.410396854, wall=12:24:46.483) 1.00, -0.54, 9.96, 
+	33 (ts=420098.599452323, wall=12:24:46.667) 1.01, -0.54, 10.02, 
+	34 (ts=420098.788507739, wall=12:24:46.861) 0.99, -0.53, 9.97, 
+	35 (ts=420098.977563937, wall=12:24:47.047) 1.01, -0.54, 10.01, 
+	36 (ts=420099.166620135, wall=12:24:47.233) 0.99, -0.55, 9.99, 

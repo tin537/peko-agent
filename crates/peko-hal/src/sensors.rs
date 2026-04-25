@@ -65,6 +65,21 @@ pub enum SensorKind {
 }
 
 impl SensorKind {
+    /// Android sensor type id (from android.hardware.Sensor) used to
+    /// match against `dumpsys sensorservice` output. Returns None for
+    /// kinds Android doesn't define.
+    pub fn android_type_id(self) -> Option<u32> {
+        Some(match self {
+            SensorKind::Accel => 1,
+            SensorKind::Magnetometer => 2,
+            SensorKind::Gyro => 4,
+            SensorKind::Light => 5,
+            SensorKind::Pressure => 6,
+            SensorKind::Proximity => 8,
+            SensorKind::AmbientTemp => 13,
+        })
+    }
+
     fn iio_channel_prefix(self) -> &'static str {
         match self {
             SensorKind::Accel => "in_accel",

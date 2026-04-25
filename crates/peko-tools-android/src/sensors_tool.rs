@@ -1,7 +1,7 @@
 use peko_core::tool::{Tool, ToolResult};
 use peko_hal::{
-    read_battery, read_light_prox, BatteryError, IioSensor, LightProxError, LightProxKind,
-    SensorError, SensorKind,
+    capture_dumpsys_sensorservice, dumpsys_latest_for_type, read_battery, read_light_prox,
+    BatteryError, DumpsysError, IioSensor, LightProxError, LightProxKind, SensorError, SensorKind,
 };
 use serde_json::json;
 use std::future::Future;
@@ -120,75 +120,172 @@ fn read_battery_tool() -> anyhow::Result<ToolResult> {
 }
 
 fn read_iio_vec3(kind: SensorKind) -> anyhow::Result<ToolResult> {
-    let sensor = match IioSensor::discover(kind) {
-        Ok(s) => s,
-        Err(SensorError::NotFound { kind: k }) => {
-            return Ok(ToolResult::error(format!(
-                "{k} not exposed via IIO on this kernel. Try `screenshot mode=info` for hardware diagnostics."
-            )))
+    // Path 1: IIO sysfs. Cheap, fully kernel-direct, works in Lane A.
+    match IioSensor::discover(kind) {
+        Ok(sensor) => match sensor.read_vec3() {
+            Ok(v) => return Ok(ToolResult::success(format_vec3_iio(kind, &sensor.name, v))),
+            Err(e) => {
+                tracing::debug!(error = %e, "IIO read failed, falling back to dumpsys");
+            }
+        },
+        Err(SensorError::NotFound { .. }) => {
+            // Expected on Qualcomm devices — fall through to dumpsys.
         }
         Err(e) => return Ok(ToolResult::error(format!("IIO discover failed: {e}"))),
-    };
-    match sensor.read_vec3() {
-        Ok(v) => {
-            let unit = match kind {
-                SensorKind::Accel => "m/s²",
-                SensorKind::Gyro => "rad/s",
-                SensorKind::Magnetometer => "T",
-                _ => "raw",
-            };
-            Ok(ToolResult::success(format!(
-                "{} ({}): x={:.4} y={:.4} z={:.4} {}",
-                kind_label(kind),
-                sensor.name,
-                v.x, v.y, v.z,
-                unit
-            )))
-        }
-        Err(e) => Ok(ToolResult::error(format!("read failed: {e}"))),
     }
+
+    // Path 2: dumpsys sensorservice. Lane B only — needs framework. The
+    // Sensor HAL keeps recent samples cached for any sensor with an
+    // active subscriber.
+    read_via_dumpsys(kind, /* expected_axes */ Some(3))
 }
 
 fn read_iio_scalar(kind: SensorKind) -> anyhow::Result<ToolResult> {
-    let sensor = match IioSensor::discover(kind) {
-        Ok(s) => s,
-        Err(SensorError::NotFound { kind: k }) => {
+    match IioSensor::discover(kind) {
+        Ok(sensor) => match sensor.read_scalar() {
+            Ok(s) => {
+                return Ok(ToolResult::success(format!(
+                    "{} ({}): {:.3} {} (source: IIO {})",
+                    kind_label(kind),
+                    sensor.name,
+                    s.value,
+                    s.unit,
+                    s.source.display()
+                )))
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "IIO scalar read failed, falling back to dumpsys");
+            }
+        },
+        Err(SensorError::NotFound { .. }) => {}
+        Err(e) => return Ok(ToolResult::error(format!("IIO discover failed: {e}"))),
+    }
+
+    read_via_dumpsys(kind, /* expected_axes */ Some(1))
+}
+
+fn read_via_dumpsys(kind: SensorKind, expected_axes: Option<usize>) -> anyhow::Result<ToolResult> {
+    let Some(type_id) = kind.android_type_id() else {
+        return Ok(ToolResult::error(format!(
+            "{} has no Android sensor type id; not readable via dumpsys",
+            kind_label(kind)
+        )));
+    };
+    let label = kind_label(kind);
+
+    let text = match capture_dumpsys_sensorservice() {
+        Ok(t) => t,
+        Err(DumpsysError::NotAvailable) => {
             return Ok(ToolResult::error(format!(
-                "{k} not exposed via IIO on this kernel."
+                "{label} not exposed via IIO and dumpsys is unavailable \
+                 (frameworkless build?). Lane A access requires a binder \
+                 client to the Sensor HAL — not yet implemented."
             )))
         }
-        Err(e) => return Ok(ToolResult::error(format!("IIO discover failed: {e}"))),
+        Err(e) => return Ok(ToolResult::error(format!("dumpsys failed: {e}"))),
     };
-    match sensor.read_scalar() {
-        Ok(s) => Ok(ToolResult::success(format!(
-            "{} ({}): {:.3} {}",
-            kind_label(kind),
-            sensor.name,
-            s.value,
-            s.unit
+
+    match dumpsys_latest_for_type(&text, type_id, label) {
+        Ok(reading) => Ok(ToolResult::success(format_dumpsys_reading(
+            kind,
+            &reading,
+            expected_axes,
         ))),
-        Err(e) => Ok(ToolResult::error(format!("read failed: {e}"))),
+        Err(DumpsysError::SensorNotListed { type_id, label }) => Ok(ToolResult::error(format!(
+            "{label} (type {type_id}) is not present in dumpsys sensorservice — \
+             this device doesn't expose it"
+        ))),
+        Err(DumpsysError::NoRecentEvents { name }) => Ok(ToolResult::error(format!(
+            "sensor '{name}' has no recent events. Open the Camera or another app \
+             that uses {label} for a few seconds, then retry — dumpsys only sees \
+             cached samples from active subscribers."
+        ))),
+        Err(e) => Ok(ToolResult::error(format!("dumpsys parse failed: {e}"))),
     }
 }
 
+fn format_vec3_iio(kind: SensorKind, name: &str, v: peko_hal::Vec3) -> String {
+    let unit = match kind {
+        SensorKind::Accel => "m/s²",
+        SensorKind::Gyro => "rad/s",
+        SensorKind::Magnetometer => "T",
+        _ => "raw",
+    };
+    format!(
+        "{} ({}): x={:.4} y={:.4} z={:.4} {} (source: IIO)",
+        kind_label(kind),
+        name,
+        v.x, v.y, v.z,
+        unit
+    )
+}
+
+fn format_dumpsys_reading(
+    kind: SensorKind,
+    reading: &peko_hal::DumpsysReading,
+    expected_axes: Option<usize>,
+) -> String {
+    let unit = match kind {
+        SensorKind::Accel | SensorKind::Gyro => match kind {
+            SensorKind::Accel => "m/s²",
+            _ => "rad/s",
+        },
+        SensorKind::Magnetometer => "µT",
+        SensorKind::Light => "lux",
+        SensorKind::Proximity => "cm",
+        SensorKind::Pressure => "hPa",
+        SensorKind::AmbientTemp => "°C",
+    };
+    let wall = reading.wall_clock.as_deref().unwrap_or("?");
+    let vals = &reading.values;
+    let formatted = match (expected_axes.unwrap_or(0), vals.len()) {
+        (3, _) if vals.len() >= 3 => {
+            format!("x={:.4} y={:.4} z={:.4}", vals[0], vals[1], vals[2])
+        }
+        (1, _) if !vals.is_empty() => format!("{:.4}", vals[0]),
+        _ => vals
+            .iter()
+            .map(|v| format!("{v:.4}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    format!(
+        "{} ({}): {} {} (source: dumpsys, wall={})",
+        kind_label(kind),
+        reading.sensor_name,
+        formatted,
+        unit,
+        wall
+    )
+}
+
 fn read_light_or_prox(kind: LightProxKind, timeout_ms: u64) -> anyhow::Result<ToolResult> {
+    // Path 1: input subsystem / /sys/class/sensors. Lane A friendly.
     match read_light_prox(kind, Duration::from_millis(timeout_ms)) {
-        Ok(r) => Ok(ToolResult::success(format!(
-            "{}: {:.3} {} (source: {})",
-            light_prox_label(kind),
-            r.value,
-            r.unit,
-            r.source.display()
-        ))),
-        Err(LightProxError::NotFound { kind: k }) => Ok(ToolResult::error(format!(
-            "{k} sensor not found via input or sysfs"
-        ))),
-        Err(LightProxError::Timeout) => Ok(ToolResult::error(format!(
-            "{} read timed out — sensor may need an event before reporting",
-            light_prox_label(kind)
-        ))),
-        Err(e) => Ok(ToolResult::error(format!("read failed: {e}"))),
+        Ok(r) => {
+            return Ok(ToolResult::success(format!(
+                "{}: {:.3} {} (source: {})",
+                light_prox_label(kind),
+                r.value,
+                r.unit,
+                r.source.display()
+            )))
+        }
+        Err(LightProxError::NotFound { .. }) | Err(LightProxError::Timeout) => {
+            // Fall through to dumpsys. Don't surface the input-path
+            // error if the dumpsys path succeeds — the agent only cares
+            // about getting the value.
+        }
+        Err(e) => return Ok(ToolResult::error(format!("read failed: {e}"))),
     }
+
+    // Path 2: dumpsys sensorservice (Lane B). On Qualcomm devices the
+    // optical sensors are SLPI-bound; this is the only userspace path.
+    let mapped = match kind {
+        LightProxKind::Light => SensorKind::Light,
+        LightProxKind::Proximity => SensorKind::Proximity,
+    };
+    read_via_dumpsys(mapped, /* expected_axes */ Some(1))
 }
 
 fn kind_label(kind: SensorKind) -> &'static str {

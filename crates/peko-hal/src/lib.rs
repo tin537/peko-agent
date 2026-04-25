@@ -7,6 +7,7 @@ pub mod package_manager;
 pub mod display;
 pub mod display_info;
 pub mod sensors;
+pub mod sensors_dumpsys;
 pub mod battery;
 pub mod light_prox;
 
@@ -41,6 +42,11 @@ pub use display::{
 pub use display_info::{probe as probe_drm, probe_default as probe_drm_default, DrmConnector,
     DrmInfo, DrmInfoError, DrmMode};
 pub use sensors::{IioSensor, ScalarSample, SensorError, SensorKind, Vec3};
+pub use sensors_dumpsys::{
+    capture as capture_dumpsys_sensorservice, latest_for_type as dumpsys_latest_for_type,
+    parse_recent_events as parse_dumpsys_recent_events, parse_sensor_list as parse_dumpsys_sensors,
+    DumpsysError, DumpsysReading, DumpsysSensor,
+};
 pub use battery::{read as read_battery, BatteryError, BatteryHealth, BatteryState, ChargeStatus};
 pub use light_prox::{read as read_light_prox, LightProxError,
     Reading as LightProxReading, SensorKind as LightProxKind};
