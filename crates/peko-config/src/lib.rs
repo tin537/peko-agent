@@ -180,9 +180,24 @@ pub struct TelegramConfig {
     pub send_screenshots: bool,
     #[serde(default = "default_telegram_max_message")]
     pub max_message_length: usize,
+
+    /// Per-user rate limit. Free-text tasks and slash-commands both
+    /// count against this. Default 30/minute is generous for human
+    /// use, blocks runaway loops if the user's account is hijacked.
+    /// Set to 0 to disable rate limiting (NOT recommended).
+    #[serde(default = "default_telegram_rate_limit")]
+    pub rate_limit_per_minute: u32,
+
+    /// Optional whitelist of tool names the agent is allowed to call
+    /// when the task arrived via Telegram. None = full tool registry
+    /// (DANGEROUS — includes shell + filesystem + package_manager).
+    /// Recommended default for remote use is a read-mostly subset.
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 fn default_telegram_max_message() -> usize { 4000 }
+fn default_telegram_rate_limit() -> u32 { 30 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {

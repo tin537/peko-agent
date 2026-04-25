@@ -93,8 +93,87 @@ impl ToolRegistry {
     pub fn is_dangerous(&self, name: &str) -> bool {
         self.tools.get(name).map(|t| t.is_dangerous()).unwrap_or(false)
     }
+
+    /// Return a new registry containing only the tools whose names
+    /// are in `allowed`. Used to expose a narrowed surface to remote
+    /// transports (Telegram, future webhooks) without affecting the
+    /// full local registry.
+    ///
+    /// Tools are reference-counted (Arc<dyn Tool>), so the narrowed
+    /// registry shares state with the original — registering a new
+    /// memory or skill in the full registry is visible through the
+    /// narrowed one too.
+    pub fn narrow_to(&self, allowed: &[String]) -> Self {
+        let mut out = Self::new();
+        for name in allowed {
+            if let Some(tool) = self.tools.get(name) {
+                out.tools.insert(name.clone(), tool.clone());
+            }
+        }
+        out
+    }
 }
 
 impl Default for ToolRegistry {
     fn default() -> Self { Self::new() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    struct DummyTool(&'static str);
+    impl Tool for DummyTool {
+        fn name(&self) -> &str { self.0 }
+        fn description(&self) -> &str { "test tool" }
+        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        fn execute(
+            &self,
+            _args: serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolResult>> + Send + '_>> {
+            let name = self.0.to_string();
+            Box::pin(async move { Ok(ToolResult::success(name)) })
+        }
+    }
+
+    #[test]
+    fn narrow_to_drops_disallowed_tools() {
+        let mut full = ToolRegistry::new();
+        full.register(DummyTool("screenshot"));
+        full.register(DummyTool("shell"));
+        full.register(DummyTool("memory"));
+        full.register(DummyTool("package_manager"));
+
+        let narrow = full.narrow_to(&[
+            "screenshot".to_string(),
+            "memory".to_string(),
+        ]);
+
+        let names = narrow.available_tools();
+        assert!(names.contains(&"screenshot"));
+        assert!(names.contains(&"memory"));
+        assert!(!names.contains(&"shell"), "shell must NOT survive narrowing");
+        assert!(!names.contains(&"package_manager"));
+    }
+
+    #[test]
+    fn narrow_to_silently_skips_unknown_names() {
+        let mut full = ToolRegistry::new();
+        full.register(DummyTool("screenshot"));
+        let narrow = full.narrow_to(&[
+            "screenshot".to_string(),
+            "ghost_tool".to_string(),
+        ]);
+        assert_eq!(narrow.available_tools(), vec!["screenshot"]);
+    }
+
+    #[test]
+    fn narrow_to_with_empty_allowlist_yields_empty_registry() {
+        let mut full = ToolRegistry::new();
+        full.register(DummyTool("screenshot"));
+        let narrow = full.narrow_to(&[]);
+        assert!(narrow.available_tools().is_empty());
+    }
 }

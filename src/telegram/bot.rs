@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{info, warn, error};
 use reqwest::Client;
@@ -16,11 +18,17 @@ pub struct TelegramBot {
     token: String,
     config: TelegramConfig,
     app_config: Arc<Mutex<serde_json::Value>>,
+    /// Tool registry the bot uses to execute agent tasks. May be a
+    /// narrowed view of the full registry — see TelegramConfig::allowed_tools
+    /// and main.rs's bot construction.
     tools: Arc<ToolRegistry>,
     session_db_path: std::path::PathBuf,
     memory: Arc<Mutex<MemoryStore>>,
     skills: Arc<Mutex<SkillStore>>,
     soul: Arc<Mutex<String>>,
+    /// Per-user sliding-window timestamps of recent task starts.
+    /// Used to enforce TelegramConfig::rate_limit_per_minute.
+    rate_window: Mutex<HashMap<i64, Vec<Instant>>>,
 }
 
 // ── Telegram API types ──
@@ -97,11 +105,44 @@ impl TelegramBot {
             memory,
             skills,
             soul,
+            rate_window: Mutex::new(HashMap::new()),
         }
     }
 
     fn api_url(&self, method: &str) -> String {
         format!("{}/bot{}/{}", TELEGRAM_API, self.token, method)
+    }
+
+    /// Same shape as `api_url` but with the token replaced by
+    /// `[REDACTED]`. ALWAYS use this in tracing / error / debug output
+    /// so a `RUST_LOG=trace` flip doesn't dump the bot token into
+    /// peko.log.
+    fn safe_url(&self, method: &str) -> String {
+        format!("{}/bot[REDACTED]/{}", TELEGRAM_API, method)
+    }
+
+    /// Returns true if `user_id` is currently within the per-minute
+    /// rate budget; false if the user is throttled. Garbage-collects
+    /// timestamps older than 60s on every call so the map doesn't
+    /// grow unbounded.
+    async fn check_rate_limit(&self, user_id: i64) -> bool {
+        let limit = self.config.rate_limit_per_minute;
+        if limit == 0 {
+            // Operator explicitly disabled. Document it as a footgun
+            // by warn-logging on every overshoot is too noisy, so
+            // just let them through.
+            return true;
+        }
+        let now = Instant::now();
+        let mut win = self.rate_window.lock().await;
+        let entry = win.entry(user_id).or_insert_with(Vec::new);
+        // Drop timestamps older than 60s.
+        entry.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+        if entry.len() as u32 >= limit {
+            return false;
+        }
+        entry.push(now);
+        true
     }
 
     /// Main polling loop — runs forever
@@ -138,10 +179,20 @@ impl TelegramBot {
     }
 
     async fn get_me(&self) -> anyhow::Result<String> {
-        let resp: TgResponse<serde_json::Value> = self.client
-            .get(self.api_url("getMe"))
-            .send().await?
-            .json().await?;
+        let url = self.api_url("getMe");
+        // self.safe_url(...) is what we'd put in any error_chain or
+        // tracing::debug call. Reqwest itself never logs URLs at info
+        // level, so this is defence-in-depth for ops who flip
+        // RUST_LOG=trace later.
+        let resp: TgResponse<serde_json::Value> = match self.client
+            .get(url)
+            .send().await {
+                Ok(r) => r.json().await?,
+                Err(e) => {
+                    error!(url = %self.safe_url("getMe"), error = %e, "getMe request failed");
+                    return Err(e.into());
+                }
+            };
 
         if resp.ok {
             let name = resp.result
@@ -229,10 +280,30 @@ impl TelegramBot {
             .and_then(|u| u.username.clone())
             .unwrap_or_else(|| msg.from.as_ref().map(|u| u.first_name.clone()).unwrap_or_default());
 
-        // Auth check
-        if !self.config.allowed_users.is_empty() && !self.config.allowed_users.contains(&user_id) {
+        // Auth check. Defence-in-depth: main.rs refuses to spawn the
+        // bot at all when allowed_users is empty, but we re-check here
+        // so a future code path that bypasses that gate still hits
+        // this one.
+        if self.config.allowed_users.is_empty() {
+            warn!(user_id, username = %username, "telegram bot received message but allowed_users is empty — dropping");
+            return;
+        }
+        if !self.config.allowed_users.contains(&user_id) {
             warn!(user_id, username = %username, "unauthorized telegram user");
             self.send_text(chat_id, "Unauthorized. Your user ID is not in the allowed list.").await;
+            return;
+        }
+
+        // Rate limit. Drop the message politely with a hint about the
+        // configured cap. We rate-limit BEFORE doing any agent work so
+        // a flood doesn't burn LLM credits even on the rejection path.
+        if !self.check_rate_limit(user_id).await {
+            warn!(user_id, username = %username, limit = self.config.rate_limit_per_minute,
+                  "telegram rate limit exceeded");
+            self.send_text(chat_id, &format!(
+                "Rate limit hit ({}/min). Slow down and try again.",
+                self.config.rate_limit_per_minute
+            )).await;
             return;
         }
 
@@ -403,5 +474,83 @@ impl TelegramBot {
         } else {
             anyhow::bail!("screencap failed")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peko_config::TelegramConfig;
+
+    fn test_bot(rate: u32) -> TelegramBot {
+        let cfg = TelegramConfig {
+            bot_token: "TEST".into(),
+            allowed_users: vec![123],
+            send_screenshots: true,
+            max_message_length: 4000,
+            rate_limit_per_minute: rate,
+            allowed_tools: None,
+        };
+        // Per-process unique temp dir so concurrent test runs don't
+        // clobber each other's SQLite files. We never read these
+        // back — the rate-limiter / safe_url tests only touch the
+        // bot's in-memory state.
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let tmp = std::env::temp_dir().join(format!("peko-tg-test-{pid}-{nanos}"));
+        std::fs::create_dir_all(&tmp).ok();
+        let mem_db = tmp.join("memory.sqlite");
+        let skills_dir = tmp.join("skills");
+        std::fs::create_dir_all(&skills_dir).ok();
+        TelegramBot::new(
+            cfg,
+            Arc::new(Mutex::new(serde_json::json!({}))),
+            Arc::new(ToolRegistry::new()),
+            tmp.join("session.sqlite"),
+            Arc::new(Mutex::new(MemoryStore::open(&mem_db).unwrap())),
+            Arc::new(Mutex::new(SkillStore::open(&skills_dir).unwrap())),
+            Arc::new(Mutex::new(String::new())),
+        )
+    }
+
+    #[tokio::test]
+    async fn rate_limit_allows_under_cap() {
+        let bot = test_bot(5);
+        for _ in 0..5 {
+            assert!(bot.check_rate_limit(123).await, "should allow within cap");
+        }
+        assert!(!bot.check_rate_limit(123).await, "6th call must be throttled");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_zero_disables_check() {
+        let bot = test_bot(0);
+        for _ in 0..1000 {
+            assert!(bot.check_rate_limit(123).await, "rate=0 means no limit");
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_per_user_independent() {
+        let bot = test_bot(2);
+        assert!(bot.check_rate_limit(111).await);
+        assert!(bot.check_rate_limit(111).await);
+        // user 111 is now at cap; user 222 still has full budget
+        assert!(!bot.check_rate_limit(111).await);
+        assert!(bot.check_rate_limit(222).await);
+        assert!(bot.check_rate_limit(222).await);
+        assert!(!bot.check_rate_limit(222).await);
+    }
+
+    #[test]
+    fn safe_url_redacts_token() {
+        let bot = test_bot(5);
+        let s = bot.safe_url("getMe");
+        assert!(!s.contains("TEST"), "real token must not appear in safe_url");
+        assert!(s.contains("[REDACTED]"));
+        assert!(s.ends_with("/getMe"));
     }
 }

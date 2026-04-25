@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use peko_config::PekoConfig;
 use peko_core::{ToolRegistry, MemoryStore, SkillStore, SystemPrompt, Scheduler, ScheduledTask, TelegramSender, UserModel, McpServerConfig, register_mcp_tools, TaskQueue, DualBrain, Reflector, CallStore, spawn_call_pipeline};
@@ -450,19 +450,64 @@ async fn main() -> anyhow::Result<()> {
         calls: call_store_arc,
     };
 
-    // Start Telegram bot if configured
+    // Start Telegram bot if configured. Two safety gates before spawn:
+    //
+    //   1) bot_token must be non-empty — refuses an empty-string token
+    //      that would just spew 401s in the polling loop.
+    //   2) allowed_users must be non-empty — Telegram bots are public
+    //      by their @handle the moment they're created, so an empty
+    //      allowlist means "any human who finds the bot can run agent
+    //      tasks on this device". That's a remote-root footgun. Refuse
+    //      to start instead.
+    //
+    // Also subsets the ToolRegistry handed to the bot when
+    // [telegram].allowed_tools is set, so a compromised authorised
+    // user can't trigger shell / package_manager / sms over the wire.
     if let Some(ref tg_config) = config.telegram {
-        let bot = telegram::TelegramBot::new(
-            tg_config.clone(),
-            config_arc.clone(),
-            tools_arc.clone(),
-            db_path.clone(),
-            memory_store.clone(),
-            skill_store.clone(),
-            soul_arc.clone(),
-        );
-        tokio::spawn(async move { bot.run().await });
-        info!("telegram bot started");
+        if tg_config.bot_token.trim().is_empty() {
+            warn!("telegram bot_token is empty — bot NOT started");
+        } else if tg_config.allowed_users.is_empty() {
+            error!(
+                "[telegram].allowed_users is empty — refusing to start the bot. \
+                 Set it to your Telegram user ID(s). Without an allowlist, anyone \
+                 with the bot @handle can drive the agent."
+            );
+        } else {
+            let tg_tools: Arc<ToolRegistry> = match &tg_config.allowed_tools {
+                Some(allowed) if !allowed.is_empty() => {
+                    let narrowed = tools_arc.narrow_to(allowed);
+                    info!(
+                        narrowed = %allowed.join(","),
+                        "telegram bot will see narrowed tool registry"
+                    );
+                    Arc::new(narrowed)
+                }
+                _ => {
+                    warn!(
+                        "[telegram].allowed_tools not set — bot can call EVERY tool \
+                         including shell + package_manager + sms. Recommended: \
+                         allowed_tools = [\"screenshot\", \"ui_inspect\", \"memory\", \
+                         \"skills\", \"sensors\", \"wifi\", \"audio\", \"draw\"]"
+                    );
+                    tools_arc.clone()
+                }
+            };
+            let bot = telegram::TelegramBot::new(
+                tg_config.clone(),
+                config_arc.clone(),
+                tg_tools,
+                db_path.clone(),
+                memory_store.clone(),
+                skill_store.clone(),
+                soul_arc.clone(),
+            );
+            tokio::spawn(async move { bot.run().await });
+            info!(
+                allowed_users = ?tg_config.allowed_users,
+                rate_limit_per_minute = tg_config.rate_limit_per_minute,
+                "telegram bot started"
+            );
+        }
     }
 
     // Start scheduler if tasks are configured
