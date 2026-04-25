@@ -150,10 +150,14 @@ WM_SIZE=$(get wm_size)
 
 step "wpa_supplicant socket"
 WPA_FOUND=$(get wpa_ctrl_path)
+WPA_DIR=$(get wpa_ctrl_dir)
 if [[ -n "$WPA_FOUND" ]]; then
     ok "wpa_ctrl socket at $WPA_FOUND"
+elif [[ -n "$WPA_DIR" ]]; then
+    warn "no global/iface socket found, but sockets dir present at $WPA_DIR"
+    warn "Phase 3 will create its own client socket inside that dir"
 else
-    warn "wpa_ctrl socket not found at known paths (may be OK on this ROM)"
+    warn "wpa_ctrl sockets dir not found at known paths (may be OK on this ROM)"
 fi
 
 # ------------------------------------------------------------------------------
@@ -199,6 +203,11 @@ if [[ -n "$ABS_X_MAX" && -n "$ABS_Y_MAX" && -n "$CODENAME" ]]; then
         if [[ -n "$WPA_FOUND" ]]; then
             echo "[wifi]"
             echo "ctrl_socket_path = \"$WPA_FOUND\""
+        elif [[ -n "$WPA_DIR" ]]; then
+            echo "[wifi]"
+            echo "# No global socket on this ROM; Phase 3 will bind a"
+            echo "# client socket inside this dir and target wlan0."
+            echo "ctrl_socket_dir = \"$WPA_DIR\""
         fi
     } > "$PROFILE"
     ok "wrote $PROFILE"

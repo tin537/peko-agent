@@ -105,9 +105,14 @@ pub struct TouchProfile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WifiProfile {
-    /// Path to the wpa_supplicant control socket. Empty = probe both
-    /// LineageOS-vendor and Magisk-on-stock locations in order.
+    /// Direct path to a wpa_supplicant global / per-interface control
+    /// socket. Empty = probe runtime locations in order.
     pub ctrl_socket_path: Option<String>,
+    /// Path to the directory holding wpa_supplicant per-client sockets.
+    /// Used when no global socket exists (LineageOS 20+ on sdm845):
+    /// Phase 3 binds its own client socket inside this dir and connects
+    /// to the interface-specific socket (typically `<dir>/wlan0`).
+    pub ctrl_socket_dir: Option<String>,
 }
 
 impl DeviceProfile {
@@ -238,6 +243,7 @@ mod tests {
 
             [wifi]
             ctrl_socket_path = "/data/vendor/wifi/wpa/sockets/wpa_ctrl_global"
+            ctrl_socket_dir = "/data/vendor/wifi/wpa/sockets"
         "#;
         let p: DeviceProfile = toml::from_str(toml).unwrap();
         assert_eq!(p.device, "OnePlus 6T (fajita)");
@@ -253,6 +259,10 @@ mod tests {
         assert_eq!(
             p.wifi.ctrl_socket_path.as_deref(),
             Some("/data/vendor/wifi/wpa/sockets/wpa_ctrl_global")
+        );
+        assert_eq!(
+            p.wifi.ctrl_socket_dir.as_deref(),
+            Some("/data/vendor/wifi/wpa/sockets")
         );
     }
 

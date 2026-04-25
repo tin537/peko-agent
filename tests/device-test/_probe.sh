@@ -127,16 +127,48 @@ size=$(echo "$wm" | grep -oE '[0-9]+x[0-9]+' | head -1)
 
 # ----------------------------------------------------------------------
 # wpa_supplicant control socket
+#
+# wpa_supplicant on Android creates a control socket at one of:
+#   - <dir>/wpa_ctrl_global       — global interface (some ROMs)
+#   - <dir>/<iface>                — interface-specific (LineageOS 20)
+#   - <dir>/wpa_ctrl_<pid>-<n>    — per-client sockets (ignore)
+#
+# We probe both the well-known global path and any interface-named
+# socket inside the sockets dir, then fall back to reporting the dir
+# itself so Phase 3 can pick the right entry at runtime.
 # ----------------------------------------------------------------------
+wpa_path=""
 for path in \
     /data/vendor/wifi/wpa/sockets/wpa_ctrl_global \
-    /data/misc/wifi/sockets/wpa_ctrl \
-    /data/vendor/wifi/wpa/sockets/wpa_ctrl
+    /data/misc/wifi/sockets/wpa_ctrl_global \
+    /data/vendor/wifi/wpa/sockets/wpa_ctrl \
+    /data/misc/wifi/sockets/wpa_ctrl
 do
     if [ -e "$path" ]; then
-        emit wpa_ctrl_path "$path"
+        wpa_path="$path"
         break
     fi
 done
+if [ -z "$wpa_path" ]; then
+    for d in /data/vendor/wifi/wpa/sockets /data/misc/wifi/sockets; do
+        [ -d "$d" ] || continue
+        for iface in wlan0 wlan1 p2p0 ap0; do
+            if [ -e "$d/$iface" ]; then
+                wpa_path="$d/$iface"
+                break 2
+            fi
+        done
+    done
+fi
+if [ -z "$wpa_path" ]; then
+    for d in /data/vendor/wifi/wpa/sockets /data/misc/wifi/sockets; do
+        if [ -d "$d" ]; then
+            emit wpa_ctrl_dir "$d"
+            break
+        fi
+    done
+else
+    emit wpa_ctrl_path "$wpa_path"
+fi
 
 emit done 1
