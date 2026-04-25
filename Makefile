@@ -45,6 +45,7 @@ device-test: adb-check
 	  3) $(MAKE) device-test-phase3 ;; \
 	  4) $(MAKE) device-test-phase4 ;; \
 	  8) $(MAKE) device-test-phase8 ;; \
+	  9) $(MAKE) device-test-phase9 ;; \
 	  all) $(MAKE) device-test-all ;; \
 	  *) echo "no device-test for PHASE=$(PHASE) yet"; exit 1 ;; \
 	esac
@@ -66,3 +67,6 @@ device-test-phase4:
 
 device-test-phase8:
 	@bash tests/device-test/phase8-lane-a-blit.sh
+
+device-test-phase9:
+	@bash tests/device-test/phase9-drm.sh

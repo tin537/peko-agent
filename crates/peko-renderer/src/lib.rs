@@ -17,7 +17,10 @@
 
 pub mod font;
 pub mod blit;
+pub mod drm;
 pub use blit::{blit_to_framebuffer, read_fb_info, BlitError, BlitFormat, FbInfo};
+pub use drm::{paint_to_panel as drm_paint_to_panel, pick_target as drm_pick_target,
+    DrmBlitError, DrmTargetInfo};
 
 use peko_hal::RgbaBuffer;
 

@@ -24,10 +24,10 @@ Status legend:
 | `screencap` (SurfaceFlinger) | ✅ | ❌ | unit + phase1.sh | Disappears in Lane A |
 | `fbdev` mmap (`/dev/graphics/fb0`) | 🟡 | ✅ | unit + phase1.sh | Stale on sdm845 in Lane B; primary in Lane A |
 | `DRM` enumeration (no master) | ✅ | ✅ | unit + phase1.sh | Diagnostics only |
-| `DRM` pixel readback | ❌ | ⏳ | 8+ | Requires DRM master → Lane A only |
+| `DRM` pixel readback | ❌ | ✅ | 9 | `peko_renderer::drm` ships SET_MASTER + CREATE_DUMB + MAP_DUMB + ADDFB2 + SETCRTC. EBUSY in Lane B (SF holds master) — code path verified by unit tests + struct-size sanity checks |
 | Framebuffer blit (write canvas → fb0) | 🟡 | 🟡 | 7 | Code shipped + tested. **sdm845 finding:** fb0 is a phantom AOD plane; blit succeeds but pixels never reach the panel — Lane A on sdm845 must use DRM. See `docs/architecture/lane-a-sdm845-finding.md` |
 | Framebuffer blit on devices where fb0 IS scanout | ✅ | ✅ | 7 | Pre-Treble vendor kernels + emulators; verified by unit tests, awaits hardware visual confirmation |
-| DRM master + dumb buffer write (Lane A on sdm845) | ❌ | ⏳ | 9 | Required to paint pixels in Lane A on Qualcomm SoCs |
+| DRM master + dumb buffer write (Lane A on sdm845) | ❌ | ✅ | 9 | Code shipped; `--enumerate` runs while SF is up, `--paint` requires Lane A or SF stopped. Visual confirmation pending Lane A boot |
 | Display rotation detection | ✅ | ✅ | unit + phase1.sh | sysfs `rotate` + device profile override |
 | `auto_capture()` backend pick | ✅ | ✅ | unit | screencap → fbdev fallback |
 
