@@ -7,7 +7,13 @@ Single Rust binary. Talks to the hardware through Linux device files, not Java f
 
 An Agent-as-OS architecture — a native Android system process with a closed learning loop, kernel-level hardware access, and autonomous task execution.
 
-> **Honest status:** Lane B (hybrid with Android framework alive) is shipped and verified on real hardware. Lane A (frameworkless, PID-1) is implemented as a research scaffold — see [docs/AGENT_AS_OS_STATUS.md](docs/AGENT_AS_OS_STATUS.md) and [docs/CAPABILITY_MATRIX.md](docs/CAPABILITY_MATRIX.md) for the per-capability matrix that's the source of truth. If those disagree with this README, those win.
+> **Honest status (v0.4.0):** Lane B (hybrid with Android framework alive) is shipped and verified on real hardware. Lane A (frameworkless, PID-1) is implemented as a research scaffold; on Qualcomm SoCs Phase 9 DRM work is required for the panel to actually light up — see [`docs/architecture/lane-a-sdm845-finding.md`](docs/architecture/lane-a-sdm845-finding.md). Pointers:
+>
+> - [`docs/RELEASE_NOTES_v0.4.0.md`](docs/RELEASE_NOTES_v0.4.0.md) — what shipped, what's verified, what's deferred
+> - [`docs/CAPABILITY_MATRIX.md`](docs/CAPABILITY_MATRIX.md) — per-capability source of truth
+> - [`docs/AGENT_AS_OS_STATUS.md`](docs/AGENT_AS_OS_STATUS.md) — the Lane A vs Lane B boundary, plain-English
+>
+> If those disagree with this README, those win.
 
 ---
 
