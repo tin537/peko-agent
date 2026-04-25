@@ -109,4 +109,22 @@ for n in /sys/class/input/event*; do
 done
 emit input_sensor_count "$input_count"
 
+# ----------------------------------------------------------------------
+# dumpsys sensorservice — Android Sensor HAL diagnostics (Lane B)
+#
+# When IIO is empty (Qualcomm SLPI / Samsung SSC), this is the only
+# user-space view of the sensor list. We capture the first 200 lines —
+# enough to see the sensor list + active sensors + last events — and
+# stash them in a host-side file so we can write a parser against the
+# real format rather than a guess from spec.
+# ----------------------------------------------------------------------
+DUMPFILE=/data/local/tmp/peko_dumpsys_sensorservice.txt
+if command -v dumpsys >/dev/null 2>&1; then
+    run dumpsys sensorservice 2>/dev/null | head -200 > "$DUMPFILE" 2>/dev/null
+    if [ -s "$DUMPFILE" ]; then
+        emit dumpsys_sensorservice_path "$DUMPFILE"
+        emit dumpsys_sensorservice_lines "$(wc -l < "$DUMPFILE" | tr -d ' ')"
+    fi
+fi
+
 emit done 1

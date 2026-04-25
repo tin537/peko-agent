@@ -119,6 +119,22 @@ fi
 # ----------------------------------------------------------------------
 # Refresh device profile [sensors] block
 # ----------------------------------------------------------------------
+step "Pull dumpsys sensorservice (for parser dev)"
+DUMPSYS_REMOTE=$(get dumpsys_sensorservice_path)
+if [[ -n "$DUMPSYS_REMOTE" ]]; then
+    LOCAL_DUMP="$REPO_ROOT/tests/device-test/dumpsys_sensorservice_$CODENAME.txt"
+    "$ADB" pull "$DUMPSYS_REMOTE" "$LOCAL_DUMP" >/dev/null 2>&1
+    if [[ -s "$LOCAL_DUMP" ]]; then
+        ok "saved $LOCAL_DUMP ($(wc -l < "$LOCAL_DUMP" | tr -d ' ') lines)"
+        ok "first 5 lines:"
+        head -5 "$LOCAL_DUMP" | sed 's/^/    /'
+    else
+        warn "dumpsys output empty"
+    fi
+else
+    warn "dumpsys sensorservice unavailable — frameworkless build?"
+fi
+
 step "Refresh device profile [sensors] block"
 ROM_TAG=$(echo "$ROM" | sed -E 's/[^a-zA-Z0-9._-]/-/g' | head -c 32)
 PROFILE="$PROFILES_DIR/$CODENAME-$ROM_TAG.toml"
