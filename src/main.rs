@@ -12,7 +12,7 @@ use peko_config::PekoConfig;
 use peko_core::{ToolRegistry, MemoryStore, SkillStore, SystemPrompt, Scheduler, ScheduledTask, TelegramSender, UserModel, McpServerConfig, register_mcp_tools, TaskQueue, DualBrain, Reflector, CallStore, spawn_call_pipeline};
 use peko_core::runtime::{build_dual_brain, build_provider_helper};
 use peko_llm::{EmbeddedProvider, LlmEngineConfig};
-use peko_hal::{FramebufferDevice, InputDevice, SerialModem, UInputDevice};
+use peko_hal::{InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
     CallTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool, ScreenshotTool,
     DelegateTool, ShellTool, SkillsTool, SmsTool, TextInputTool, TouchTool, UiAutomationTool,
@@ -21,24 +21,11 @@ use peko_tools_android::{
 fn register_tools(config: &PekoConfig) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
 
-    // Screenshot tool — direct framebuffer mmap, fallback to screencap
+    // Screenshot tool — backend selection (DRM/fbdev/screencap) is now
+    // resolved per-call inside the tool. Hardware overrides in config
+    // still apply via the `screenshot { mode = "fb" }` arg the LLM passes.
     if config.tools.screenshot {
-        match config.hardware.as_ref().and_then(|h| h.framebuffer_device.as_deref()) {
-            Some(path) => match FramebufferDevice::open(std::path::Path::new(path)) {
-                Ok(fb) => registry.register(ScreenshotTool::new(fb)),
-                Err(e) => {
-                    warn!(error = %e, "framebuffer open failed, using screencap fallback");
-                    registry.register(ScreenshotTool::unavailable());
-                }
-            },
-            None => match FramebufferDevice::open_default() {
-                Ok(fb) => registry.register(ScreenshotTool::new(fb)),
-                Err(e) => {
-                    warn!(error = %e, "default framebuffer not found, using screencap fallback");
-                    registry.register(ScreenshotTool::unavailable());
-                }
-            },
-        }
+        registry.register(ScreenshotTool::new());
     }
 
     // Touch tool — direct /dev/input evdev write

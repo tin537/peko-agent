@@ -1,11 +1,9 @@
 use peko_core::tool::{Tool, ToolResult};
-use peko_hal::FramebufferDevice;
+use peko_hal::{auto_capture, probe_drm_default, DisplayCapture, FbdevCapture, ScreencapCapture};
 use serde_json::json;
 use std::future::Future;
 use std::io::Cursor;
 use std::pin::Pin;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use crate::screen_state::ensure_awake;
 
@@ -13,38 +11,23 @@ use crate::screen_state::ensure_awake;
 /// 720p is enough for UI element recognition while keeping base64 under ~100KB.
 const MAX_DIMENSION: u32 = 720;
 
-pub struct ScreenshotTool {
-    device: Option<Arc<Mutex<FramebufferDevice>>>,
-}
+pub struct ScreenshotTool;
 
 impl ScreenshotTool {
-    pub fn new(device: FramebufferDevice) -> Self {
-        Self { device: Some(Arc::new(Mutex::new(device))) }
-    }
+    pub fn new() -> Self { Self }
 
-    pub fn unavailable() -> Self {
-        Self { device: None }
-    }
+    /// Backwards-compat: callers used to pass a FramebufferDevice. The
+    /// actual device is now resolved per-call from `auto_capture`, so
+    /// this constructor is a no-op shim. Kept so the existing
+    /// `ScreenshotTool::new(fb)` call sites in main.rs don't need to
+    /// change before Phase 2.
+    pub fn with_framebuffer(_device: peko_hal::FramebufferDevice) -> Self { Self }
 
-    fn capture_via_screencap() -> anyhow::Result<ToolResult> {
-        let output = std::process::Command::new("screencap")
-            .arg("-p")
-            .output()?;
+    pub fn unavailable() -> Self { Self }
+}
 
-        if !output.status.success() {
-            return Ok(ToolResult::error("screencap command failed"));
-        }
-
-        // Decode PNG, resize, re-encode as JPEG
-        let img = image::load_from_memory(&output.stdout)?;
-        let (b64, w, h, size_kb) = resize_and_encode(&img);
-
-        Ok(ToolResult::with_image(
-            format!("Screenshot captured ({}x{}, {}KB). The image is attached.", w, h, size_kb),
-            b64,
-            "image/jpeg".to_string(),
-        ))
-    }
+impl Default for ScreenshotTool {
+    fn default() -> Self { Self::new() }
 }
 
 /// Resize image to fit within MAX_DIMENSION and encode as JPEG quality 80.
@@ -53,7 +36,6 @@ fn resize_and_encode(img: &image::DynamicImage) -> (String, u32, u32, usize) {
     let (orig_w, orig_h) = (img.width(), img.height());
 
     let resized = if orig_w > MAX_DIMENSION || orig_h > MAX_DIMENSION {
-        // Preserve aspect ratio: scale so the largest dimension fits MAX_DIMENSION
         let scale = MAX_DIMENSION as f32 / orig_w.max(orig_h) as f32;
         let new_w = (orig_w as f32 * scale) as u32;
         let new_h = (orig_h as f32 * scale) as u32;
@@ -64,11 +46,9 @@ fn resize_and_encode(img: &image::DynamicImage) -> (String, u32, u32, usize) {
 
     let (w, h) = (resized.width(), resized.height());
 
-    // Encode as JPEG (much smaller than PNG, good enough for LLM vision)
     let mut jpeg_bytes = Vec::new();
     let mut cursor = Cursor::new(&mut jpeg_bytes);
 
-    // Try JPEG first, fall back to PNG if JPEG encoder not available
     let _format = if resized.write_to(&mut cursor, image::ImageFormat::Jpeg).is_ok() {
         "image/jpeg"
     } else {
@@ -87,39 +67,166 @@ fn resize_and_encode(img: &image::DynamicImage) -> (String, u32, u32, usize) {
     (b64, w, h, size_kb)
 }
 
+fn capture_via_backend(mut backend: Box<dyn DisplayCapture>) -> anyhow::Result<ToolResult> {
+    let name = backend.backend_name();
+    let buf = backend
+        .capture()
+        .map_err(|e| anyhow::anyhow!("capture via {name}: {e}"))?;
+    let (w, h) = (buf.width, buf.height);
+    if buf.data.len() < (w as usize) * (h as usize) * 4 {
+        anyhow::bail!("backend {name} returned undersized buffer");
+    }
+    let img = image::RgbaImage::from_raw(w, h, buf.data)
+        .ok_or_else(|| anyhow::anyhow!("backend {name} returned mis-sized buffer"))?;
+    let dyn_img = image::DynamicImage::ImageRgba8(img);
+    let (b64, ow, oh, size_kb) = resize_and_encode(&dyn_img);
+    Ok(ToolResult::with_image(
+        format!(
+            "Screenshot via {name} ({ow}x{oh}, {size_kb}KB). The image is attached."
+        ),
+        b64,
+        "image/jpeg".to_string(),
+    ))
+}
+
+fn capture_with_mode(mode: &str) -> anyhow::Result<ToolResult> {
+    match mode {
+        "info" => Ok(ToolResult::success(diagnostics_text())),
+        "fb" | "fbdev" => {
+            let cap = FbdevCapture::open_default()
+                .map_err(|e| anyhow::anyhow!("fbdev unavailable: {e}"))?;
+            capture_via_backend(Box::new(cap))
+        }
+        "screencap" => {
+            let cap = ScreencapCapture::new()
+                .map_err(|e| anyhow::anyhow!("screencap unavailable: {e}"))?;
+            capture_via_backend(Box::new(cap))
+        }
+        "drm" => {
+            // DRM pixel capture lands in Phase 8 (Lane A, frameworkless).
+            // Until then we report what DRM tells us so the agent can
+            // see the device exists, even if we can't read its pixels yet.
+            let info = probe_drm_default()
+                .map_err(|e| anyhow::anyhow!("DRM probe failed: {e}"))?;
+            match info {
+                Some(d) => Ok(ToolResult::error(format!(
+                    "DRM capture not yet implemented (Phase 8). Device {} runs driver '{}' \
+                     with {} connector(s). Use mode='auto' or 'fb' for now.",
+                    d.device_path,
+                    d.driver,
+                    d.connectors.len()
+                ))),
+                None => Ok(ToolResult::error(
+                    "no /dev/dri device found; DRM capture impossible".to_string(),
+                )),
+            }
+        }
+        "auto" | "" => {
+            let cap = auto_capture(Some("auto"))
+                .map_err(|e| anyhow::anyhow!("no display backend available: {e}"))?;
+            capture_via_backend(cap)
+        }
+        other => Ok(ToolResult::error(format!(
+            "unknown screenshot mode '{}'. valid: auto, fb, screencap, drm, info",
+            other
+        ))),
+    }
+}
+
+/// One-shot diagnostics dump for the agent to understand the display
+/// stack. Designed to be cheap and never fail — every probe degrades to
+/// "unavailable: <reason>" rather than erroring out the whole call.
+fn diagnostics_text() -> String {
+    let mut out = String::from("Display capture diagnostics:\n");
+
+    out.push_str(&format!("  fbdev: "));
+    match FbdevCapture::open_default() {
+        Ok(c) => {
+            let (w, h) = c.dimensions();
+            out.push_str(&format!("OK ({}x{}, rotation={:?})\n", w, h, c.rotation()));
+        }
+        Err(e) => out.push_str(&format!("unavailable ({e})\n")),
+    }
+
+    out.push_str(&format!("  screencap: "));
+    match ScreencapCapture::new() {
+        Ok(_) => out.push_str("OK (binary present)\n"),
+        Err(e) => out.push_str(&format!("unavailable ({e})\n")),
+    }
+
+    out.push_str(&format!("  DRM: "));
+    match probe_drm_default() {
+        Ok(Some(info)) => {
+            out.push_str(&format!(
+                "OK (device={}, driver={}, kernel={}, connectors={})\n",
+                info.device_path,
+                info.driver,
+                info.kernel_version,
+                info.connectors.len()
+            ));
+            for c in &info.connectors {
+                let modes = c
+                    .modes
+                    .iter()
+                    .take(2)
+                    .map(|m| format!("{}x{}@{}", m.width, m.height, m.refresh_hz))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push_str(&format!(
+                    "    connector#{} {} {} {}\n",
+                    c.id,
+                    c.kind,
+                    if c.connected { "CONNECTED" } else { "disconnected" },
+                    modes
+                ));
+            }
+        }
+        Ok(None) => out.push_str("not present (no /dev/dri/card*)\n"),
+        Err(e) => out.push_str(&format!("probe failed ({e})\n")),
+    }
+
+    out
+}
+
 impl Tool for ScreenshotTool {
     fn name(&self) -> &str { "screenshot" }
 
     fn description(&self) -> &str {
-        "Capture the current screen. Returns a resized JPEG image (720p max) for efficient vision analysis."
+        "Capture the current screen. Returns a resized JPEG (720p max). \
+         mode='auto' (default) tries the best backend; 'fb' for direct framebuffer, \
+         'screencap' for SurfaceFlinger, 'drm' for DRM (Phase 8), 'info' for diagnostics."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["auto", "fb", "screencap", "drm", "info"],
+                    "description": "Backend selection. Default 'auto'."
+                }
+            },
             "required": []
         })
     }
 
     fn execute(
         &self,
-        _args: serde_json::Value,
+        args: serde_json::Value,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolResult>> + Send + '_>> {
         Box::pin(async move {
-            // Wake the display + dismiss the keyguard before capturing,
-            // otherwise a dozing phone produces a blank image.
-            ensure_awake();
-
-            // Prefer `screencap` (goes through SurfaceFlinger, returns the
-            // composited display at native resolution) over direct
-            // framebuffer reads. On sdm845 and similar, /dev/graphics/fb0
-            // is a stale low-res AOD buffer and returns black, so the old
-            // "fb first, screencap fallback" order silently produced a
-            // useless image. The _device field is kept so devices that
-            // really do need fb access (headless, no SurfaceFlinger) can
-            // be special-cased later.
-            Self::capture_via_screencap()
+            let mode = args["mode"].as_str().unwrap_or("auto").to_string();
+            // Diagnostics never need wake — they're synthetic.
+            if mode != "info" {
+                ensure_awake();
+            }
+            // Run the blocking capture on a dedicated thread so we don't
+            // park the tokio reactor. Capture itself takes 80–300ms on
+            // sdm845 and blocks in mmap / fork+exec.
+            tokio::task::spawn_blocking(move || capture_with_mode(&mode))
+                .await
+                .map_err(|e| anyhow::anyhow!("capture task panicked: {e}"))?
         })
     }
 }

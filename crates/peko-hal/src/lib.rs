@@ -4,6 +4,8 @@ pub mod modem;
 pub mod uinput;
 pub mod accessibility;
 pub mod package_manager;
+pub mod display;
+pub mod display_info;
 
 /// Portable ioctl request type — `c_ulong` on macOS, `c_int` on Linux/Android.
 #[cfg(target_os = "macos")]
@@ -24,12 +26,17 @@ pub(crate) unsafe fn raw_ioctl_none(fd: i32, request: u64) -> i32 {
     libc::ioctl(fd, request as IoctlRequest)
 }
 
-pub use input::InputDevice;
+pub use input::{InputDevice, RawInputEvent};
 pub use framebuffer::FramebufferDevice;
 pub use modem::SerialModem;
 pub use uinput::UInputDevice;
 pub use accessibility::{SurfaceFlingerCapture, UiHierarchy, UiNode, Bounds};
 pub use package_manager::PackageManager;
+pub use display::{
+    auto_capture, CaptureError, DisplayCapture, FbdevCapture, Rotation, ScreencapCapture,
+};
+pub use display_info::{probe as probe_drm, probe_default as probe_drm_default, DrmConnector,
+    DrmInfo, DrmInfoError, DrmMode};
 
 #[derive(Debug, Clone)]
 pub struct RgbaBuffer {

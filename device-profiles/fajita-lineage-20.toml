@@ -1,0 +1,45 @@
+# OnePlus 6T (codename: fajita) running LineageOS 20 with Magisk.
+#
+# Filename convention: <ro.product.device>-<ROM tag>.toml
+# This file is loaded automatically when peko-agent finds it next to the
+# binary AND `getprop ro.product.device` matches the prefix "fajita".
+#
+# Values here are conservative — they only override auto-detection when
+# the auto-detected value is known to be wrong on this specific hardware.
+# Anything left unset falls through to runtime detection (EVIOCGABS,
+# `wm size`, sysfs probes) so this file documents *known overrides*, not
+# *every value*.
+#
+# To validate / refresh on your own device:
+#   adb shell getevent -lp /dev/input/event2 | grep -E 'POSITION|PRESSURE|TOUCH_MAJOR'
+#   adb shell wm size
+#   adb shell ls /data/vendor/wifi/wpa/sockets/
+
+device = "OnePlus 6T (fajita)"
+rom = "lineage-20.0"
+
+[display]
+# sdm845 + LineageOS 20 reports the right size via `wm size`, so we
+# don't override unless `make device-test PHASE=1` finds a mismatch.
+# width/height left unset.
+#
+# Rotation: LineageOS launchers boot in portrait; framebuffer-direct
+# reads on this device come out in the panel's native landscape, so
+# we rotate 90° CCW for portrait output. The on-device test will set
+# this empirically and update the file.
+# rotation_deg = 270
+prefer = "screencap"
+
+[touch]
+# Synaptics RMI4 on fajita reports ABS_MT_POSITION_{X,Y} as 0..1080 /
+# 0..2340 (matches display). EVIOCGABS gets this right; no override
+# needed. Listed here as the placeholder our device-test fills in.
+# abs_x_max = 1080
+# abs_y_max = 2340
+# pressure_default = 50
+# touch_major_default = 6
+# device_path = "/dev/input/event2"
+
+[wifi]
+# LineageOS 20 moved wpa_supplicant to the vendor partition.
+ctrl_socket_path = "/data/vendor/wifi/wpa/sockets/wpa_ctrl_global"

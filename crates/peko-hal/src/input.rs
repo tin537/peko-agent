@@ -52,6 +52,17 @@ const EVIOCGABS_BASE: u64 = 0x8018_4540;
 // EVIOCGBIT(EV_KEY, 96) = _IOC(READ, 'E', 0x20 + 0x01, 96)
 const EVIOCGBIT_EV_KEY_96: u64 = 0x8060_4521;
 
+/// Decoded form of a kernel `struct input_event` for callers that want
+/// to observe input rather than inject it. Timestamp is omitted because
+/// the kernel zeroes it on read for non-realtime devices and we never
+/// actually need wall-clock timing — the agent loop runs at human speeds.
+#[derive(Debug, Clone, Copy)]
+pub struct RawInputEvent {
+    pub type_: u16,
+    pub code: u16,
+    pub value: i32,
+}
+
 pub struct InputDevice {
     file: File,
     path: PathBuf,
@@ -398,6 +409,51 @@ impl InputDevice {
     /// Resolve a symbolic key name to the linux evdev keycode(s) we'll
     /// try. Some Android devices route HOME as KEY_HOMEPAGE (172) instead
     /// of KEY_HOME (102); try both so callers don't need to care.
+    /// Wait up to `timeout_ms` for an input event to arrive on this
+    /// device. Returns `Ok(Some(event))` when one arrived, `Ok(None)`
+    /// on timeout, `Err` on a real read failure. Used for *observation*
+    /// — letting the agent see physical taps, key presses, accelerometer
+    /// thresholds, etc., not just inject them.
+    ///
+    /// Implementation: `poll(2)` with `POLLIN`, then a single `read(2)`
+    /// of one event. The kernel will block-buffer events; callers that
+    /// need full event streams should call this in a loop with a small
+    /// timeout.
+    pub fn poll_for_event(&mut self, timeout_ms: i32) -> anyhow::Result<Option<RawInputEvent>> {
+        use std::io::Read;
+        let fd = self.file.as_raw_fd();
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(None);
+            }
+            anyhow::bail!("poll failed: {err}");
+        }
+        if ret == 0 {
+            return Ok(None);
+        }
+        if pfd.revents & libc::POLLIN == 0 {
+            return Ok(None);
+        }
+        let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
+        let n = self.file.read(&mut buf)?;
+        if n < buf.len() {
+            anyhow::bail!("short read from input device: {} of {} bytes", n, buf.len());
+        }
+        let raw: InputEvent = unsafe { std::ptr::read(buf.as_ptr() as *const InputEvent) };
+        Ok(Some(RawInputEvent {
+            type_: raw.type_,
+            code: raw.code,
+            value: raw.value,
+        }))
+    }
+
     pub fn key_codes_for_name(name: &str) -> &'static [u16] {
         match name.to_uppercase().as_str() {
             "HOME" => &[KEY_HOMEPAGE, KEY_HOME],
