@@ -1,0 +1,49 @@
+# Curated reference profile for the OnePlus 6T (LineageOS 20).
+#
+# Filename convention: <ro.product.device>-<tag>.toml. The agent's
+# config loader scans `device-profiles/*` next to the binary and
+# matches against the prefix returned by `getprop ro.product.device`.
+# On this device that's literally "OnePlus6T" (NOT the upstream
+# LineageOS device-tree codename "fajita"), so profiles must be named
+# accordingly.
+#
+# This file is hand-curated and committed. The auto-generated
+# `OnePlus6T-lineage_fajita-userdebug.toml` next to it is rewritten by
+# `make device-test PHASE=1` on every run; treat this file as the
+# canonical reference, the auto-generated one as the live snapshot.
+#
+# To validate / refresh:
+#   adb shell getevent -lp /dev/input/event2 | grep -E 'POSITION|PRESSURE|TOUCH_MAJOR'
+#   adb shell wm size
+#   adb shell ls /data/vendor/wifi/wpa/sockets/
+
+device = "OnePlus6T"
+rom = "lineage-20.0"
+
+[display]
+width = 1080
+height = 2340
+# Display rotation in degrees. fb0 reports 0 on this device but is a
+# 640x400 phantom AOD plane (see docs/architecture/lane-a-sdm845-finding.md);
+# the live scanout is owned by DRM and runs at 1080x2340@60.
+rotation_deg = 0
+# Backend: "auto" tries screencap → fbdev. On sdm845 you should always
+# end up on screencap because fb0 is the phantom plane. Lane A operators
+# pin "drm" once Phase 9's --paint path is wired through the agent loop.
+prefer = "auto"
+
+[touch]
+# Synaptics RMI4 (s3320) on /dev/input/event2. Calibrated via
+# EVIOCGABS — kernel reports 0..1079 / 0..2339 for X/Y, exactly matching
+# the panel resolution (1:1, no scaling needed).
+abs_x_max = 1079
+abs_y_max = 2339
+# touch_major default = max/16 ≈ 16. Below that some firmwares treat
+# the contact as noise; well above that gets palm-rejected.
+touch_major_default = 16
+device_path = "/dev/input/event2"
+
+[wifi]
+# LineageOS 20 vendor-partition path. Magisk-on-stock images use
+# /data/misc/wifi/sockets/ — the agent's wifi backend probes both.
+ctrl_socket_path = "/data/vendor/wifi/wpa/sockets/wlan0"
