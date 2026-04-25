@@ -18,6 +18,7 @@ pub mod delegate_tool;
 pub mod sensors_tool;
 pub mod wifi_tool;
 pub mod audio_tool;
+pub mod draw_tool;
 
 pub use screenshot::ScreenshotTool;
 pub use touch::TouchTool;
@@ -38,6 +39,7 @@ pub use unlock_device::UnlockDeviceTool;
 pub use sensors_tool::SensorsTool;
 pub use wifi_tool::WifiTool;
 pub use audio_tool::AudioTool;
+pub use draw_tool::DrawTool;
 
 #[cfg(test)]
 mod tests;

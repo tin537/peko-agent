@@ -1,0 +1,8 @@
+[package]
+name = "peko-renderer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+peko-hal = { path = "../peko-hal" }
+thiserror.workspace = true

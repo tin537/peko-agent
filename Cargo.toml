@@ -7,6 +7,7 @@ members = [
     "crates/peko-hal",
     "crates/peko-tools-android",
     "crates/peko-llm",
+    "crates/peko-renderer",
     ".",
 ]
 
@@ -35,6 +36,7 @@ peko-core = { path = "crates/peko-core" }
 peko-hal = { path = "crates/peko-hal" }
 peko-tools-android = { path = "crates/peko-tools-android" }
 peko-llm = { path = "crates/peko-llm" }
+peko-renderer = { path = "crates/peko-renderer" }
 
 [package]
 name = "peko-agent"

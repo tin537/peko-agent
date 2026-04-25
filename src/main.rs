@@ -14,7 +14,7 @@ use peko_core::runtime::{build_dual_brain, build_provider_helper};
 use peko_llm::{EmbeddedProvider, LlmEngineConfig};
 use peko_hal::{InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
-    AudioTool, CallTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool,
+    AudioTool, CallTool, DrawTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool,
     ScreenshotTool, DelegateTool, SensorsTool, ShellTool, SkillsTool, SmsTool, TextInputTool,
     TouchTool, UiAutomationTool, WifiTool,
 };
@@ -186,6 +186,11 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
     // Audio — ALSA topology + tinymix + media volume. PCM record/play
     // are deferred to Phase 5 (overlay APK shim).
     registry.register(AudioTool::new());
+
+    // Draw — pure-Rust 2D renderer for Lane A status overlays.
+    // Returns a PNG; in Lane A this can be blitted to /dev/graphics/fb0
+    // by a future blit step.
+    registry.register(DrawTool::new());
 
     registry
 }

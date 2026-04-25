@@ -49,7 +49,7 @@ Status legend:
 | Wi-Fi control (status/scan/saved/connect/disconnect/enable/disable) | ✅ | ✅ | 3 | `cmd wifi` (Lane B) → wpa_supplicant ctrl socket (Lane A). Both backends, `WifiBackend` trait |
 | Audio topology + mixer + media volume | ✅ | 🟡 | 4 | `/proc/asound`, `tinymix`, `cmd audio get-volume`. Lane A only sees ALSA + tinymix; media volume needs framework |
 | PCM record / playback | ⏳ | ⏳ | 5 | Overlay APK shim (AudioRecord/AudioTrack) — cleaner than re-implementing tinyalsa |
-| Self-rendered overlay UI | ⏳ | ⏳ | 5 | Text+rect renderer to fbdev/DRM |
+| Self-rendered overlay UI (`draw` tool) | ✅ | ✅ | 5 | `peko-renderer` crate: rect/line/text via embedded 5x7 font, returns PNG. Lane A blits to fbdev |
 | Camera | ❌ | ❌ | — | Camera HAL is binder/vendor-blob only |
 | GPS | ❌ | ❌ | — | gnss HAL binder-only |
 
