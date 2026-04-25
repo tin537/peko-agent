@@ -11,6 +11,7 @@ pub mod sensors_dumpsys;
 pub mod battery;
 pub mod light_prox;
 pub mod wifi;
+pub mod audio;
 
 /// Portable ioctl request type — `c_ulong` on macOS, `c_int` on Linux/Android.
 #[cfg(target_os = "macos")]
@@ -54,6 +55,11 @@ pub use light_prox::{read as read_light_prox, LightProxError,
 pub use wifi::{
     auto_backend as wifi_auto_backend, CmdWifiBackend, SavedNetwork, ScanResult, WifiBackend,
     WifiError, WifiHints, WifiStatus, WpaSupplicantBackend,
+};
+pub use audio::{
+    media_volume_get, mixer_get, mixer_list, mixer_set, tinymix_available,
+    topology as alsa_topology, AlsaCard, AlsaPcmDevice, AlsaTopology, AudioError, MixerControl,
+    PcmDirection,
 };
 
 #[derive(Debug, Clone)]

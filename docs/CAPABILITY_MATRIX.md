@@ -47,7 +47,8 @@ Status legend:
 | Light + proximity | ✅ | 🟡 | 2 | input subsystem → `/sys/class/sensors/*` → dumpsys. Same Lane A caveat |
 | Battery (capacity/status/health/V/I/T) | ✅ | ✅ | 2 | `/sys/class/power_supply/battery/*` — fully kernel-direct |
 | Wi-Fi control (status/scan/saved/connect/disconnect/enable/disable) | ✅ | ✅ | 3 | `cmd wifi` (Lane B) → wpa_supplicant ctrl socket (Lane A). Both backends, `WifiBackend` trait |
-| Audio capture/playback | ⏳ | ⏳ | 4 | tinyalsa over `/dev/snd/pcmC*` |
+| Audio topology + mixer + media volume | ✅ | 🟡 | 4 | `/proc/asound`, `tinymix`, `cmd audio get-volume`. Lane A only sees ALSA + tinymix; media volume needs framework |
+| PCM record / playback | ⏳ | ⏳ | 5 | Overlay APK shim (AudioRecord/AudioTrack) — cleaner than re-implementing tinyalsa |
 | Self-rendered overlay UI | ⏳ | ⏳ | 5 | Text+rect renderer to fbdev/DRM |
 | Camera | ❌ | ❌ | — | Camera HAL is binder/vendor-blob only |
 | GPS | ❌ | ❌ | — | gnss HAL binder-only |

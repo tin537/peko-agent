@@ -14,9 +14,9 @@ use peko_core::runtime::{build_dual_brain, build_provider_helper};
 use peko_llm::{EmbeddedProvider, LlmEngineConfig};
 use peko_hal::{InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
-    CallTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool, ScreenshotTool,
-    DelegateTool, SensorsTool, ShellTool, SkillsTool, SmsTool, TextInputTool, TouchTool,
-    UiAutomationTool, WifiTool,
+    AudioTool, CallTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool,
+    ScreenshotTool, DelegateTool, SensorsTool, ShellTool, SkillsTool, SmsTool, TextInputTool,
+    TouchTool, UiAutomationTool, WifiTool,
 };
 
 fn register_tools(config: &PekoConfig) -> ToolRegistry {
@@ -182,6 +182,10 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
     // (connect/disconnect/enable/disable) gate at the agent level via
     // user approval rather than a config flag.
     registry.register(WifiTool::new());
+
+    // Audio — ALSA topology + tinymix + media volume. PCM record/play
+    // are deferred to Phase 5 (overlay APK shim).
+    registry.register(AudioTool::new());
 
     registry
 }
