@@ -1,7 +1,7 @@
 id=peko_agent
 name=Peko Agent
-version=v0.2.0
-versionCode=2
+version=v0.4.0
+versionCode=4
 author=Peko Agent project
-description=Autonomous AI agent-as-OS for Android. Installs peko-agent + peko-llm-daemon into /system/bin with boot-time services, multi-provider cloud chain (Anthropic/OpenRouter/OpenAI/Groq/...), full autonomy stack, and optional floating overlay app. Web UI on :8080. Tested on OnePlus 6T (fajita) / arm64.
+description=Autonomous AI agent-as-OS for Android. Installs peko-agent + peko-llm-daemon (+ peko-blit-test, peko-drm-test for Lane A bring-up) into /system/bin with boot-time services. v0.4.0 ships display/sensors/wifi/audio/renderer HAL + DRM master + dumb buffer (Phase 1-9). Multi-provider cloud chain, full autonomy stack, optional floating overlay app. Web UI on :8080. Verified on OnePlus 6T (fajita) / arm64.
 updateJson=
