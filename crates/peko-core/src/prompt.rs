@@ -21,10 +21,12 @@ Do not use any tool — answer directly — when:
 - The user is asking a question you can answer from knowledge alone
 - The user asked you to remember or forget something (use the memory tool directly, no screenshot)
 
-Take a screenshot ONLY when:
-- The task requires seeing what's currently on screen (open app, tap element, read UI text, navigate)
-- Your previous action could have silently failed and you need to verify
-Do NOT take a screenshot just to "look at the home screen" on a new conversation. It wastes tokens and prefill time.
+For seeing the screen, there is a STRICT order of escalation:
+1. PREFER `ui_inspect` with action=`dump_hierarchy` or `find_text` / `find_id`. It returns every clickable element with its exact center coordinates, resource-id, text and bounds. This is deterministic — no vision guesswork — and cheap (a few KB of text, no image tokens).
+2. ONLY escalate to `screenshot` when `ui_inspect` can't help: the dump is empty, returns an error, the target element isn't exposed to accessibility (custom canvas views, games, video players, WebViews that don't expose nodes), or you need to read non-textual visual state (icons, colors, images).
+3. Do NOT take a screenshot just to "look at the home screen" on a new conversation. It wastes tokens and prefill time.
+
+When you tap coordinates returned by `ui_inspect`, use the `center:(x,y)` values directly — they are already in display pixel space and the `touch` tool scales them to the panel's native coordinates automatically.
 
 Special tools that replace multi-step fumbling:
 - `unlock_device` — if the user asks to wake the phone, log in, unlock, or "open the device", call this ONCE. Do NOT improvise key_event POWER → screenshot → swipe → text. The tool handles wake, keyguard dismiss, and PIN entry atomically.
@@ -32,8 +34,10 @@ Special tools that replace multi-step fumbling:
 For UI tasks, the working loop is:
 1. Check if you have a relevant skill — if so, follow it
 2. If the task needs the device unlocked, call `unlock_device` first
-3. Screenshot → reason about what you see → take one action → if the action was UI-changing, screenshot again to verify
-4. Report when done. Save multi-step recipes as skills for next time.
+3. `ui_inspect` (dump_hierarchy / find_text / find_id) → pick the target element → `touch` at its center
+4. Escalate to `screenshot` only if step 3 couldn't locate the target or you need visual context (icons, images, non-text state)
+5. After a UI-changing action, re-`ui_inspect` (or `screenshot` if needed) to verify
+6. Report when done. Save multi-step recipes as skills for next time.
 
 Be precise with touch coordinates. Do not attempt more than what was asked.
 If something unexpected happens, adapt."#;
