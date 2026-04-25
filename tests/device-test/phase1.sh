@@ -1,24 +1,17 @@
 #!/usr/bin/env bash
 # Phase 1 on-device test: display capture + input observation.
 #
-# Validates:
-#   - fbdev presence + non-zero capture
-#   - screencap presence + valid PNG output
-#   - DRM device presence (enumeration only; capture is Phase 8)
-#   - touchscreen evdev advertises ABS_MT_POSITION_{X,Y}
-#   - display dimensions reported by `wm size` are usable
-#
-# Side effect: refreshes `device-profiles/<codename>-*.toml` with the
-# real EVIOCGABS values for the connected device, so the maintainer
-# never has to paste them in by hand.
-#
-# Requires: adb in PATH, exactly one device authorised, root via Magisk.
+# Pushes _probe.sh to the device, runs it under root, parses the
+# key=value report, and refreshes the device profile from the measured
+# values. All on-device work is `timeout`-bounded so a stuck driver
+# can never hang the host.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ADB=${ADB:-adb}
-DEVICE_TMP=/data/local/tmp/peko-phase1
+PROBE_SRC="$REPO_ROOT/tests/device-test/_probe.sh"
+PROBE_DST=/data/local/tmp/peko_probe.sh
 PROFILES_DIR="$REPO_ROOT/device-profiles"
 
 step() { printf "\n\033[1;34m▶ %s\033[0m\n" "$*"; }
@@ -33,37 +26,60 @@ FAIL=0
 # ------------------------------------------------------------------------------
 
 step "Preflight"
-if ! command -v "$ADB" >/dev/null; then
-    echo "adb not found in PATH (override with ADB=...)"
-    exit 1
-fi
-if ! "$ADB" get-state >/dev/null 2>&1; then
-    echo "no adb device connected / authorised"
-    exit 1
-fi
+command -v "$ADB" >/dev/null || { echo "adb not in PATH (override with ADB=...)"; exit 1; }
+"$ADB" get-state >/dev/null 2>&1 || { echo "no adb device connected/authorised"; exit 1; }
 SERIAL=$("$ADB" get-serialno | tr -d '\r')
 ok "device $SERIAL connected"
 
-CODENAME=$("$ADB" shell getprop ro.product.device | tr -d '\r')
-ROM=$("$ADB" shell getprop ro.build.flavor | tr -d '\r')
-ok "codename=$CODENAME rom=$ROM"
+# ------------------------------------------------------------------------------
+# Push + run probe
+# ------------------------------------------------------------------------------
+
+step "Push probe script"
+"$ADB" push "$PROBE_SRC" "$PROBE_DST" >/dev/null
+"$ADB" shell "chmod +x $PROBE_DST" >/dev/null
+ok "probe at $PROBE_DST"
+
+step "Run probe (root, 30s wall-clock cap)"
+# Try `adb root` once, then fall back to `su -c`. We pipe the output
+# back and parse below — never inspect or react to the trailing
+# stream from any single command.
+REPORT=$(
+    "$ADB" shell "su -c $PROBE_DST 2>/dev/null || $PROBE_DST" 2>/dev/null \
+        | tr -d '\r' \
+        || true
+)
+if ! echo "$REPORT" | grep -q '^done=1$'; then
+    fail "probe did not complete (no done=1 marker)"
+    echo "$REPORT" | sed 's/^/    /'
+    exit 1
+fi
+ok "probe completed"
 
 # ------------------------------------------------------------------------------
-# /dev/graphics/fb0 presence
+# Parse report
+# ------------------------------------------------------------------------------
+
+get() { echo "$REPORT" | awk -F= -v k="$1" '$1==k{print substr($0, length($1)+2); exit}'; }
+
+CODENAME=$(get codename)
+ROM=$(get rom)
+ANDROID_VER=$(get android_ver)
+
+step "Identity"
+ok "codename=$CODENAME rom=$ROM android=$ANDROID_VER"
+
+# ------------------------------------------------------------------------------
+# Framebuffer
 # ------------------------------------------------------------------------------
 
 step "Framebuffer (fbdev)"
-if "$ADB" shell 'test -e /dev/graphics/fb0' 2>/dev/null; then
+if [[ "$(get fbdev_present)" == "1" ]]; then
     ok "/dev/graphics/fb0 exists"
-    FB_INFO=$("$ADB" shell 'su -c "cat /sys/class/graphics/fb0/virtual_size 2>/dev/null"' 2>/dev/null | tr -d '\r' || echo "")
-    if [[ -n "$FB_INFO" ]]; then
-        ok "virtual_size=$FB_INFO"
-    else
-        warn "virtual_size unreadable (vendor kernel without sysfs export — non-fatal)"
-    fi
-    ROT=$("$ADB" shell 'su -c "cat /sys/class/graphics/fb0/rotate 2>/dev/null || cat /sys/class/graphics/fb0/rotation 2>/dev/null"' 2>/dev/null | tr -d '\r' || echo "")
-    if [[ -n "$ROT" ]]; then
-        ok "rotation=$ROT (sysfs)"
+    [[ -n "$(get fbdev_virtual_size)" ]] && ok "virtual_size=$(get fbdev_virtual_size)"
+    rot=$(get fbdev_rotation)
+    if [[ -n "$rot" ]]; then
+        ok "rotation=$rot (sysfs)"
     else
         warn "rotation not exposed via sysfs (will default to R0)"
     fi
@@ -72,80 +88,68 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# screencap availability
+# screencap
 # ------------------------------------------------------------------------------
 
 step "screencap"
-if "$ADB" shell 'which screencap' >/dev/null 2>&1; then
+if [[ "$(get screencap_present)" == "1" ]]; then
     ok "screencap binary present"
-    "$ADB" shell "mkdir -p $DEVICE_TMP && screencap -p $DEVICE_TMP/cap.png" >/dev/null 2>&1
-    SIZE=$("$ADB" shell "wc -c < $DEVICE_TMP/cap.png" | tr -d '\r')
-    if [[ -n "$SIZE" && "$SIZE" -gt 1024 ]]; then
-        ok "screencap produced ${SIZE} bytes"
+    sz=$(get screencap_size_bytes)
+    if [[ -n "$sz" && "$sz" -gt 1024 ]]; then
+        ok "screencap produced ${sz} bytes"
     else
-        fail "screencap output suspiciously small (${SIZE:-0} bytes)"
+        fail "screencap output suspiciously small (${sz:-0} bytes)"
     fi
 else
     fail "screencap binary missing (frameworkless device? — run Phase 8 tests instead)"
 fi
 
 # ------------------------------------------------------------------------------
-# DRM enumeration
+# DRM
 # ------------------------------------------------------------------------------
 
 step "DRM"
-if "$ADB" shell 'test -e /dev/dri/card0' 2>/dev/null; then
-    ok "/dev/dri/card0 present"
+if [[ "$(get drm_present)" == "1" ]]; then
+    ok "$(get drm_path) present"
 else
-    warn "no /dev/dri/card0 (DRM not in use; OK for fbdev-only kernels)"
+    warn "no /dev/dri/card* (DRM not in use; OK for fbdev-only kernels)"
 fi
 
 # ------------------------------------------------------------------------------
-# Touchscreen capabilities + profile refresh
+# Touchscreen evdev
 # ------------------------------------------------------------------------------
 
 step "Touchscreen evdev"
-TOUCH_NODE=$("$ADB" shell 'su -c "for n in /dev/input/event*; do
-    name=\$(getevent -l \$n 2>/dev/null | head -1 | sed -E \"s/.*\\\"(.+)\\\".*/\\1/\");
-    if echo \"\$name\" | grep -iqE \"touch|synaptics|fts|goodix\"; then
-        echo \$n;
-        break;
-    fi
-done"' 2>/dev/null | tr -d '\r')
+TOUCH_NODE=$(get touch_node)
+TOUCH_NAME=$(get touch_name)
+ABS_X_MAX=$(get touch_abs_x_max)
+ABS_Y_MAX=$(get touch_abs_y_max)
+PRESSURE_MAX=$(get touch_pressure_max)
+TOUCH_MAJOR_MAX=$(get touch_major_max)
 
-if [[ -z "$TOUCH_NODE" ]]; then
-    warn "no touchscreen evdev found by name; falling back to event2"
-    TOUCH_NODE=/dev/input/event2
+if [[ -n "$TOUCH_NODE" ]]; then
+    ok "touchscreen at $TOUCH_NODE${TOUCH_NAME:+ ($TOUCH_NAME)}"
+else
+    warn "no touchscreen evdev identified"
 fi
-ok "touchscreen at $TOUCH_NODE"
 
-GETEVENT=$("$ADB" shell "su -c 'getevent -lp $TOUCH_NODE'" 2>/dev/null | tr -d '\r' || true)
-ABS_X_MAX=$(echo "$GETEVENT" | awk -F'max ' '/ABS_MT_POSITION_X/{print $2}' | awk '{print $1}' | tr -d ',' | head -1)
-ABS_Y_MAX=$(echo "$GETEVENT" | awk -F'max ' '/ABS_MT_POSITION_Y/{print $2}' | awk '{print $1}' | tr -d ',' | head -1)
-
-if [[ -n "${ABS_X_MAX:-}" && -n "${ABS_Y_MAX:-}" ]]; then
+if [[ -n "$ABS_X_MAX" && -n "$ABS_Y_MAX" ]]; then
     ok "ABS_MT_POSITION_X.max=$ABS_X_MAX  ABS_MT_POSITION_Y.max=$ABS_Y_MAX"
 else
-    warn "could not parse ABS_MT_POSITION_{X,Y} from getevent — profile not updated"
+    warn "could not parse ABS_MT_POSITION_{X,Y} from getevent"
 fi
+[[ -n "$PRESSURE_MAX" ]] && ok "ABS_MT_PRESSURE.max=$PRESSURE_MAX"
+[[ -n "$TOUCH_MAJOR_MAX" ]] && ok "ABS_MT_TOUCH_MAJOR.max=$TOUCH_MAJOR_MAX"
 
-WM_SIZE=$("$ADB" shell 'wm size' | tr -d '\r' | grep -oE '[0-9]+x[0-9]+' | head -1)
-if [[ -n "$WM_SIZE" ]]; then
-    ok "wm size = $WM_SIZE"
-fi
+WM_SIZE=$(get wm_size)
+[[ -n "$WM_SIZE" ]] && ok "wm size = $WM_SIZE"
 
 # ------------------------------------------------------------------------------
-# wpa_supplicant socket probe (Phase 3 prep, but cheap to check now)
+# wpa_supplicant socket
 # ------------------------------------------------------------------------------
 
 step "wpa_supplicant socket"
-WPA_FOUND=""
-for path in /data/vendor/wifi/wpa/sockets/wpa_ctrl_global /data/misc/wifi/sockets/wpa_ctrl; do
-    if "$ADB" shell "su -c 'test -e $path'" 2>/dev/null; then
-        WPA_FOUND="$path"
-        break
-    fi
-done
+WPA_FOUND=$(get wpa_ctrl_path)
 if [[ -n "$WPA_FOUND" ]]; then
     ok "wpa_ctrl socket at $WPA_FOUND"
 else
@@ -153,18 +157,18 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Refresh device profile with measured values
+# Refresh device profile
 # ------------------------------------------------------------------------------
 
 step "Refresh device profile"
-if [[ -n "${ABS_X_MAX:-}" && -n "${ABS_Y_MAX:-}" && -n "$CODENAME" ]]; then
+if [[ -n "$ABS_X_MAX" && -n "$ABS_Y_MAX" && -n "$CODENAME" ]]; then
     ROM_TAG=$(echo "$ROM" | sed -E 's/[^a-zA-Z0-9._-]/-/g' | head -c 32)
     [[ -z "$ROM_TAG" ]] && ROM_TAG="unknown"
     PROFILE="$PROFILES_DIR/$CODENAME-$ROM_TAG.toml"
     mkdir -p "$PROFILES_DIR"
     {
         echo "# Auto-refreshed by tests/device-test/phase1.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        echo "# Device: $CODENAME  ROM: $ROM"
+        echo "# Device: $CODENAME  ROM: $ROM  Android: $ANDROID_VER"
         echo
         echo "device = \"$CODENAME\""
         echo "rom = \"$ROM\""
@@ -174,20 +178,23 @@ if [[ -n "${ABS_X_MAX:-}" && -n "${ABS_Y_MAX:-}" && -n "$CODENAME" ]]; then
             echo "width = ${WM_SIZE%x*}"
             echo "height = ${WM_SIZE#*x}"
         fi
-        if [[ -n "$ROT" ]]; then
-            ROT_DEG=$ROT
-            # Quarter-turns 0..3 -> 0,90,180,270
-            if [[ "$ROT" =~ ^[0-3]$ ]]; then
-                ROT_DEG=$((ROT * 90))
+        rot=$(get fbdev_rotation)
+        if [[ -n "$rot" ]]; then
+            rot_deg=$rot
+            # Quarter-turns 0..3 → 0,90,180,270
+            if [[ "$rot" =~ ^[0-3]$ ]]; then
+                rot_deg=$((rot * 90))
             fi
-            echo "rotation_deg = $ROT_DEG"
+            echo "rotation_deg = $rot_deg"
         fi
         echo "prefer = \"auto\""
         echo
         echo "[touch]"
         echo "abs_x_max = $ABS_X_MAX"
         echo "abs_y_max = $ABS_Y_MAX"
-        echo "device_path = \"$TOUCH_NODE\""
+        [[ -n "$PRESSURE_MAX" ]] && echo "pressure_default = $((PRESSURE_MAX / 4))"
+        [[ -n "$TOUCH_MAJOR_MAX" ]] && echo "touch_major_default = $((TOUCH_MAJOR_MAX / 16 + 1))"
+        [[ -n "$TOUCH_NODE" ]] && echo "device_path = \"$TOUCH_NODE\""
         echo
         if [[ -n "$WPA_FOUND" ]]; then
             echo "[wifi]"
