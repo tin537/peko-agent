@@ -287,6 +287,11 @@ async fn main() -> anyhow::Result<()> {
     registry.register(peko_tools_android::PlanTool::new(brain_store.clone()));
     info!("plan tool initialized");
 
+    // Background tasks (Phase 19) — registered later, after the
+    // skill_store, config_arc, soul_arc are constructed and right
+    // before the registry is wrapped in Arc. See "Background tasks
+    // registration" below.
+
     // Skills system
     let skills_path = config.agent.data_dir.join("skills");
     let skill_store = Arc::new(Mutex::new(
@@ -374,7 +379,29 @@ async fn main() -> anyhow::Result<()> {
     let config_arc = Arc::new(Mutex::new(config_json));
     let soul_arc = Arc::new(Mutex::new(system_prompt.soul_text().to_string()));
 
+    // Background tasks registration (Phase 19). The bg_tools_handle is
+    // created here, passed to BgTool, then `set` to the final tools_arc
+    // a few lines below — that breaks the chicken-and-egg between
+    // "registry contains BgTool" and "BgTool needs Arc<registry> to
+    // spawn agent runtimes."
+    let bg_store = peko_core::BgStore::new();
+    let bg_tools_handle = peko_tools_android::new_tools_handle();
+    registry.register(peko_tools_android::BgTool::new(
+        bg_store.clone(),
+        bg_tools_handle.clone(),
+        config_arc.clone(),
+        db_path.clone(),
+        memory_store.clone(),
+        skill_store.clone(),
+        soul_arc.clone(),
+    ));
+    info!("background task store initialized");
+
     let tools_arc = Arc::new(registry);
+
+    // Now that tools_arc exists, hand it to the bg holder so spawned
+    // workers can build agent runtimes against the live registry.
+    *bg_tools_handle.write().await = Some(tools_arc.clone());
 
     // Reflector (Phase A) — only wired when autonomy.reflection is on.
     // Uses a provider built from config. Reflection runs in the background

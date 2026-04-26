@@ -24,6 +24,7 @@ pub mod ocr_tool;
 pub mod brain_tool;
 pub mod research_tool;
 pub mod plan_tool;
+pub mod bg_tool;
 
 pub use screenshot::ScreenshotTool;
 pub use touch::TouchTool;
@@ -50,6 +51,7 @@ pub use ocr_tool::OcrTool;
 pub use brain_tool::BrainTool;
 pub use research_tool::ResearchTool;
 pub use plan_tool::PlanTool;
+pub use bg_tool::{new_tools_handle, BgTool, ToolsHandle};
 
 #[cfg(test)]
 mod tests;
