@@ -669,7 +669,18 @@ async fn list_schedule(State(state): State<AppState>) -> Json<serde_json::Value>
                 "enabled": t.enabled,
                 "last_run": t.last_run,
                 "run_count": t.run_count,
-                "last_result": t.last_result.as_ref().map(|r| if r.len() > 200 { format!("{}...", &r[..200]) } else { r.clone() }),
+                "last_result": t.last_result.as_ref().map(|r| {
+                    // Char-aware truncation; byte-indexed `&r[..200]` panics
+                    // when the cut lands inside a multi-byte codepoint
+                    // (Thai / CJK / emoji). Same fix shipped in
+                    // peko-core/compressor.rs.
+                    if r.chars().count() > 200 {
+                        let head: String = r.chars().take(200).collect();
+                        format!("{head}...")
+                    } else {
+                        r.clone()
+                    }
+                }),
                 "last_error": t.last_error,
             })
         }).collect();

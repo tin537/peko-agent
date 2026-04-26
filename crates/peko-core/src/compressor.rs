@@ -47,8 +47,18 @@ impl ContextCompressor {
                 }
                 Message::ToolResult { name, content, is_error, .. } => {
                     let status = if *is_error { "ERROR" } else { "OK" };
-                    let truncated = if content.len() > 200 {
-                        format!("{}...", &content[..200])
+                    // Char-aware truncation. The previous byte-indexed
+                    // version panicked the whole tokio worker when
+                    // `content[..200]` landed inside a multi-byte UTF-8
+                    // codepoint (Thai, Chinese, emoji, etc.) — observed
+                    // crash on text containing '\u{e47}' (THAI CHARACTER
+                    // MAITAIKHU, 3 bytes). Counting chars is O(n) but
+                    // n is bounded by content.len() and this only fires
+                    // during compression, not per-token.
+                    const TRUNCATE_CHARS: usize = 200;
+                    let truncated = if content.chars().count() > TRUNCATE_CHARS {
+                        let head: String = content.chars().take(TRUNCATE_CHARS).collect();
+                        format!("{}...", head)
                     } else {
                         content.clone()
                     };
