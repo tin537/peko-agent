@@ -14,21 +14,17 @@
 //! agent runtime, which in turn calls the delegate tool. Two layers
 //! of independence.
 
-use peko_config::AgentConfig;
+use peko_config::{AgentConfig, BgConfig};
 use peko_core::runtime::{build_provider_helper, AgentRuntime};
 use peko_core::tool::{Tool, ToolRegistry, ToolResult};
-use peko_core::{BgStore, MemoryStore, SessionStore, SkillStore, SystemPrompt};
+use peko_core::{
+    bg_metrics, estimate_bg_tokens, BgStore, MemoryStore, SessionStore, SkillStore, SystemPrompt,
+};
 use serde_json::json;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-/// Hard cap on concurrent in-flight bg jobs. The agent's LLM provider
-/// is the real bottleneck; >8 concurrent calls will start hitting
-/// rate limits + draining tokens. Listing capped jobs at this number
-/// also keeps the UI sane in Telegram.
-const MAX_CONCURRENT: usize = 8;
 
 /// Shared deferred handle to the tool registry. main.rs creates this
 /// holder before registering tools, hands a clone to BgTool at
@@ -50,6 +46,10 @@ pub struct BgTool {
     memory: Arc<Mutex<MemoryStore>>,
     skills: Arc<Mutex<SkillStore>>,
     soul: Arc<Mutex<String>>,
+    /// [bg] caps + daily budget. Cloned per fire so a live config
+    /// reload takes effect on subsequent fires without rebuilding the
+    /// tool.
+    bg_config: Arc<Mutex<BgConfig>>,
 }
 
 impl BgTool {
@@ -61,8 +61,12 @@ impl BgTool {
         memory: Arc<Mutex<MemoryStore>>,
         skills: Arc<Mutex<SkillStore>>,
         soul: Arc<Mutex<String>>,
+        bg_config: BgConfig,
     ) -> Self {
-        Self { bg, tools, config, session_db_path, memory, skills, soul }
+        Self {
+            bg, tools, config, session_db_path, memory, skills, soul,
+            bg_config: Arc::new(Mutex::new(bg_config)),
+        }
     }
 }
 
@@ -96,13 +100,21 @@ impl Tool for BgTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["fire", "status", "wait", "list", "cancel"]
+                    "enum": ["fire", "status", "wait", "list", "cancel", "stats"]
                 },
                 "task": { "type": "string" },
                 "name": { "type": "string" },
                 "id": { "type": "string" },
                 "timeout_ms": { "type": "integer" },
-                "include_terminal": { "type": "boolean" }
+                "include_terminal": { "type": "boolean" },
+                "max_iterations": {
+                    "type": "integer",
+                    "description": "Override per-job iteration cap (clamped to [bg].max_iterations)."
+                },
+                "days": {
+                    "type": "integer",
+                    "description": "stats: how many days back to return (default 7)."
+                }
             },
             "required": ["action"]
         })
@@ -119,18 +131,20 @@ impl Tool for BgTool {
         let memory = self.memory.clone();
         let skills = self.skills.clone();
         let soul = self.soul.clone();
+        let bg_cfg = self.bg_config.clone();
 
         Box::pin(async move {
             let action = args["action"].as_str().unwrap_or("").to_string();
             match action.as_str() {
-                "fire" => fire(bg, tools_handle, config, db_path, memory, skills, soul, &args).await,
+                "fire" => fire(bg, tools_handle, config, db_path, memory, skills, soul, bg_cfg, &args).await,
                 "status" => status(bg, &args).await,
                 "wait" => wait(bg, &args).await,
                 "list" => list(bg, &args).await,
                 "cancel" => cancel(bg, &args).await,
+                "stats" => stats(bg, bg_cfg, &args).await,
                 "" => Ok(ToolResult::error("missing 'action'".to_string())),
                 other => Ok(ToolResult::error(format!(
-                    "unknown action '{other}'. valid: fire, status, wait, list, cancel"
+                    "unknown action '{other}'. valid: fire, status, wait, list, cancel, stats"
                 ))),
             }
         })
@@ -145,14 +159,35 @@ async fn fire(
     memory: Arc<Mutex<MemoryStore>>,
     skills: Arc<Mutex<SkillStore>>,
     soul: Arc<Mutex<String>>,
+    bg_config: Arc<Mutex<BgConfig>>,
     args: &serde_json::Value,
 ) -> anyhow::Result<ToolResult> {
+    let cfg = bg_config.lock().await.clone();
+
+    // Concurrency cap.
     let active = bg.list(false).await.len();
-    if active >= MAX_CONCURRENT {
+    if active >= cfg.max_concurrent {
         return Ok(ToolResult::error(format!(
-            "{active} bg jobs already running (cap {MAX_CONCURRENT}). Wait for some to finish or cancel."
+            "{active} bg jobs already running (cap {}). Wait for some to finish or cancel.",
+            cfg.max_concurrent
         )));
     }
+
+    // Daily token budget check + log rejections so the agent learns
+    // about its own usage (the bg_stats counter is queryable via
+    // `bg stats`).
+    if cfg.max_tokens_per_day > 0 {
+        let used = bg.tokens_used_today().await;
+        if used >= cfg.max_tokens_per_day {
+            bg.bump_metric(bg_metrics::BUDGET_REJECTED, 1).await;
+            return Ok(ToolResult::error(format!(
+                "daily token budget exhausted: {}/{}. Resets at UTC midnight. \
+                 Use `bg stats` to see usage.",
+                used, cfg.max_tokens_per_day
+            )));
+        }
+    }
+
     let Some(task) = args["task"].as_str().map(String::from) else {
         return Ok(ToolResult::error("missing 'task'".to_string()));
     };
@@ -160,6 +195,12 @@ async fn fire(
         return Ok(ToolResult::error("'task' is empty".to_string()));
     }
     let name = args["name"].as_str().map(String::from);
+
+    // Per-job iteration override clamped to global config.
+    let max_iter = args["max_iterations"]
+        .as_u64()
+        .map(|v| (v as usize).min(cfg.max_iterations))
+        .unwrap_or(cfg.max_iterations);
 
     // Resolve tool registry at fire time, not construction time —
     // see ToolsHandle docs.
@@ -175,6 +216,7 @@ async fn fire(
     let job = bg.enqueue(task.clone(), name.clone()).await;
     let id = job.id.clone();
     let short = job.short_id().to_string();
+    let wall_clock_secs = cfg.max_wall_clock_secs;
 
     // Spawn the agent runtime asynchronously. The job's status updates
     // happen inside the spawn so the fire-action returns immediately.
@@ -208,9 +250,9 @@ async fn fire(
             }
         };
         let agent_config = AgentConfig {
-            max_iterations: config_val["agent"]["max_iterations"]
-                .as_u64()
-                .unwrap_or(50) as usize,
+            // Per-job override clamped to bg config; keeps a runaway
+            // tool-call loop from burning the daily budget.
+            max_iterations: max_iter,
             context_window: config_val["agent"]["context_window"]
                 .as_u64()
                 .unwrap_or(200_000) as usize,
@@ -232,20 +274,54 @@ async fn fire(
             .with_memory(memory)
             .with_skills(skills);
 
-        match runtime.run_task(&task).await {
-            Ok(resp) => {
+        // Wall-clock timeout protects against stuck LLM calls + runaway
+        // tool loops. Approximate token usage is recorded into the
+        // catalog + the daily metric so `bg stats` can show "today's
+        // tokens used" and the budget check on subsequent fires can
+        // reject when over.
+        let task_for_runtime = task.clone();
+        let run = runtime.run_task(&task_for_runtime);
+        let outcome = if wall_clock_secs > 0 {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(wall_clock_secs),
+                run,
+            )
+            .await
+            {
+                Ok(r) => Some(r),
+                Err(_) => None,
+            }
+        } else {
+            Some(run.await)
+        };
+        match outcome {
+            Some(Ok(resp)) => {
                 let result = if resp.text.is_empty() {
                     "(no text response)".to_string()
                 } else {
-                    resp.text
+                    resp.text.clone()
                 };
+                let tokens = estimate_bg_tokens(&task, resp.iterations, &resp.text);
                 bg_for_worker
-                    .mark_done(&id_for_worker, result, Some(resp.session_id), resp.iterations)
+                    .mark_done(
+                        &id_for_worker,
+                        result,
+                        Some(resp.session_id),
+                        resp.iterations,
+                        tokens,
+                    )
                     .await;
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 bg_for_worker
                     .mark_failed(&id_for_worker, format!("run_task: {e}"))
+                    .await;
+            }
+            None => {
+                // Timeout — separate metric so introspection differentiates
+                // genuine failures from time-bounded kills.
+                bg_for_worker
+                    .mark_timeout(&id_for_worker, wall_clock_secs)
                     .await;
             }
         }
@@ -315,6 +391,41 @@ async fn list(bg: BgStore, args: &serde_json::Value) -> anyhow::Result<ToolResul
             j.name.as_deref().unwrap_or("unnamed"),
             j.created_at.format("%H:%M:%S"),
             truncate_chars(&j.task, 100)
+        ));
+    }
+    Ok(ToolResult::success(out))
+}
+
+async fn stats(
+    bg: BgStore,
+    bg_config: Arc<Mutex<BgConfig>>,
+    args: &serde_json::Value,
+) -> anyhow::Result<ToolResult> {
+    let days = args["days"].as_u64().unwrap_or(7).clamp(1, 90) as usize;
+    let cfg = bg_config.lock().await.clone();
+    let recent = bg.recent_stats(days).await;
+    let used_today = bg.tokens_used_today().await;
+
+    let pct = if cfg.max_tokens_per_day > 0 {
+        (used_today as f64 / cfg.max_tokens_per_day as f64 * 100.0).min(999.0)
+    } else { 0.0 };
+
+    let mut out = String::new();
+    out.push_str("📊 bg stats — agent self-introspection\n\n");
+    out.push_str(&format!(
+        "Caps:\n  tokens/day: {}\n  wall-clock/job: {}s\n  iterations/job: {}\n  concurrent: {}\n\n",
+        cfg.max_tokens_per_day, cfg.max_wall_clock_secs, cfg.max_iterations, cfg.max_concurrent
+    ));
+    out.push_str(&format!(
+        "Today's tokens: {}/{} ({:.1}%)\n\n",
+        used_today, cfg.max_tokens_per_day, pct
+    ));
+    out.push_str(&format!("Last {days} day(s):\n"));
+    for s in &recent {
+        out.push_str(&format!(
+            "  {} — fired {} done {} fail {} cancel {} timeout {} budget-rej {} tokens {} iters {}\n",
+            s.date, s.fired, s.completed, s.failed, s.cancelled,
+            s.timeout, s.budget_rejected, s.tokens_used, s.iterations,
         ));
     }
     Ok(ToolResult::success(out))

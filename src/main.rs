@@ -379,12 +379,17 @@ async fn main() -> anyhow::Result<()> {
     let config_arc = Arc::new(Mutex::new(config_json));
     let soul_arc = Arc::new(Mutex::new(system_prompt.soul_text().to_string()));
 
-    // Background tasks registration (Phase 19). The bg_tools_handle is
-    // created here, passed to BgTool, then `set` to the final tools_arc
-    // a few lines below — that breaks the chicken-and-egg between
-    // "registry contains BgTool" and "BgTool needs Arc<registry> to
-    // spawn agent runtimes."
-    let bg_store = peko_core::BgStore::new();
+    // Background tasks registration (Phase 19, persisted in Phase 21).
+    // BgStore opens an SQLite catalog at <data_dir>/bg.db so prior jobs
+    // survive restarts (in-flight jobs are NOT re-run — see background.rs).
+    // The bg_tools_handle is created here, passed to BgTool, then `set`
+    // to the final tools_arc a few lines below — that breaks the
+    // chicken-and-egg between "registry contains BgTool" and "BgTool
+    // needs Arc<registry> to spawn agent runtimes."
+    let bg_db_path = config.agent.data_dir.join("bg.db");
+    let bg_store = peko_core::BgStore::open(&bg_db_path)
+        .await
+        .context("failed to open bg job catalog")?;
     let bg_tools_handle = peko_tools_android::new_tools_handle();
     registry.register(peko_tools_android::BgTool::new(
         bg_store.clone(),
@@ -394,8 +399,9 @@ async fn main() -> anyhow::Result<()> {
         memory_store.clone(),
         skill_store.clone(),
         soul_arc.clone(),
+        config.bg.clone(),
     ));
-    info!("background task store initialized");
+    info!(bg_db = %bg_db_path.display(), "background task store initialized");
 
     let tools_arc = Arc::new(registry);
 

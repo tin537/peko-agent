@@ -42,7 +42,60 @@ pub struct PekoConfig {
     /// the no-key DuckDuckGo HTML path.
     #[serde(default)]
     pub web: WebConfig,
+    /// Background-task limits (Phase 21). Caps token spend per day,
+    /// wall-clock per job, iterations per job, concurrent jobs.
+    #[serde(default)]
+    pub bg: BgConfig,
 }
+
+/// Background-task budget + safety caps. Each cap is enforced on
+/// `bg fire` and on the worker that runs the spawned agent runtime.
+/// All values have safe defaults; users only need a [bg] section if
+/// they want to tighten or loosen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BgConfig {
+    /// Daily LLM token budget across all bg jobs (UTC midnight reset).
+    /// Token usage is approximated by Message::estimated_tokens since
+    /// the OpenAI-compat provider doesn't always return usage stats.
+    /// 0 = no daily cap (NOT recommended).
+    #[serde(default = "default_bg_max_tokens_per_day")]
+    pub max_tokens_per_day: u64,
+
+    /// Hard wall-clock timeout per bg job. Jobs that exceed this are
+    /// killed with `Failed("timeout")`. Protects against stuck LLM
+    /// calls or runaway tool loops. 0 = no wall-clock cap.
+    #[serde(default = "default_bg_max_wall_clock_secs")]
+    pub max_wall_clock_secs: u64,
+
+    /// Max iterations the agent runtime will run inside a single bg
+    /// job. Lower than the global default (50) because bg tasks are
+    /// usually convergent (research, planning) — runaway tool-call
+    /// loops should fail fast rather than burning the daily budget.
+    #[serde(default = "default_bg_max_iterations")]
+    pub max_iterations: usize,
+
+    /// Max concurrently-running bg jobs. The LLM provider rate-limits
+    /// long before this matters in practice; 8 is a safe default that
+    /// also keeps the Telegram /jobs view readable.
+    #[serde(default = "default_bg_max_concurrent")]
+    pub max_concurrent: usize,
+}
+
+impl Default for BgConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens_per_day: default_bg_max_tokens_per_day(),
+            max_wall_clock_secs: default_bg_max_wall_clock_secs(),
+            max_iterations: default_bg_max_iterations(),
+            max_concurrent: default_bg_max_concurrent(),
+        }
+    }
+}
+
+fn default_bg_max_tokens_per_day() -> u64 { 200_000 }
+fn default_bg_max_wall_clock_secs() -> u64 { 600 }
+fn default_bg_max_iterations() -> usize { 30 }
+fn default_bg_max_concurrent() -> usize { 8 }
 
 /// Web tool configuration. The fetch + open_in_browser actions don't
 /// need any keys — they hit URLs directly. `search` benefits from a

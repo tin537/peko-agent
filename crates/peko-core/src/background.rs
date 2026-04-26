@@ -1,27 +1,40 @@
-//! Background job store for fire-and-forget agent tasks.
+//! Background job store — fire-and-forget agent jobs with SQLite-backed
+//! catalog persistence + per-day usage stats.
 //!
-//! Use case: "go research X" while the user keeps chatting. Without
-//! this, every Telegram message blocks until the agent's ReAct loop
-//! finishes — which can be 30–60s for research or planning tasks.
+//! State model
+//!   Queued → Running → (Done | Failed | Cancelled)
+//!   Cancellation is cooperative; the spawned worker observes status on
+//!   its own polling cycle and quits instead of mid-run abort, which
+//!   would corrupt session + brain state.
 //!
-//! Design notes:
-//!   - Jobs live in an Arc<RwLock<HashMap>> keyed by job id. In-memory
-//!     only (Phase 19 scope); a process restart wipes them. Persistence
-//!     would mean a SQLite table + the runtime carrying enough context
-//!     to resume mid-task, which is a much bigger change.
-//!   - Job state transitions are linear:
-//!       Queued → Running → (Done | Failed | Cancelled)
-//!   - The bg_tool spawns the actual agent runtime via tokio::spawn —
-//!     this module just stores state + provides await-by-id.
-//!   - Cancellation is cooperative: we set status=Cancelled and let the
-//!     spawned task observe it on its own polling cycle. Forcing kill
-//!     mid-run would corrupt session state.
+//! Persistence (Phase 21)
+//!   Two SQLite tables under `<data_dir>/bg.db`:
+//!     - `bg_jobs`    catalog of every fire ever run, plus a reserved
+//!                    `checkpoint_blob` column scoped for Phase 22's
+//!                    mid-run resume layer (currently always NULL).
+//!     - `bg_stats`   per-day counters keyed by (date, metric). Lets
+//!                    the agent introspect its own usage patterns:
+//!                    "how often do I exceed budget", "what's my
+//!                    average iteration count", etc.
+//!
+//! On startup, in-flight jobs from a previous process are NOT re-run
+//! (we'd need full mid-run resume, deferred). They're simply not
+//! present in the in-memory map; the catalog row stays in `Running`
+//! until pruned. The user's expected behavior is "fire it again."
+//!
+//! In-memory map remains the hot path for status queries + waits;
+//! SQLite is durable storage. Writes go through both layers
+//! (write-through cache pattern). Notifications use the in-memory
+//! `Notify` so `wait` is event-driven, not polling SQLite.
 
-use chrono::{DateTime, Utc};
+use anyhow::Context;
+use chrono::{DateTime, NaiveDate, Utc};
+use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{Mutex as TokioMutex, Notify, RwLock};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -38,6 +51,25 @@ impl BgStatus {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Done | Self::Failed | Self::Cancelled)
     }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "queued" => Some(Self::Queued),
+            "running" => Some(Self::Running),
+            "done" => Some(Self::Done),
+            "failed" => Some(Self::Failed),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +85,9 @@ pub struct BgJob {
     pub error: Option<String>,
     pub session_id: Option<String>,
     pub iterations: usize,
+    /// Approximate tokens consumed by this job (sum of estimated
+    /// per-message token counts). Used for daily-budget bookkeeping.
+    pub tokens_used: u64,
 }
 
 impl BgJob {
@@ -69,26 +104,50 @@ impl BgJob {
             error: None,
             session_id: None,
             iterations: 0,
+            tokens_used: 0,
         }
     }
 
     pub fn short_id(&self) -> &str {
-        // First 8 chars of UUID — enough for human reference,
-        // collisions are astronomically unlikely with O(N) jobs.
         let n = self.id.len().min(8);
         &self.id[..n]
     }
 
     pub fn elapsed_ms(&self) -> Option<i64> {
-        match (self.started_at, self.finished_at.or(Some(Utc::now()))) {
-            (Some(s), Some(e)) => Some((e - s).num_milliseconds()),
-            _ => None,
-        }
+        let end = self.finished_at.unwrap_or_else(Utc::now);
+        self.started_at.map(|s| (end - s).num_milliseconds())
     }
 }
 
-/// In-memory job store. Cheap clone — each handle shares the same
-/// underlying RwLock. Pass to bg_tool + to the worker tasks.
+/// Per-day counters for self-introspection. Metric names are kept
+/// open-ended (any string) so future code can add new counters
+/// without a schema change.
+pub mod metrics {
+    pub const FIRED: &str = "fired";
+    pub const COMPLETED: &str = "completed";
+    pub const FAILED: &str = "failed";
+    pub const CANCELLED: &str = "cancelled";
+    pub const TIMEOUT: &str = "timeout";
+    pub const BUDGET_REJECTED: &str = "budget_rejected";
+    pub const TOKENS_USED: &str = "tokens_used";
+    pub const ITERATIONS: &str = "iterations";
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DailyStats {
+    pub date: String,
+    pub fired: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub cancelled: u64,
+    pub timeout: u64,
+    pub budget_rejected: u64,
+    pub tokens_used: u64,
+    pub iterations: u64,
+}
+
+/// In-memory + on-disk job store. The struct is cheap to clone (Arc
+/// inside) so it can be passed to multiple tools and spawned workers.
 #[derive(Clone)]
 pub struct BgStore {
     inner: Arc<BgStoreInner>,
@@ -96,18 +155,174 @@ pub struct BgStore {
 
 struct BgStoreInner {
     jobs: RwLock<HashMap<String, BgJob>>,
-    /// Per-job notify so `wait` can sleep without polling.
     notifiers: RwLock<HashMap<String, Arc<Notify>>>,
+    db: TokioMutex<Option<Connection>>,
 }
 
 impl BgStore {
+    /// In-memory only — useful for tests + short-lived processes.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(BgStoreInner {
                 jobs: RwLock::new(HashMap::new()),
                 notifiers: RwLock::new(HashMap::new()),
+                db: TokioMutex::new(None),
             }),
         }
+    }
+
+    /// Open a persistent BgStore. The catalog file lives at `db_path`
+    /// (typically `<data_dir>/bg.db`). On startup we hydrate the
+    /// in-memory map from the catalog; jobs in `Queued` or `Running`
+    /// state from a previous process are loaded but NOT re-run —
+    /// users `bg fire` them again if they want to retry.
+    pub async fn open(db_path: &Path) -> anyhow::Result<Self> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let conn = Connection::open(db_path)
+            .with_context(|| format!("open bg db at {}", db_path.display()))?;
+        Self::init_schema(&conn)?;
+
+        let store = Self::new();
+        // Hydrate in-memory map.
+        let recovered = Self::load_all(&conn)?;
+        {
+            let mut jobs = store.inner.jobs.write().await;
+            let mut notifiers = store.inner.notifiers.write().await;
+            for j in &recovered {
+                jobs.insert(j.id.clone(), j.clone());
+                notifiers.insert(j.id.clone(), Arc::new(Notify::new()));
+            }
+        }
+        *store.inner.db.lock().await = Some(conn);
+        Ok(store)
+    }
+
+    fn init_schema(conn: &Connection) -> anyhow::Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS bg_jobs (
+                id TEXT PRIMARY KEY,
+                task TEXT NOT NULL,
+                name TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                result TEXT,
+                error TEXT,
+                session_id TEXT,
+                iterations INTEGER NOT NULL DEFAULT 0,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                checkpoint_blob BLOB,
+                checkpoint_at TEXT,
+                schema_version INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_bg_status ON bg_jobs(status);
+            CREATE INDEX IF NOT EXISTS idx_bg_created ON bg_jobs(created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS bg_stats (
+                date TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                value INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (date, metric)
+            );"
+        )?;
+        Ok(())
+    }
+
+    fn load_all(conn: &Connection) -> anyhow::Result<Vec<BgJob>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, task, name, status, created_at, started_at, finished_at,
+                    result, error, session_id, iterations, tokens_used
+             FROM bg_jobs ORDER BY created_at DESC LIMIT 500",
+        )?;
+        let rows = stmt.query_map([], row_to_job)?;
+        let mut out = Vec::new();
+        for r in rows { out.push(r?); }
+        Ok(out)
+    }
+
+    async fn write_through<F: FnOnce(&Connection) -> anyhow::Result<()>>(&self, f: F) {
+        let db = self.inner.db.lock().await;
+        if let Some(conn) = db.as_ref() {
+            if let Err(e) = f(conn) {
+                tracing::warn!(error = %e, "bg_store: persist failed (in-memory state still updated)");
+            }
+        }
+    }
+
+    /// Increment a counter for today. Best-effort: SQLite errors are
+    /// logged at warn but never fail the calling operation.
+    pub async fn bump_metric(&self, metric: &str, by: u64) {
+        let date = today_key();
+        self.write_through(|conn| {
+            conn.execute(
+                "INSERT INTO bg_stats (date, metric, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(date, metric) DO UPDATE SET value = value + ?3",
+                params![date, metric, by as i64],
+            )?;
+            Ok(())
+        })
+        .await;
+    }
+
+    /// Read today's tokens_used counter. Used by budget checks.
+    pub async fn tokens_used_today(&self) -> u64 {
+        let db = self.inner.db.lock().await;
+        let Some(conn) = db.as_ref() else { return 0 };
+        conn.query_row(
+            "SELECT value FROM bg_stats WHERE date = ?1 AND metric = ?2",
+            params![today_key(), metrics::TOKENS_USED],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|v| v.max(0) as u64)
+        .unwrap_or(0)
+    }
+
+    /// Last `days` days of stats, newest first. Includes today even
+    /// if no rows exist yet (zero-fill).
+    pub async fn recent_stats(&self, days: usize) -> Vec<DailyStats> {
+        let db = self.inner.db.lock().await;
+        let Some(conn) = db.as_ref() else { return Vec::new() };
+
+        let today = Utc::now().date_naive();
+        let mut out: Vec<DailyStats> = Vec::with_capacity(days);
+        for offset in 0..days {
+            let d = today - chrono::Duration::days(offset as i64);
+            let key = d.format("%Y-%m-%d").to_string();
+            let mut stats = DailyStats {
+                date: key.clone(),
+                fired: 0, completed: 0, failed: 0, cancelled: 0,
+                timeout: 0, budget_rejected: 0, tokens_used: 0, iterations: 0,
+            };
+            let rows = conn.prepare(
+                "SELECT metric, value FROM bg_stats WHERE date = ?1",
+            );
+            if let Ok(mut stmt) = rows {
+                if let Ok(it) = stmt.query_map(params![key], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                }) {
+                    for r in it.flatten() {
+                        let v = r.1.max(0) as u64;
+                        match r.0.as_str() {
+                            "fired" => stats.fired = v,
+                            "completed" => stats.completed = v,
+                            "failed" => stats.failed = v,
+                            "cancelled" => stats.cancelled = v,
+                            "timeout" => stats.timeout = v,
+                            "budget_rejected" => stats.budget_rejected = v,
+                            "tokens_used" => stats.tokens_used = v,
+                            "iterations" => stats.iterations = v,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            out.push(stats);
+        }
+        out
     }
 
     pub async fn enqueue(&self, task: String, name: Option<String>) -> BgJob {
@@ -118,14 +333,35 @@ impl BgStore {
             .write()
             .await
             .insert(job.id.clone(), Arc::new(Notify::new()));
+        let j = job.clone();
+        self.write_through(move |conn| {
+            conn.execute(
+                "INSERT INTO bg_jobs (id, task, name, status, created_at, iterations, tokens_used)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 0, 0)",
+                params![j.id, j.task, j.name, j.status.as_str(), j.created_at.to_rfc3339()],
+            )?;
+            Ok(())
+        })
+        .await;
+        self.bump_metric(metrics::FIRED, 1).await;
         job
     }
 
     pub async fn mark_running(&self, id: &str) {
+        let now = Utc::now();
         if let Some(job) = self.inner.jobs.write().await.get_mut(id) {
             job.status = BgStatus::Running;
-            job.started_at = Some(Utc::now());
+            job.started_at = Some(now);
         }
+        let id = id.to_string();
+        self.write_through(move |conn| {
+            conn.execute(
+                "UPDATE bg_jobs SET status = ?1, started_at = ?2 WHERE id = ?3",
+                params![BgStatus::Running.as_str(), now.to_rfc3339(), id],
+            )?;
+            Ok(())
+        })
+        .await;
     }
 
     pub async fn mark_done(
@@ -134,35 +370,80 @@ impl BgStore {
         result: String,
         session_id: Option<String>,
         iterations: usize,
+        tokens_used: u64,
     ) {
+        let now = Utc::now();
         if let Some(job) = self.inner.jobs.write().await.get_mut(id) {
             job.status = BgStatus::Done;
-            job.finished_at = Some(Utc::now());
-            job.result = Some(result);
-            job.session_id = session_id;
+            job.finished_at = Some(now);
+            job.result = Some(result.clone());
+            job.session_id = session_id.clone();
             job.iterations = iterations;
+            job.tokens_used = tokens_used;
         }
+        let id_str = id.to_string();
+        self.write_through(move |conn| {
+            conn.execute(
+                "UPDATE bg_jobs SET status = ?1, finished_at = ?2, result = ?3,
+                                    session_id = ?4, iterations = ?5, tokens_used = ?6
+                 WHERE id = ?7",
+                params![BgStatus::Done.as_str(), now.to_rfc3339(), result,
+                        session_id, iterations as i64, tokens_used as i64, id_str],
+            )?;
+            Ok(())
+        })
+        .await;
+        self.bump_metric(metrics::COMPLETED, 1).await;
+        self.bump_metric(metrics::TOKENS_USED, tokens_used).await;
+        self.bump_metric(metrics::ITERATIONS, iterations as u64).await;
         self.notify(id).await;
     }
 
     pub async fn mark_failed(&self, id: &str, error: String) {
+        let now = Utc::now();
         if let Some(job) = self.inner.jobs.write().await.get_mut(id) {
             job.status = BgStatus::Failed;
-            job.finished_at = Some(Utc::now());
-            job.error = Some(error);
+            job.finished_at = Some(now);
+            job.error = Some(error.clone());
         }
+        let id_str = id.to_string();
+        self.write_through(move |conn| {
+            conn.execute(
+                "UPDATE bg_jobs SET status = ?1, finished_at = ?2, error = ?3 WHERE id = ?4",
+                params![BgStatus::Failed.as_str(), now.to_rfc3339(), error, id_str],
+            )?;
+            Ok(())
+        })
+        .await;
+        self.bump_metric(metrics::FAILED, 1).await;
         self.notify(id).await;
     }
 
+    pub async fn mark_timeout(&self, id: &str, secs: u64) {
+        self.bump_metric(metrics::TIMEOUT, 1).await;
+        self.mark_failed(id, format!("timeout: exceeded {secs}s")).await;
+    }
+
     pub async fn mark_cancelled(&self, id: &str) -> bool {
+        let now = Utc::now();
         let mut jobs = self.inner.jobs.write().await;
         let Some(job) = jobs.get_mut(id) else { return false };
         if job.status.is_terminal() {
             return false;
         }
         job.status = BgStatus::Cancelled;
-        job.finished_at = Some(Utc::now());
+        job.finished_at = Some(now);
         drop(jobs);
+        let id_str = id.to_string();
+        self.write_through(move |conn| {
+            conn.execute(
+                "UPDATE bg_jobs SET status = ?1, finished_at = ?2 WHERE id = ?3",
+                params![BgStatus::Cancelled.as_str(), now.to_rfc3339(), id_str],
+            )?;
+            Ok(())
+        })
+        .await;
+        self.bump_metric(metrics::CANCELLED, 1).await;
         self.notify(id).await;
         true
     }
@@ -177,24 +458,15 @@ impl BgStore {
         self.inner.jobs.read().await.get(id).cloned()
     }
 
-    /// Resolve a partial id (the short_id form). Returns the full
-    /// matching id when exactly one job matches the prefix, None when
-    /// zero or ambiguous matches.
     pub async fn resolve(&self, id_or_prefix: &str) -> Option<String> {
         let jobs = self.inner.jobs.read().await;
-        if jobs.contains_key(id_or_prefix) {
-            return Some(id_or_prefix.to_string());
-        }
-        let matches: Vec<String> = jobs
+        if jobs.contains_key(id_or_prefix) { return Some(id_or_prefix.to_string()); }
+        let m: Vec<String> = jobs
             .keys()
             .filter(|k| k.starts_with(id_or_prefix))
             .cloned()
             .collect();
-        if matches.len() == 1 {
-            Some(matches.into_iter().next().unwrap())
-        } else {
-            None
-        }
+        if m.len() == 1 { Some(m.into_iter().next().unwrap()) } else { None }
     }
 
     pub async fn list(&self, include_terminal: bool) -> Vec<BgJob> {
@@ -204,12 +476,10 @@ impl BgStore {
             .filter(|j| include_terminal || !j.status.is_terminal())
             .cloned()
             .collect();
-        // Newest first.
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         out
     }
 
-    /// Await terminal status for `id`. Returns the final job state.
     pub async fn wait(&self, id: &str, timeout_ms: Option<u64>) -> Option<BgJob> {
         let notifier = {
             let map = self.inner.notifiers.read().await;
@@ -217,22 +487,15 @@ impl BgStore {
         };
         loop {
             if let Some(job) = self.get(id).await {
-                if job.status.is_terminal() {
-                    return Some(job);
-                }
-            } else {
-                return None;
-            }
+                if job.status.is_terminal() { return Some(job); }
+            } else { return None; }
             let notified = notifier.notified();
             match timeout_ms {
                 Some(ms) => {
                     if tokio::time::timeout(
                         std::time::Duration::from_millis(ms),
                         notified,
-                    )
-                    .await
-                    .is_err()
-                    {
+                    ).await.is_err() {
                         return self.get(id).await;
                     }
                 }
@@ -241,9 +504,6 @@ impl BgStore {
         }
     }
 
-    /// Drop terminal jobs older than the given age. Useful for a
-    /// gardener-style cleanup so the in-memory map doesn't grow
-    /// unboundedly across a long agent run.
     pub async fn prune_finished(&self, max_age_minutes: i64) -> usize {
         let cutoff = Utc::now() - chrono::Duration::minutes(max_age_minutes);
         let mut jobs = self.inner.jobs.write().await;
@@ -260,6 +520,16 @@ impl BgStore {
             jobs.remove(id);
             notifiers.remove(id);
         }
+        let cutoff_str = cutoff.to_rfc3339();
+        self.write_through(move |conn| {
+            conn.execute(
+                "DELETE FROM bg_jobs WHERE status IN ('done','failed','cancelled')
+                 AND finished_at IS NOT NULL AND finished_at < ?1",
+                params![cutoff_str],
+            )?;
+            Ok(())
+        })
+        .await;
         to_remove.len()
     }
 }
@@ -268,33 +538,118 @@ impl Default for BgStore {
     fn default() -> Self { Self::new() }
 }
 
+fn row_to_job(row: &rusqlite::Row) -> rusqlite::Result<BgJob> {
+    let parse_dt = |s: Option<String>| -> Option<DateTime<Utc>> {
+        s.and_then(|t| DateTime::parse_from_rfc3339(&t).ok().map(|d| d.with_timezone(&Utc)))
+    };
+    let status_str: String = row.get(3)?;
+    let created_str: String = row.get(4)?;
+    let created_at = DateTime::parse_from_rfc3339(&created_str)
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now());
+    Ok(BgJob {
+        id: row.get(0)?,
+        task: row.get(1)?,
+        name: row.get(2)?,
+        status: BgStatus::parse(&status_str).unwrap_or(BgStatus::Failed),
+        created_at,
+        started_at: parse_dt(row.get(5)?),
+        finished_at: parse_dt(row.get(6)?),
+        result: row.get(7)?,
+        error: row.get(8)?,
+        session_id: row.get(9)?,
+        iterations: row.get::<_, i64>(10).unwrap_or(0).max(0) as usize,
+        tokens_used: row.get::<_, i64>(11).unwrap_or(0).max(0) as u64,
+    })
+}
+
+fn today_key() -> String {
+    Utc::now().date_naive().format("%Y-%m-%d").to_string()
+}
+
+/// Estimate tokens for a finished agent task. Loose heuristic: input
+/// tokens ~ task.len() / 4, plus per-iteration overhead. Used for
+/// daily-budget bookkeeping when the LLM provider doesn't return
+/// usage stats. Documented as approximate; users should configure
+/// `[bg].max_tokens_per_day` with headroom.
+pub fn estimate_tokens(task: &str, iterations: usize, response_text: &str) -> u64 {
+    let task_tokens = (task.chars().count() / 4) as u64;
+    let response_tokens = (response_text.chars().count() / 4) as u64;
+    // System prompt + intermediate tool calls add up; rough estimate
+    // is ~800 tokens per iteration round-trip on this codebase.
+    let iteration_tokens = (iterations as u64) * 800;
+    task_tokens + response_tokens + iteration_tokens
+}
+
+/// Forward-compat for Phase 22 mid-run resume. The `checkpoint_blob`
+/// column is reserved in the schema today; this helper writes a
+/// best-effort serialised form so a future runtime can rehydrate. The
+/// current bg_tool worker doesn't call this — it's a hook waiting
+/// for the resume layer to land.
+#[allow(dead_code)]
+pub async fn write_checkpoint(
+    store: &BgStore,
+    job_id: &str,
+    blob: Vec<u8>,
+) -> anyhow::Result<()> {
+    let now = Utc::now().to_rfc3339();
+    let id = job_id.to_string();
+    store
+        .write_through(move |conn| {
+            conn.execute(
+                "UPDATE bg_jobs SET checkpoint_blob = ?1, checkpoint_at = ?2 WHERE id = ?3",
+                params![blob, now, id],
+            )?;
+            Ok(())
+        })
+        .await;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn enqueue_then_get_returns_job() {
-        let store = BgStore::new();
-        let job = store.enqueue("research X".into(), None).await;
-        let fetched = store.get(&job.id).await.unwrap();
-        assert_eq!(fetched.task, "research X");
-        assert_eq!(fetched.status, BgStatus::Queued);
+    async fn lifecycle_and_persistence() {
+        let dir = std::env::temp_dir().join(format!("peko-bg-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("bg.db");
+
+        let store = BgStore::open(&db).await.unwrap();
+        let j = store.enqueue("research X".into(), Some("r1".into())).await;
+        store.mark_running(&j.id).await;
+        store
+            .mark_done(&j.id, "summary".into(), Some("sess".into()), 5, 12345)
+            .await;
+
+        // Recreate store from disk.
+        let store2 = BgStore::open(&db).await.unwrap();
+        let recovered = store2.get(&j.id).await.unwrap();
+        assert_eq!(recovered.status, BgStatus::Done);
+        assert_eq!(recovered.iterations, 5);
+        assert_eq!(recovered.tokens_used, 12345);
+        assert_eq!(recovered.result.as_deref(), Some("summary"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn lifecycle_running_done() {
+    async fn stats_accumulate_per_day() {
         let store = BgStore::new();
-        let job = store.enqueue("t".into(), None).await;
-        store.mark_running(&job.id).await;
-        assert_eq!(store.get(&job.id).await.unwrap().status, BgStatus::Running);
-        store
-            .mark_done(&job.id, "result text".into(), Some("sess".into()), 3)
-            .await;
-        let final_job = store.get(&job.id).await.unwrap();
-        assert_eq!(final_job.status, BgStatus::Done);
-        assert_eq!(final_job.result.as_deref(), Some("result text"));
-        assert_eq!(final_job.iterations, 3);
-        assert!(final_job.finished_at.is_some());
+        // Without a DB, bump_metric is a no-op; use the persistent path.
+        let dir = std::env::temp_dir().join(format!("peko-bg-stats-{}", rand_token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = BgStore::open(&dir.join("bg.db")).await.unwrap();
+
+        let _ = store.enqueue("a".into(), None).await;
+        let _ = store.enqueue("b".into(), None).await;
+
+        let recent = store.recent_stats(1).await;
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].fired, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -302,12 +657,11 @@ mod tests {
         let store = BgStore::new();
         let j = store.enqueue("t".into(), None).await;
         assert!(store.mark_cancelled(&j.id).await);
-        // second cancel should be no-op
         assert!(!store.mark_cancelled(&j.id).await);
     }
 
     #[tokio::test]
-    async fn resolve_short_id() {
+    async fn resolve_short_id_unique() {
         let store = BgStore::new();
         let j = store.enqueue("t".into(), None).await;
         let short = j.short_id().to_string();
@@ -323,11 +677,9 @@ mod tests {
         let store_clone = store.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            store_clone
-                .mark_done(&id, "ok".into(), None, 1)
-                .await;
+            store_clone.mark_done(&id, "ok".into(), None, 1, 0).await;
         });
-        let final_job = store.wait(&j.id, Some(500)).await.expect("should resolve");
+        let final_job = store.wait(&j.id, Some(500)).await.expect("resolves");
         assert_eq!(final_job.status, BgStatus::Done);
     }
 
@@ -335,10 +687,7 @@ mod tests {
     async fn wait_with_timeout_returns_unfinished() {
         let store = BgStore::new();
         let j = store.enqueue("t".into(), None).await;
-        let final_job = store
-            .wait(&j.id, Some(50))
-            .await
-            .expect("returns latest snapshot");
+        let final_job = store.wait(&j.id, Some(50)).await.expect("returns snapshot");
         assert_eq!(final_job.status, BgStatus::Queued);
     }
 
@@ -347,8 +696,7 @@ mod tests {
         let store = BgStore::new();
         let a = store.enqueue("a".into(), None).await;
         let b = store.enqueue("b".into(), None).await;
-        store.mark_done(&a.id, "ok".into(), None, 1).await;
-
+        store.mark_done(&a.id, "ok".into(), None, 1, 0).await;
         let all = store.list(true).await;
         assert_eq!(all.len(), 2);
         let active = store.list(false).await;
@@ -357,15 +705,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn estimate_tokens_grows_with_iterations() {
+        let t1 = estimate_tokens("hi", 1, "ok");
+        let t10 = estimate_tokens("hi", 10, "ok");
+        assert!(t10 > t1, "more iterations should estimate more tokens");
+    }
+
+    #[tokio::test]
+    async fn tokens_used_today_reflects_marks() {
+        let dir = std::env::temp_dir().join(format!("peko-bg-toks-{}", rand_token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = BgStore::open(&dir.join("bg.db")).await.unwrap();
+        let j = store.enqueue("t".into(), None).await;
+        store.mark_done(&j.id, "ok".into(), None, 2, 1500).await;
+        let used = store.tokens_used_today().await;
+        assert_eq!(used, 1500);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn prune_drops_old_finished() {
         let store = BgStore::new();
         let j = store.enqueue("t".into(), None).await;
-        store.mark_done(&j.id, "ok".into(), None, 0).await;
-        // Forge an old finished_at by re-marking with a manual write
-        // path; for simplicity just call prune with a -1m cutoff so
-        // anything finished is in the past from cutoff perspective.
+        store.mark_done(&j.id, "ok".into(), None, 0, 0).await;
         let removed = store.prune_finished(-60).await;
         assert_eq!(removed, 1);
         assert!(store.get(&j.id).await.is_none());
     }
+
+    fn rand_token() -> String {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        format!("{pid}-{nanos}")
+    }
 }
+
+// Suppress dead-code warning for the in-memory-only Mutex import when
+// the module is compiled without `tokio::sync::Mutex` direct refs.
+#[allow(dead_code)]
+fn _unused_paths_check(_: PathBuf) {}

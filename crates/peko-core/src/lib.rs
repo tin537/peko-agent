@@ -51,7 +51,10 @@ pub use gardener::{GardenerConfig, spawn as spawn_gardener};
 pub use hardware::{resolve_modem, DetectedHardware};
 pub use call_pipeline::{CallStore, CallRecord, CallMetadata, spawn as spawn_call_pipeline};
 pub use notebook::{BrainStats, BrainStore, Note, parse_wikilinks, slugify};
-pub use background::{BgJob, BgStatus, BgStore};
+pub use background::{
+    estimate_tokens as estimate_bg_tokens, metrics as bg_metrics, BgJob, BgStatus, BgStore,
+    DailyStats,
+};
 
 #[cfg(test)]
 mod runtime_tests;
