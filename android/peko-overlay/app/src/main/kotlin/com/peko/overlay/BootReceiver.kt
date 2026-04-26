@@ -49,15 +49,18 @@ class BootReceiver : BroadcastReceiver() {
         }
 
         val svc = Intent(ctx, OverlayService::class.java)
+        val audio = Intent(ctx, AudioBridgeService::class.java)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 ctx.startForegroundService(svc)
+                ctx.startForegroundService(audio)
             } else {
                 ctx.startService(svc)
+                ctx.startService(audio)
             }
-            Log.i(TAG, "overlay autostart kicked via $action")
+            Log.i(TAG, "overlay + audio bridge autostart kicked via $action")
         } catch (e: Throwable) {
-            Log.e(TAG, "overlay autostart failed", e)
+            Log.e(TAG, "autostart failed", e)
         }
     }
 

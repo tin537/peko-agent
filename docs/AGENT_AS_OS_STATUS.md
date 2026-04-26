@@ -51,7 +51,7 @@ This is a one-line summary per capability:
 - ✅ Wi-Fi control (Lane B `cmd wifi`; Lane A `wpa_supplicant` ctrl socket)
 - ✅ Audio topology + tinymix + media volume
 - ✅ Self-rendered overlay UI (peko-renderer, embedded 5x7 font)
-- ⏳ PCM record/play (Phase 7 via overlay APK shim)
+- ✅ PCM record/play + TextToSpeech (Phase 5; via PekoOverlay priv-app bridge — audioserver owns ALSA, this is the only sane path on stock Android)
 - ⏳ DRM master + frameworkless boot (Phase 7)
 - ❌ Camera (HAL is binder/vendor-blob; never planned)
 - ❌ GPS (gnss HAL is binder; never planned)
@@ -67,6 +67,7 @@ The numbers below are real, measured on a OnePlus 6T (codename
 | 2     | sensors + battery          | PASS         |
 | 3     | wifi backends              | PASS         |
 | 4     | audio topology + mixer     | PASS         |
+| 5     | PCM record + play + TTS    | PASS         |
 | 21    | bg persistence + budget    | PASS         |
 | 22    | bg mid-run resume + orphan | PASS         |
 

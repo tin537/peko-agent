@@ -25,6 +25,7 @@ pub mod brain_tool;
 pub mod research_tool;
 pub mod plan_tool;
 pub mod bg_tool;
+pub mod audio_pcm_tool;
 
 pub use screenshot::ScreenshotTool;
 pub use touch::TouchTool;
@@ -52,6 +53,7 @@ pub use brain_tool::BrainTool;
 pub use research_tool::ResearchTool;
 pub use plan_tool::PlanTool;
 pub use bg_tool::{new_tools_handle, resume_pending_bg_jobs, BgTool, ToolsHandle};
+pub use audio_pcm_tool::AudioPcmTool;
 
 #[cfg(test)]
 mod tests;

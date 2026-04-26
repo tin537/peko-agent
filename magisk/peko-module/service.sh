@@ -25,6 +25,11 @@ if pm list packages 2>/dev/null | grep -q '^package:com.peko.overlay$'; then
     # unconditionally.
     pm grant com.peko.overlay android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
 
+    # Phase 5 audio bridge — RECORD_AUDIO is dangerous. priv-app status
+    # alone doesn't grant runtime perms; pm grant is what flips it.
+    # AudioBridgeService refuses to start AudioRecord without it.
+    pm grant com.peko.overlay android.permission.RECORD_AUDIO >/dev/null 2>&1 || true
+
     # Kick the overlay now. Belt-and-braces on top of the app's own
     # BootReceiver: the receiver races with this appops grant, so on a
     # cold first boot canDrawOverlays() can return false when BOOT_
@@ -35,6 +40,10 @@ if pm list packages 2>/dev/null | grep -q '^package:com.peko.overlay$'; then
     # idempotent if the overlay is already up.
     am start-foreground-service --user 0 -n com.peko.overlay/.OverlayService >/dev/null 2>&1 \
         || am start -n com.peko.overlay/.MainActivity >/dev/null 2>&1 || true
+    # Phase 5: also kick the audio bridge so it's ready as soon as the
+    # device finishes boot. PekoOverlayApp.onCreate() also starts it
+    # but that path requires the app's process to be alive first.
+    am start-foreground-service --user 0 -n com.peko.overlay/.AudioBridgeService >/dev/null 2>&1 || true
 fi
 
 # If the Peko SMS shim shipped alongside, make it the default SMS app

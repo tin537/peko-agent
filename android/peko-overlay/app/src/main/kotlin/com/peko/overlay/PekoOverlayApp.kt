@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 
 /**
@@ -26,6 +27,18 @@ class PekoOverlayApp : Application() {
             }
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.createNotificationChannel(channel)
+        }
+
+        // Phase 5: bring up the audio bridge unconditionally on app
+        // start. The service is cheap when idle (FileObserver only) and
+        // the agent expects it to be ready as soon as the device is up.
+        // BootReceiver also starts it directly on boot.
+        try {
+            startForegroundService(Intent(this, AudioBridgeService::class.java))
+        } catch (_: Throwable) {
+            // start-from-app is restricted on some Android versions when
+            // the activity context isn't visible; BootReceiver will
+            // recover next boot.
         }
     }
 

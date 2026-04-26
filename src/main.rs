@@ -203,6 +203,13 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
     // tesseract binary isn't installed on the device.
     registry.register(OcrTool::new());
 
+    // Phase 5 — PCM record / play / TTS via PekoOverlay AudioBridge.
+    // Bridge runs in the priv-app because audioserver owns the kernel
+    // ALSA nodes; AudioRecord / AudioTrack / TextToSpeech are the only
+    // way in. Tool is registered unconditionally — if the priv-app
+    // isn't installed, calls time out gracefully with a clear error.
+    registry.register(peko_tools_android::AudioPcmTool::new());
+
     registry
 }
 

@@ -51,7 +51,7 @@ Status legend:
 | Battery (capacity/status/health/V/I/T) | ✅ | ✅ | 2 | `/sys/class/power_supply/battery/*` — fully kernel-direct |
 | Wi-Fi control (status/scan/saved/connect/disconnect/enable/disable) | ✅ | ✅ | 3 | `cmd wifi` (Lane B) → wpa_supplicant ctrl socket (Lane A). Both backends, `WifiBackend` trait |
 | Audio topology + mixer + media volume | ✅ | 🟡 | 4 | `/proc/asound`, `tinymix`, `cmd audio get-volume`. Lane A only sees ALSA + tinymix; media volume needs framework |
-| PCM record / playback | ⏳ | ⏳ | 5 | Overlay APK shim (AudioRecord/AudioTrack) — cleaner than re-implementing tinyalsa |
+| PCM record / playback / TTS | ✅ | 🟡 | 5 | Bridge in PekoOverlay priv-app (AudioRecord, AudioTrack, TextToSpeech). File-based RPC via `/data/data/com.peko.overlay/files/audio/{in,out}/`. Verified on-device: 1.5s mic record → 48KB 16-bit PCM WAV; TTS "Hello from Peko" → 122KB WAV in <2s. Lane A 🟡 because it requires the priv-app + audioserver — Lane A would need the overlay APK transplanted or a separate tinyalsa pipeline |
 | Self-rendered overlay UI (`draw` tool) | ✅ | ✅ | 5 | `peko-renderer` crate: rect/line/text via embedded 5x7 font, returns PNG. Lane A blits to fbdev |
 | Camera | ❌ | ❌ | — | Camera HAL is binder/vendor-blob only |
 | GPS | ❌ | ❌ | — | gnss HAL binder-only |
