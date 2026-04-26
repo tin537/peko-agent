@@ -37,7 +37,35 @@ pub struct PekoConfig {
     /// is disabled because it records audio.
     #[serde(default)]
     pub calls: CallsConfig,
+    /// Web tool config — search API keys, default search backend, etc.
+    /// Optional; when missing, the `web search` action falls back to
+    /// the no-key DuckDuckGo HTML path.
+    #[serde(default)]
+    pub web: WebConfig,
 }
+
+/// Web tool configuration. The fetch + open_in_browser actions don't
+/// need any keys — they hit URLs directly. `search` benefits from a
+/// real search API: Brave's free tier gives 2k queries/month with an
+/// API key from https://brave.com/search/api/. If no key is set, the
+/// search action falls back to DuckDuckGo HTML scraping (fragile, no
+/// rate limit, no auth).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebConfig {
+    /// API key for Brave Search. Empty = use the no-key fallback.
+    #[serde(default)]
+    pub brave_api_key: Option<String>,
+    /// Default search provider when the agent doesn't specify one.
+    /// Accepts "brave" or "ddg". Defaults to "brave" if a Brave key
+    /// is configured, else "ddg".
+    #[serde(default)]
+    pub search_default: Option<String>,
+    /// Max number of results to return per search.
+    #[serde(default = "default_search_max_results")]
+    pub search_max_results: u32,
+}
+
+fn default_search_max_results() -> u32 { 8 }
 
 /// Lockscreen auto-unlock. If `lock_pin` is set, `ensure_awake()` will
 /// type the PIN and press ENTER after waking the display, so tasks can

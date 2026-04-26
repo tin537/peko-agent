@@ -32,8 +32,10 @@ const DEFAULT_USER_AGENT: &str =
      (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36";
 
 const DEFAULT_MAX_CHARS: usize = 8000;
+const DEFAULT_MAX_SEARCH_RESULTS: usize = 8;
 const HARD_MAX_BYTES: usize = 8 * 1024 * 1024; // 8 MB; refuse anything larger
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct WebTool;
 
@@ -49,14 +51,14 @@ impl Tool for WebTool {
     fn name(&self) -> &str { "web" }
 
     fn description(&self) -> &str {
-        "Read or open a web page without driving the browser by hand. \
-         Actions: fetch (HTTPS GET → strip HTML → return readable text; \
-         pass max_chars to control truncation, default 8000), \
-         open_in_browser (am start ACTION_VIEW <url> → lands the device \
-         on the page directly, avoids tap-the-address-bar dance). \
-         Prefer `fetch` for read-only research; only escalate to \
-         interactive browser navigation when the page requires login \
-         or multi-step JS."
+        "Read, search, or open a web page without driving the browser by hand. \
+         Actions: \
+         search (web search via Brave or DuckDuckGo; returns top results with title + snippet + URL — use for \"what is X\" / \"find pages about Y\"), \
+         fetch (HTTPS GET → strip HTML → return readable text; pass max_chars to control truncation, default 8000), \
+         open_in_browser (am start ACTION_VIEW <url> → lands the device on the page directly). \
+         Typical flow: search → pick a result → fetch its url. Only \
+         escalate to screenshot+touch when the page requires login or \
+         multi-step JS."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -65,19 +67,27 @@ impl Tool for WebTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["fetch", "open_in_browser"],
-                    "description": "fetch = HTTP GET + text extract; open_in_browser = am start VIEW"
+                    "enum": ["search", "fetch", "open_in_browser"],
+                    "description": "search = web search; fetch = HTTP GET + text extract; open_in_browser = am start VIEW"
                 },
                 "url": {
                     "type": "string",
-                    "description": "Absolute URL (http or https)."
+                    "description": "Absolute URL (http or https). Required for fetch + open_in_browser."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Search query. Required for search."
                 },
                 "max_chars": {
                     "type": "integer",
                     "description": "Max characters of extracted text to return (fetch only). Default 8000."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max search results to return. Default 8."
                 }
             },
-            "required": ["action", "url"]
+            "required": ["action"]
         })
     }
 
@@ -87,17 +97,23 @@ impl Tool for WebTool {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<ToolResult>> + Send + '_>> {
         let action = args["action"].as_str().unwrap_or("").to_string();
         let url = args["url"].as_str().unwrap_or("").to_string();
+        let query = args["query"].as_str().unwrap_or("").to_string();
         let max_chars = args["max_chars"]
             .as_u64()
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_MAX_CHARS);
+        let max_results = args["max_results"]
+            .as_u64()
+            .map(|n| n.min(20) as usize)
+            .unwrap_or(DEFAULT_MAX_SEARCH_RESULTS);
         Box::pin(async move {
             match action.as_str() {
                 "fetch" => fetch(&url, max_chars).await,
                 "open_in_browser" => open_in_browser(&url),
+                "search" => search(&query, max_results).await,
                 "" => Ok(ToolResult::error("missing 'action' parameter".to_string())),
                 other => Ok(ToolResult::error(format!(
-                    "unknown action '{other}'. valid: fetch, open_in_browser"
+                    "unknown action '{other}'. valid: search, fetch, open_in_browser"
                 ))),
             }
         })
@@ -341,6 +357,209 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
+// -----------------------------------------------------------------------------
+// Search
+// -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SearchHit {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+/// Web search. Picks Brave when `PEKO_BRAVE_API_KEY` env var is set
+/// (recommended; brave.com/search/api, free 2k queries/month). Falls
+/// back to DuckDuckGo HTML scraping when no key is available — fragile
+/// but works without auth.
+async fn search(query: &str, max_results: usize) -> anyhow::Result<ToolResult> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(ToolResult::error("missing 'query' parameter".to_string()));
+    }
+    if q.len() > 512 {
+        return Ok(ToolResult::error(
+            "query too long (max 512 chars)".to_string(),
+        ));
+    }
+
+    let brave_key = std::env::var("PEKO_BRAVE_API_KEY").ok().filter(|s| !s.is_empty());
+    let result = match brave_key {
+        Some(key) => search_brave(q, &key, max_results).await,
+        None => search_ddg(q, max_results).await,
+    };
+    match result {
+        Ok((backend, hits)) if hits.is_empty() => Ok(ToolResult::success(format!(
+            "Search ({backend}) for '{q}' returned no results."
+        ))),
+        Ok((backend, hits)) => {
+            let mut out = format!("Search ({backend}) — {} results for '{q}':\n\n", hits.len());
+            for (i, h) in hits.iter().enumerate() {
+                out.push_str(&format!(
+                    "{}. {}\n   {}\n   {}\n\n",
+                    i + 1,
+                    h.title,
+                    h.url,
+                    if h.snippet.is_empty() { "(no snippet)" } else { &h.snippet }
+                ));
+            }
+            Ok(ToolResult::success(out))
+        }
+        Err(e) => Ok(ToolResult::error(format!("search failed: {e}"))),
+    }
+}
+
+async fn search_brave(
+    query: &str,
+    api_key: &str,
+    max_results: usize,
+) -> anyhow::Result<(&'static str, Vec<SearchHit>)> {
+    let client = reqwest::Client::builder()
+        .timeout(SEARCH_TIMEOUT)
+        .user_agent(DEFAULT_USER_AGENT)
+        .build()?;
+    let count = max_results.min(20);
+    let resp = client
+        .get("https://api.search.brave.com/res/v1/web/search")
+        .query(&[("q", query), ("count", &count.to_string())])
+        .header("Accept", "application/json")
+        .header("X-Subscription-Token", api_key)
+        .send()
+        .await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("Brave Search HTTP {status}: {}", truncate_chars(&body, 200));
+    }
+    let v: serde_json::Value = serde_json::from_str(&body)?;
+    let hits = parse_brave_hits(&v, max_results);
+    Ok(("brave", hits))
+}
+
+pub(crate) fn parse_brave_hits(v: &serde_json::Value, max_results: usize) -> Vec<SearchHit> {
+    let mut out = Vec::new();
+    let Some(results) = v["web"]["results"].as_array() else { return out };
+    for r in results.iter().take(max_results) {
+        let title = r["title"].as_str().unwrap_or("").to_string();
+        let url = r["url"].as_str().unwrap_or("").to_string();
+        let snippet = r["description"]
+            .as_str()
+            .map(|s| html_to_text(s))
+            .unwrap_or_default();
+        if !title.is_empty() && !url.is_empty() {
+            out.push(SearchHit { title, url, snippet });
+        }
+    }
+    out
+}
+
+async fn search_ddg(
+    query: &str,
+    max_results: usize,
+) -> anyhow::Result<(&'static str, Vec<SearchHit>)> {
+    // DuckDuckGo HTML endpoint — no API key, no JS rendering.
+    // Scraping is fragile by definition; treat as a best-effort fallback
+    // for users who haven't set PEKO_BRAVE_API_KEY.
+    let client = reqwest::Client::builder()
+        .timeout(SEARCH_TIMEOUT)
+        .user_agent(DEFAULT_USER_AGENT)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+    let resp = client
+        .get("https://html.duckduckgo.com/html/")
+        .query(&[("q", query), ("kl", "wt-wt")])
+        .send()
+        .await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("DDG HTML HTTP {status}");
+    }
+    let hits = parse_ddg_hits(&body, max_results);
+    Ok(("duckduckgo", hits))
+}
+
+pub(crate) fn parse_ddg_hits(html: &str, max_results: usize) -> Vec<SearchHit> {
+    // The DDG HTML page renders each result inside
+    //   <div class="result results_links results_links_deep web-result ">
+    //     <h2 class="result__title">
+    //       <a class="result__a" href="...">Title</a>
+    //     </h2>
+    //     <a class="result__snippet" href="...">snippet text</a>
+    //   </div>
+    //
+    // Plus a redirect prefix on hrefs like /l/?uddg=<encoded> we have
+    // to strip. The parser is line-oriented + regex-free to avoid the
+    // dep tree. Fragile to layout changes; the brave path is preferred.
+    let mut out = Vec::new();
+    let mut chunks: Vec<&str> = html.split("class=\"result__title\"").collect();
+    chunks.remove(0); // drop pre-first chunk
+    for chunk in chunks.iter().take(max_results) {
+        let url_raw = extract_after(chunk, "class=\"result__a\" href=\"", "\"")
+            .unwrap_or_default();
+        let url = decode_ddg_redirect(&url_raw);
+        let title_html = extract_after(chunk, "\">", "</a>").unwrap_or_default();
+        let title = html_to_text(&title_html);
+        let snippet_html = extract_after(chunk, "class=\"result__snippet\"", "</a>")
+            .unwrap_or_default();
+        let snippet_html = match snippet_html.find('>') {
+            Some(i) => &snippet_html[i + 1..],
+            None => &snippet_html,
+        };
+        let snippet = html_to_text(snippet_html);
+        if !title.is_empty() && !url.is_empty() {
+            out.push(SearchHit { title, url, snippet });
+        }
+    }
+    out
+}
+
+fn extract_after<'a>(haystack: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let i = haystack.find(start)? + start.len();
+    let rest = &haystack[i..];
+    let j = rest.find(end)?;
+    Some(&rest[..j])
+}
+
+fn decode_ddg_redirect(href: &str) -> String {
+    // DDG wraps results in /l/?uddg=<percent-encoded-url>&...
+    if let Some(start) = href.find("uddg=") {
+        let after = &href[start + 5..];
+        let end = after.find('&').unwrap_or(after.len());
+        return percent_decode(&after[..end]);
+    }
+    href.to_string()
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = hex_digit(bytes[i + 1]);
+            let lo = hex_digit(bytes[i + 2]);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +639,72 @@ mod tests {
             .collect();
         assert!(actions.contains(&"fetch"));
         assert!(actions.contains(&"open_in_browser"));
+        assert!(actions.contains(&"search"));
+    }
+
+    #[test]
+    fn parses_brave_search_response() {
+        let v: serde_json::Value = serde_json::json!({
+            "web": {
+                "results": [
+                    {
+                        "title": "Rust",
+                        "url": "https://rust-lang.org",
+                        "description": "A language empowering everyone <strong>to build</strong> reliable software."
+                    },
+                    {
+                        "title": "Wikipedia: Rust",
+                        "url": "https://en.wikipedia.org/wiki/Rust",
+                        "description": "Encyclopedia article."
+                    }
+                ]
+            }
+        });
+        let hits = parse_brave_hits(&v, 5);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].title, "Rust");
+        assert_eq!(hits[0].url, "https://rust-lang.org");
+        assert!(hits[0].snippet.contains("to build"));
+        assert!(!hits[0].snippet.contains("<strong>"));
+    }
+
+    #[test]
+    fn brave_parser_returns_empty_when_no_results() {
+        let v = serde_json::json!({"web": {"results": []}});
+        assert!(parse_brave_hits(&v, 5).is_empty());
+        let v = serde_json::json!({"meta": "no web key"});
+        assert!(parse_brave_hits(&v, 5).is_empty());
+    }
+
+    #[test]
+    fn parses_ddg_html_results() {
+        let html = r#"
+        <div>
+          <h2 class="result__title">
+            <a class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Fa&rut=abc">Example A</a>
+          </h2>
+          <a class="result__snippet" href="/l/?uddg=...">Snippet for A</a>
+        </div>
+        <div>
+          <h2 class="result__title">
+            <a class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Fb">Example B</a>
+          </h2>
+          <a class="result__snippet" href="/l/?uddg=...">Snippet for B</a>
+        </div>
+        "#;
+        let hits = parse_ddg_hits(html, 5);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].title, "Example A");
+        assert_eq!(hits[0].url, "https://example.com/a");
+        assert!(hits[0].snippet.contains("Snippet for A"));
+        assert_eq!(hits[1].url, "https://example.com/b");
+    }
+
+    #[test]
+    fn percent_decode_handles_basic_chars() {
+        assert_eq!(percent_decode("https%3A%2F%2Fa.com"), "https://a.com");
+        assert_eq!(percent_decode("hello%20world"), "hello world");
+        // Invalid percent escape passes through.
+        assert_eq!(percent_decode("a%zz%2Fb"), "a%zz/b");
     }
 }

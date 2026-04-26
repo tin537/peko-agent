@@ -13,6 +13,16 @@ use peko_transport::LlmProvider;
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
 
+/// Char-aware string truncation. Defensive against multi-byte UTF-8
+/// (Thai / CJK / emoji): byte-indexed slicing here would panic the
+/// whole tokio worker the same way phase13's compressor bug did.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect::<String>() + "…"
+}
+
 pub struct TelegramBot {
     client: Client,
     token: String,
@@ -29,7 +39,16 @@ pub struct TelegramBot {
     /// Per-user sliding-window timestamps of recent task starts.
     /// Used to enforce TelegramConfig::rate_limit_per_minute.
     rate_window: Mutex<HashMap<i64, Vec<Instant>>>,
+    /// Per-chat conversation memory: the last few (user_input, agent_text)
+    /// turns. Pseudo-continuity — full session resume via SessionStore +
+    /// run_turn would need a runtime refactor; the prepend-context
+    /// approach gives multi-turn coherence at the cost of a single
+    /// truncated string passed back to the LLM each call.
+    chat_history: Mutex<HashMap<i64, Vec<(String, String)>>>,
 }
+
+const CHAT_HISTORY_KEEP_TURNS: usize = 3;
+const CHAT_HISTORY_PER_TURN_CHARS: usize = 1500;
 
 // ── Telegram API types ──
 
@@ -106,7 +125,51 @@ impl TelegramBot {
             skills,
             soul,
             rate_window: Mutex::new(HashMap::new()),
+            chat_history: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Build the LLM-input string for a chat: optionally prefixed with
+    /// the last few turns so multi-turn references like "scroll down"
+    /// or "tap the second one" have context.
+    async fn build_continuation_input(&self, chat_id: i64, user_input: &str) -> String {
+        let history = self.chat_history.lock().await;
+        let Some(turns) = history.get(&chat_id) else {
+            return user_input.to_string();
+        };
+        if turns.is_empty() {
+            return user_input.to_string();
+        }
+        let mut buf = String::from("[Recent turns in this chat — for context only, the user's latest request is at the bottom]\n\n");
+        for (u, a) in turns.iter() {
+            // Char-aware truncation per turn so big tool results don't
+            // explode the prefix. The compressor in the runtime will
+            // dedupe / trim further if needed.
+            let u_short = truncate_chars(u, CHAT_HISTORY_PER_TURN_CHARS);
+            let a_short = truncate_chars(a, CHAT_HISTORY_PER_TURN_CHARS);
+            buf.push_str(&format!("USER: {u_short}\nAGENT: {a_short}\n\n"));
+        }
+        buf.push_str("---\nUser's latest request:\n");
+        buf.push_str(user_input);
+        buf
+    }
+
+    /// Append a (user, agent) pair to the chat's history, dropping the
+    /// oldest turn once the deque is full. Called from `handle_message`
+    /// after a successful agent response.
+    async fn record_turn(&self, chat_id: i64, user_input: String, agent_text: String) {
+        let mut history = self.chat_history.lock().await;
+        let entry = history.entry(chat_id).or_insert_with(Vec::new);
+        entry.push((user_input, agent_text));
+        let len = entry.len();
+        if len > CHAT_HISTORY_KEEP_TURNS {
+            entry.drain(0..len - CHAT_HISTORY_KEEP_TURNS);
+        }
+    }
+
+    async fn reset_chat_history(&self, chat_id: i64) {
+        let mut history = self.chat_history.lock().await;
+        history.remove(&chat_id);
     }
 
     fn api_url(&self, method: &str) -> String {
@@ -318,23 +381,33 @@ impl TelegramBot {
             return;
         }
 
-        // Run agent task
+        // Run agent task — prepend recent turns from this chat as
+        // context so multi-turn references work ("scroll down", "tap
+        // the second one"). The agent's own context compressor will
+        // trim if the prefix is too large.
         self.send_typing(chat_id).await;
 
-        match self.run_agent_task(&text).await {
-            Ok(response) => {
-                // Send response text
-                if !response.text.is_empty() {
-                    self.send_text(chat_id, &response.text).await;
-                } else {
-                    self.send_text(chat_id, "(task completed with no text response)").await;
-                }
+        let agent_input = self.build_continuation_input(chat_id, &text).await;
 
-                // Send iteration info
+        match self.run_agent_task(&agent_input).await {
+            Ok(response) => {
+                let agent_text = if response.text.is_empty() {
+                    "(task completed with no text response)".to_string()
+                } else {
+                    response.text.clone()
+                };
+                self.send_text(chat_id, &agent_text).await;
+
                 self.send_text(chat_id, &format!(
                     "[{} iterations | session: {}]",
                     response.iterations, &response.session_id[..8]
                 )).await;
+
+                // Record the turn so the next message in this chat
+                // gets it in its prefix. Failures during agent task
+                // execution are NOT recorded — keeping the history
+                // clean of error noise.
+                self.record_turn(chat_id, text.clone(), agent_text).await;
             }
             Err(e) => {
                 self.send_text(chat_id, &format!("Error: {}", e)).await;
@@ -355,8 +428,17 @@ impl TelegramBot {
                      /memories — List saved memories\n\
                      /skills — List learned skills\n\
                      /apps — List installed apps\n\
-                     /help — This message"
+                     /new — Reset chat memory (start a fresh conversation)\n\
+                     /help — This message\n\n\
+                     Multi-turn: I remember the last 3 turns in this chat — \
+                     so you can say things like \"scroll down\" or \"tap the \
+                     second one\" without restating context. Use /new to \
+                     start over."
                 ).await;
+            }
+            "/new" => {
+                self.reset_chat_history(chat_id).await;
+                self.send_text(chat_id, "Chat memory cleared. Fresh start.").await;
             }
             "/status" => {
                 let mem = peko_core::MemMonitor::snapshot();
