@@ -395,8 +395,12 @@ pub fn slugify(title: &str) -> String {
     while out.ends_with('-') {
         out.pop();
     }
-    if out.len() > 80 {
-        out.truncate(80);
+    // Char-aware truncation — Thai / CJK glyphs are 3 bytes each, so
+    // `out.truncate(80)` (byte index) panics when the cut lands inside
+    // a codepoint. Same class of bug as the Phase 13 compressor fix.
+    // Cap at 80 CHARS, which is also a more meaningful filename limit.
+    if out.chars().count() > 80 {
+        out = out.chars().take(80).collect();
         while out.ends_with('-') {
             out.pop();
         }
@@ -491,6 +495,22 @@ mod tests {
     fn slugify_empty_safe() {
         assert_eq!(slugify(""), "");
         assert_eq!(slugify("---"), "");
+    }
+
+    #[test]
+    fn slugify_handles_long_thai_titles_no_panic() {
+        // Regression: byte-indexed `out.truncate(80)` panics when the
+        // cut lands inside a multi-byte codepoint. Thai chars are 3
+        // bytes; a 100-char Thai title hits 300 bytes and slicing at
+        // byte 80 lands mid-glyph. Real-world reproducer that crashed
+        // the agent during a research task.
+        let long_thai = "การวิจัยเรื่องการสร้างเอเจนต์ AI อัตโนมัติทางการตลาดที่สามารถสร้างรายได้ได้จริง ปี 2025 และต่อไป".repeat(2);
+        let s = slugify(&long_thai);
+        assert!(s.chars().count() <= 80);
+        // Must be valid UTF-8 (slicing on byte boundary would have
+        // corrupted it pre-fix; with chars().take() we always end on
+        // a codepoint).
+        assert!(std::str::from_utf8(s.as_bytes()).is_ok());
     }
 
     #[test]
