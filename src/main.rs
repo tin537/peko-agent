@@ -570,6 +570,8 @@ async fn main() -> anyhow::Result<()> {
                 memory_store.clone(),
                 skill_store.clone(),
                 soul_arc.clone(),
+                brain_store.clone(),
+                bg_store.clone(),
             );
             tokio::spawn(async move { bot.run().await });
             info!(

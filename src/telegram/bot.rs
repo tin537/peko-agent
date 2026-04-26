@@ -7,7 +7,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use peko_config::TelegramConfig;
-use peko_core::{AgentRuntime, AgentResponse, SessionStore, ToolRegistry, MemoryStore, SkillStore, SystemPrompt};
+use peko_core::{AgentRuntime, AgentResponse, BgStore, BrainStore, SessionStore, ToolRegistry, MemoryStore, SkillStore, SystemPrompt};
 use peko_config::AgentConfig;
 use peko_transport::LlmProvider;
 
@@ -83,6 +83,11 @@ pub struct TelegramBot {
     memory: Arc<Mutex<MemoryStore>>,
     skills: Arc<Mutex<SkillStore>>,
     soul: Arc<Mutex<String>>,
+    /// Direct handle to the brain so /brain /find /note /recent /plans
+    /// /wonder slash commands hit SQLite without an LLM round-trip.
+    brain: Arc<Mutex<BrainStore>>,
+    /// Direct handle for /jobs /cancel /wait commands.
+    bg: BgStore,
     /// Per-user sliding-window timestamps of recent task starts.
     /// Used to enforce TelegramConfig::rate_limit_per_minute.
     rate_window: Mutex<HashMap<i64, Vec<Instant>>>,
@@ -167,6 +172,8 @@ impl TelegramBot {
         memory: Arc<Mutex<MemoryStore>>,
         skills: Arc<Mutex<SkillStore>>,
         soul: Arc<Mutex<String>>,
+        brain: Arc<Mutex<BrainStore>>,
+        bg: BgStore,
     ) -> Self {
         Self {
             client: Client::builder()
@@ -180,6 +187,8 @@ impl TelegramBot {
             memory,
             skills,
             soul,
+            brain,
+            bg,
             rate_window: Mutex::new(HashMap::new()),
             chat_history: Mutex::new(HashMap::new()),
         }
@@ -605,20 +614,29 @@ impl TelegramBot {
         match parts[0] {
             "/start" | "/help" => {
                 self.send_text(chat_id,
-                    "Peko Agent — Android Agent-as-OS\n\n\
-                     Send me any task and I'll execute it on the device.\n\n\
-                     Commands:\n\
-                     /status — Device status and memory\n\
-                     /screenshot — Take a screenshot\n\
-                     /memories — List saved memories\n\
-                     /skills — List learned skills\n\
-                     /apps — List installed apps\n\
-                     /new — Reset chat memory (start a fresh conversation)\n\
-                     /help — This message\n\n\
-                     Multi-turn: I remember the last 3 turns in this chat — \
-                     so you can say things like \"scroll down\" or \"tap the \
-                     second one\" without restating context. Use /new to \
-                     start over."
+                    "🤖 *Peko Agent*  — Android Agent-as-OS\n\n\
+                     Send me any task. I remember the last 3 turns of this chat.\n\n\
+                     *Device:*\n\
+                     /status — agent status\n\
+                     /screenshot — current screen\n\
+                     /apps — installed user apps\n\
+                     /battery — battery summary\n\
+                     /wifi — wifi summary\n\
+                     /home /back /unlock — quick keys\n\n\
+                     *Brain (long-term memory):*\n\
+                     /find <q> or /brain <q> — search notes\n\
+                     /note <title>=<content> — save a note\n\
+                     /wonder <q> — save an open question for autonomy\n\
+                     /recent [N] — most-recent notes\n\
+                     /plans — pending/active plans\n\
+                     /memories /skills — internal memory + skills\n\n\
+                     *Background tasks:*\n\
+                     /jobs — list bg jobs\n\
+                     /wait <id> — wait + show result\n\
+                     /cancel <id> — cancel a bg job\n\
+                     /research <topic> — fire research as bg job\n\n\
+                     /new — reset chat memory\n\
+                     /help — this message"
                 ).await;
             }
             "/new" => {
@@ -691,10 +709,214 @@ impl TelegramBot {
                     Err(e) => self.send_text(chat_id, &format!("Error: {}", e)).await,
                 }
             }
+            //
+            // ── Brain (Phase 18A) — direct SQLite access, no LLM round-trip
+            //
+            "/brain" | "/find" => {
+                let query = parts.get(1).unwrap_or(&"").trim();
+                if query.is_empty() {
+                    self.send_text(chat_id, "Usage: /find <query>").await;
+                } else {
+                    self.cmd_brain_search(chat_id, query).await;
+                }
+            }
+            "/note" => {
+                // /note <title> = <content>      OR    /note <title>=<content>
+                let body = parts.get(1).map(|s| s.to_string()).unwrap_or_default();
+                let (title, content) = match body.split_once('=') {
+                    Some((t, c)) => (t.trim().to_string(), c.trim().to_string()),
+                    None => (body.trim().to_string(), String::new()),
+                };
+                if title.is_empty() {
+                    self.send_text(chat_id, "Usage: /note <title> = <content>").await;
+                } else {
+                    self.cmd_brain_save(chat_id, &title, &content, "note").await;
+                }
+            }
+            "/wonder" => {
+                let q = parts.get(1).unwrap_or(&"").trim();
+                if q.is_empty() {
+                    self.send_text(chat_id, "Usage: /wonder <open question for the autonomy loop to revisit>").await;
+                } else {
+                    self.cmd_brain_save(chat_id, q, "", "wonder").await;
+                }
+            }
+            "/recent" => {
+                let n: usize = parts.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(10);
+                self.cmd_brain_recent(chat_id, n, None).await;
+            }
+            "/plans" => {
+                self.cmd_brain_recent(chat_id, 20, Some("plan")).await;
+            }
+            //
+            // ── Background jobs (Phase 19) — direct BgStore, no LLM
+            //
+            "/jobs" | "/bg" => {
+                self.cmd_bg_list(chat_id).await;
+            }
+            "/cancel" => {
+                let id = parts.get(1).unwrap_or(&"").trim();
+                if id.is_empty() {
+                    self.send_text(chat_id, "Usage: /cancel <short_id>").await;
+                } else {
+                    self.cmd_bg_cancel(chat_id, id).await;
+                }
+            }
+            "/wait" => {
+                let id = parts.get(1).unwrap_or(&"").trim();
+                if id.is_empty() {
+                    self.send_text(chat_id, "Usage: /wait <short_id>").await;
+                } else {
+                    self.cmd_bg_wait(chat_id, id).await;
+                }
+            }
+            //
+            // ── Forward-to-agent shortcuts (sugar over agent task)
+            //
+            "/research" => {
+                let topic = parts.get(1).unwrap_or(&"").trim();
+                if topic.is_empty() {
+                    self.send_text(chat_id, "Usage: /research <topic>").await;
+                } else {
+                    let task = format!(
+                        "Run `bg fire {{ task: \"research do topic={topic}\", name: \"research-{}\" }}` and report the bg job id.",
+                        topic.chars().take(30).collect::<String>()
+                    );
+                    self.send_typing(chat_id).await;
+                    match self.run_agent_task(&task).await {
+                        Ok(r) => self.send_text(chat_id, &r.text).await,
+                        Err(e) => self.send_text(chat_id, &format!("err: {e}")).await,
+                    }
+                }
+            }
+            "/unlock" => self.forward_to_agent(chat_id, "Call the unlock_device tool to wake and unlock the phone.").await,
+            "/home" => self.forward_to_agent(chat_id, "Press the HOME hardware button using key_event.").await,
+            "/back" => self.forward_to_agent(chat_id, "Press the BACK hardware button using key_event.").await,
+            "/wifi" => self.forward_to_agent(chat_id, "Call wifi status and summarise the result.").await,
+            "/battery" => self.forward_to_agent(chat_id, "Call sensors battery and summarise.").await,
             _ => {
                 self.send_text(chat_id, "Unknown command. Try /help").await;
             }
         }
+    }
+
+    async fn forward_to_agent(&self, chat_id: i64, task: &str) {
+        self.send_typing(chat_id).await;
+        match self.run_agent_task(task).await {
+            Ok(r) => self.send_text(chat_id, &r.text).await,
+            Err(e) => self.send_text(chat_id, &format!("err: {e}")).await,
+        }
+    }
+
+    async fn cmd_brain_search(&self, chat_id: i64, query: &str) {
+        let store = self.brain.lock().await;
+        match store.search(query, 8, true) {
+            Ok(notes) if notes.is_empty() => {
+                self.send_text(chat_id, &format!("No brain notes match '{query}'.")).await;
+            }
+            Ok(notes) => {
+                let mut out = format!("🧠 {} matches for '{query}':\n", notes.len());
+                for n in notes.iter().take(8) {
+                    let preview: String = n.content.chars().take(120).collect();
+                    out.push_str(&format!(
+                        "\n• [{}] **{}** _({})_\n  {}\n",
+                        n.kind, n.title, n.slug,
+                        preview.replace('\n', " ")
+                    ));
+                }
+                self.send_text(chat_id, &out).await;
+            }
+            Err(e) => self.send_text(chat_id, &format!("brain search err: {e}")).await,
+        }
+    }
+
+    async fn cmd_brain_save(&self, chat_id: i64, title: &str, content: &str, kind: &str) {
+        let store = self.brain.lock().await;
+        match store.save(title, content, Some(kind), &[]) {
+            Ok(n) => self.send_text(chat_id, &format!("✅ Saved {kind} '{}' (slug: {})", n.title, n.slug)).await,
+            Err(e) => self.send_text(chat_id, &format!("save err: {e}")).await,
+        }
+    }
+
+    async fn cmd_brain_recent(&self, chat_id: i64, n: usize, kind: Option<&str>) {
+        let store = self.brain.lock().await;
+        match store.list_recent(n.min(50), kind) {
+            Ok(notes) if notes.is_empty() => {
+                self.send_text(chat_id, &format!("No notes (kind={})", kind.unwrap_or("any"))).await;
+            }
+            Ok(notes) => {
+                let mut out = format!(
+                    "📝 {} recent note(s){}:\n",
+                    notes.len(),
+                    kind.map(|k| format!(" (kind={k})")).unwrap_or_default()
+                );
+                for note in notes {
+                    let when = note.updated_at.split('T').next().unwrap_or(&note.updated_at).to_string();
+                    out.push_str(&format!(
+                        "\n• [{}] **{}** ({}) — {}",
+                        note.kind, note.title, when, note.slug
+                    ));
+                }
+                self.send_text(chat_id, &out).await;
+            }
+            Err(e) => self.send_text(chat_id, &format!("list err: {e}")).await,
+        }
+    }
+
+    async fn cmd_bg_list(&self, chat_id: i64) {
+        let jobs = self.bg.list(true).await;
+        if jobs.is_empty() {
+            self.send_text(chat_id, "No bg jobs.").await;
+            return;
+        }
+        let mut out = format!("🔄 {} bg job(s):\n", jobs.len());
+        for j in jobs.iter().take(20) {
+            let task_short: String = j.task.chars().take(80).collect();
+            out.push_str(&format!(
+                "\n• [{:?}] `{}` — {} ({})\n  {}\n",
+                j.status, j.short_id(),
+                j.name.as_deref().unwrap_or("unnamed"),
+                j.created_at.format("%H:%M:%S"),
+                task_short
+            ));
+        }
+        self.send_text(chat_id, &out).await;
+    }
+
+    async fn cmd_bg_cancel(&self, chat_id: i64, id_arg: &str) {
+        let Some(id) = self.bg.resolve(id_arg).await else {
+            self.send_text(chat_id, &format!("No bg job '{id_arg}'.")).await;
+            return;
+        };
+        if self.bg.mark_cancelled(&id).await {
+            self.send_text(chat_id, &format!("🛑 cancelled bg `{id_arg}`.")).await;
+        } else {
+            self.send_text(chat_id, &format!("bg `{id_arg}` already terminal.")).await;
+        }
+    }
+
+    async fn cmd_bg_wait(&self, chat_id: i64, id_arg: &str) {
+        let Some(id) = self.bg.resolve(id_arg).await else {
+            self.send_text(chat_id, &format!("No bg job '{id_arg}'.")).await;
+            return;
+        };
+        self.send_typing(chat_id).await;
+        let Some(job) = self.bg.wait(&id, Some(60_000)).await else {
+            self.send_text(chat_id, "vanished mid-wait").await;
+            return;
+        };
+        if !job.status.is_terminal() {
+            self.send_text(chat_id, &format!(
+                "⏱ bg `{}` still {:?} after 60s. /wait again or /jobs.",
+                job.short_id(), job.status
+            )).await;
+            return;
+        }
+        let body = job.result.as_deref().unwrap_or_else(|| job.error.as_deref().unwrap_or("(no output)"));
+        self.send_text(chat_id, &format!(
+            "✅ bg `{}` {:?} ({} iter):\n\n{}",
+            job.short_id(), job.status, job.iterations, body
+        )).await;
     }
 
     async fn run_agent_task(&self, input: &str) -> anyhow::Result<AgentResponse> {
@@ -772,6 +994,9 @@ mod tests {
         let mem_db = tmp.join("memory.sqlite");
         let skills_dir = tmp.join("skills");
         std::fs::create_dir_all(&skills_dir).ok();
+        let brain_dir = tmp.join("brain");
+        std::fs::create_dir_all(&brain_dir).ok();
+        let brain = BrainStore::open(&tmp.join("brain.sqlite"), &brain_dir).unwrap();
         TelegramBot::new(
             cfg,
             Arc::new(Mutex::new(serde_json::json!({}))),
@@ -780,6 +1005,8 @@ mod tests {
             Arc::new(Mutex::new(MemoryStore::open(&mem_db).unwrap())),
             Arc::new(Mutex::new(SkillStore::open(&skills_dir).unwrap())),
             Arc::new(Mutex::new(String::new())),
+            Arc::new(Mutex::new(brain)),
+            BgStore::new(),
         )
     }
 
