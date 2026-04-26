@@ -55,13 +55,16 @@ pub async fn send(req: BridgeRequest<'_>) -> anyhow::Result<BridgeResponse> {
     let out_json = out_dir.join(format!("{id}.json"));
     let done = out_dir.join(format!("{id}.done"));
 
+    // Cleanup guard intentionally excludes any output asset
+    // (jpg/wav/png/bin). Caller's persist_asset() copies the file out
+    // AFTER this function returns; deleting it in the guard would race
+    // the copy and produce ENOENT. The priv-app's out/ directory leaks
+    // these until overwritten — bounded by usage, cheap to live with.
     let _guard = CleanupGuard {
         paths: vec![
             req_path.clone(), in_asset.clone(), start_path.clone(),
             out_json.clone(), done.clone(),
         ],
-        out_dir: out_dir.clone(),
-        id: id.clone(),
     };
 
     tokio::fs::write(&req_path, serde_json::to_vec(&req.body)?).await?;
@@ -117,18 +120,10 @@ async fn chmod_world_readable(path: &Path) -> std::io::Result<()> {
 
 struct CleanupGuard {
     paths: Vec<PathBuf>,
-    out_dir: PathBuf,
-    id: String,
 }
 impl Drop for CleanupGuard {
     fn drop(&mut self) {
         for p in &self.paths { let _ = std::fs::remove_file(p); }
-        // Out asset (jpg/wav/etc) — caller is responsible for moving it
-        // to a permanent home before this guard fires; if they didn't,
-        // we drop it on the floor.
-        for ext in ["jpg", "wav", "png", "bin"] {
-            let _ = std::fs::remove_file(self.out_dir.join(format!("{}.{}", self.id, ext)));
-        }
     }
 }
 

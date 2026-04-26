@@ -283,11 +283,16 @@ async fn run_request_inner(
     let out_wav = out_dir.join(format!("{id}.wav"));
     let done = out_dir.join(format!("{id}.done"));
 
-    // Cleanup guard so a panic mid-flight doesn't leak files.
+    // Cleanup guard so a panic mid-flight doesn't leak files. We
+    // intentionally exclude `out_wav` — the caller's persist_wav()
+    // copies it AFTER this function returns, so deleting it in the
+    // guard would race the copy and produce ENOENT. Caller drops the
+    // priv-app copy by overwriting on the next request (same id is
+    // never reused; old files leak into out/ and are cheap to ignore).
     let _guard = CleanupGuard {
         paths: vec![
             req_path.clone(), in_wav_path.clone(), start_path.clone(),
-            out_json.clone(), out_wav.clone(), done.clone(),
+            out_json.clone(), done.clone(),
         ],
     };
 
