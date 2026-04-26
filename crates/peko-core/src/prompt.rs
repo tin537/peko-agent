@@ -30,6 +30,12 @@ When you tap coordinates returned by `ui_inspect`, use the `center:(x,y)` values
 
 Special tools that replace multi-step fumbling:
 - `unlock_device` — if the user asks to wake the phone, log in, unlock, or "open the device", call this ONCE. Do NOT improvise key_event POWER → screenshot → swipe → text. The tool handles wake, keyguard dismiss, and PIN entry atomically.
+- `web` — for ANY task that involves reading a web page, prefer `web` action=`fetch` over driving the browser by screenshot+tap. Chrome renders web content into an opaque WebView that uiautomator can't see, and screenshots are downscaled to 720p which makes link-tapping unreliable. `web fetch` returns the page's readable text directly, no DOM clicking required. To send the user to a specific URL in their actual browser, use action=`open_in_browser` instead of tapping the address bar and typing — it dispatches an ACTION_VIEW intent that lands directly on the page.
+
+Browser task heuristic:
+- "What does this page say / summarise / find X on Y site" → `web fetch`
+- "Show me the page in my browser / open this URL" → `web open_in_browser`
+- "Log in / fill out a form / click through a checkout" → screenshot + ui_inspect + touch (the genuinely-interactive path)
 
 For UI tasks, the working loop is:
 1. Check if you have a relevant skill — if so, follow it

@@ -16,7 +16,7 @@ use peko_hal::{InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
     AudioTool, CallTool, DrawTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool,
     ScreenshotTool, DelegateTool, SensorsTool, ShellTool, SkillsTool, SmsTool, TextInputTool,
-    TouchTool, UiAutomationTool, WifiTool,
+    TouchTool, UiAutomationTool, WebTool, WifiTool,
 };
 
 fn register_tools(config: &PekoConfig) -> ToolRegistry {
@@ -191,6 +191,12 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
     // Returns a PNG; in Lane A this can be blitted to /dev/graphics/fb0
     // by a future blit step.
     registry.register(DrawTool::new());
+
+    // Web — direct HTTP fetch + browser-launch helper. Lets the agent
+    // read pages without driving Chrome by screenshot+touch (which
+    // is brittle on phones because Chrome's WebView is opaque to
+    // uiautomator and screenshots are downscaled to 720p).
+    registry.register(WebTool::new());
 
     registry
 }

@@ -19,6 +19,7 @@ pub mod sensors_tool;
 pub mod wifi_tool;
 pub mod audio_tool;
 pub mod draw_tool;
+pub mod web_tool;
 
 pub use screenshot::ScreenshotTool;
 pub use touch::TouchTool;
@@ -40,6 +41,7 @@ pub use sensors_tool::SensorsTool;
 pub use wifi_tool::WifiTool;
 pub use audio_tool::AudioTool;
 pub use draw_tool::DrawTool;
+pub use web_tool::WebTool;
 
 #[cfg(test)]
 mod tests;
