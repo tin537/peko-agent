@@ -123,7 +123,9 @@ fn build_request_body(
         "content": system_prompt,
     })];
     for msg in messages {
-        oai_messages.push(OpenAICompatProvider::to_openai_message(msg));
+        // Fan out: a single neutral msg may emit a tool-result message
+        // plus a follow-up user message carrying the attached image.
+        oai_messages.extend(OpenAICompatProvider::to_openai_message(msg));
     }
 
     let mut body = json!({

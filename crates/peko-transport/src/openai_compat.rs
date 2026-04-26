@@ -32,14 +32,24 @@ impl OpenAICompatProvider {
     }
 
     /// Convert a neutral TransportMessage to OpenAI wire format.
+    /// Returns a Vec because a single neutral message may translate to
+    /// multiple wire messages — e.g. a tool result that carried an
+    /// attached image fans out to a `role:tool` message (text payload)
+    /// followed by a `role:user` message carrying the image_url block.
+    /// That two-message pattern is the cross-provider compatible way to
+    /// hand a vision model the screenshot the agent just took: OpenAI's
+    /// strict tool-message schema doesn't allow images, but a follow-up
+    /// user message with `image_url` is consumed by the next assistant
+    /// turn and routed into the same multimodal context.
+    ///
     /// Handles: assistant tool_calls, role:tool results, vision images.
-    pub(crate) fn to_openai_message(msg: &Message) -> serde_json::Value {
+    pub(crate) fn to_openai_message(msg: &Message) -> Vec<serde_json::Value> {
         use crate::provider::{MessageContent, ContentBlock};
 
         match (&msg.role as &str, &msg.content) {
             // User with plain text
             ("user", MessageContent::Text(text)) => {
-                json!({"role": "user", "content": text})
+                vec![json!({"role": "user", "content": text})]
             }
             // User with content blocks (tool results or images)
             ("user", MessageContent::Blocks(blocks)) => {
@@ -47,20 +57,51 @@ impl OpenAICompatProvider {
                 let has_tool_result = blocks.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }));
 
                 if has_tool_result {
-                    // Convert to OpenAI tool result format
-                    // Each tool_result block becomes a separate role:tool message
-                    // For simplicity, take the first one
+                    // Build:
+                    //   1. role:tool messages, one per ToolResult block
+                    //   2. then a single role:user with image_url parts
+                    //      collecting every Image block in the same group
+                    let mut out = Vec::new();
+                    let mut image_parts: Vec<serde_json::Value> = Vec::new();
                     for block in blocks {
-                        if let ContentBlock::ToolResult { tool_use_id, content, .. } = block {
-                            return json!({
-                                "role": "tool",
-                                "tool_call_id": tool_use_id,
-                                "content": content,
-                            });
+                        match block {
+                            ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                                out.push(json!({
+                                    "role": "tool",
+                                    "tool_call_id": tool_use_id,
+                                    "content": content,
+                                }));
+                            }
+                            ContentBlock::Image { source } => {
+                                let data_uri = format!(
+                                    "data:{};base64,{}",
+                                    source.media_type, source.data
+                                );
+                                image_parts.push(json!({
+                                    "type": "image_url",
+                                    "image_url": {"url": data_uri}
+                                }));
+                            }
+                            _ => {}
                         }
                     }
-                    json!({"role": "user", "content": ""})
-                } else {
+                    if !image_parts.is_empty() {
+                        // Add a brief text part so providers that require
+                        // non-empty content arrays (some MiMo / vLLM
+                        // builds) don't reject the message.
+                        let mut parts = vec![json!({
+                            "type": "text",
+                            "text": "Tool returned the attached image:"
+                        })];
+                        parts.extend(image_parts);
+                        out.push(json!({"role": "user", "content": parts}));
+                    }
+                    if out.is_empty() {
+                        out.push(json!({"role": "user", "content": ""}));
+                    }
+                    return out;
+                }
+                {
                     // User message with mixed content (text + images)
                     let mut parts: Vec<serde_json::Value> = Vec::new();
                     for block in blocks {
@@ -79,12 +120,12 @@ impl OpenAICompatProvider {
                             _ => {}
                         }
                     }
-                    json!({"role": "user", "content": parts})
+                    vec![json!({"role": "user", "content": parts})]
                 }
             }
             // Assistant with plain text
             ("assistant", MessageContent::Text(text)) => {
-                json!({"role": "assistant", "content": text})
+                vec![json!({"role": "assistant", "content": text})]
             }
             // Assistant with tool calls (Anthropic format blocks → OpenAI tool_calls)
             ("assistant", MessageContent::Blocks(blocks)) => {
@@ -117,18 +158,18 @@ impl OpenAICompatProvider {
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = json!(tool_calls);
                 }
-                msg
+                vec![msg]
             }
             // Tool result (shouldn't reach here if converted from user blocks above, but handle it)
             ("tool", MessageContent::Text(content)) => {
-                json!({"role": "tool", "content": content})
+                vec![json!({"role": "tool", "content": content})]
             }
             // Fallback
             (role, MessageContent::Text(text)) => {
-                json!({"role": role, "content": text})
+                vec![json!({"role": role, "content": text})]
             }
             (role, _) => {
-                json!({"role": role, "content": ""})
+                vec![json!({"role": role, "content": ""})]
             }
         }
     }
@@ -201,7 +242,9 @@ impl LlmProvider for OpenAICompatProvider {
             "content": system_prompt,
         })];
         for msg in messages {
-            oai_messages.push(Self::to_openai_message(msg));
+            // to_openai_message can fan out a single neutral message to
+            // multiple wire messages (tool result + image follow-up).
+            oai_messages.extend(Self::to_openai_message(msg));
         }
 
         let mut body = json!({

@@ -1,7 +1,81 @@
 #[cfg(test)]
 mod tests {
+    use crate::openai_compat::OpenAICompatProvider;
     use crate::provider::*;
     use crate::stream::*;
+
+    #[test]
+    fn tool_result_with_image_emits_tool_then_user_image_message() {
+        // Regression test for the screenshot-hallucination bug:
+        // when an agent's tool result carries an attached image
+        // (screenshot tool returning a base64 PNG), the OpenAI-compat
+        // serializer must emit BOTH:
+        //   1. role:tool with the text caption
+        //   2. role:user with the image_url block
+        // Previously the function returned early on the first
+        // ToolResult block and silently dropped the image.
+        let msg = Message {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_xyz".to_string(),
+                    content: "Screenshot via screencap (1080x2340, 80KB).".to_string(),
+                    is_error: false,
+                },
+                ContentBlock::Image {
+                    source: ImageSource {
+                        source_type: "base64".to_string(),
+                        media_type: "image/jpeg".to_string(),
+                        data: "AAAA".to_string(),
+                    },
+                },
+            ]),
+        };
+        let out = OpenAICompatProvider::to_openai_message(&msg);
+        assert_eq!(out.len(), 2, "must emit tool + user-image");
+        assert_eq!(out[0]["role"], "tool");
+        assert_eq!(out[0]["tool_call_id"], "call_xyz");
+        assert!(out[0]["content"].as_str().unwrap().contains("Screenshot"));
+        assert_eq!(out[1]["role"], "user");
+        let parts = out[1]["content"].as_array().expect("user content must be array");
+        assert!(parts.iter().any(|p| p["type"] == "image_url"));
+        let image_url = parts
+            .iter()
+            .find(|p| p["type"] == "image_url")
+            .unwrap()
+            ["image_url"]["url"]
+            .as_str()
+            .unwrap();
+        assert!(image_url.starts_with("data:image/jpeg;base64,"));
+        assert!(image_url.contains("AAAA"));
+    }
+
+    #[test]
+    fn tool_result_without_image_emits_single_tool_message() {
+        let msg = Message {
+            role: "user".to_string(),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "call_no_img".to_string(),
+                content: "{ok: true}".to_string(),
+                is_error: false,
+            }]),
+        };
+        let out = OpenAICompatProvider::to_openai_message(&msg);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "tool");
+    }
+
+    #[test]
+    fn user_text_round_trips_unchanged() {
+        let msg = Message {
+            role: "user".to_string(),
+            content: MessageContent::Text("hello".to_string()),
+        };
+        let out = OpenAICompatProvider::to_openai_message(&msg);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        assert_eq!(out[0]["content"], "hello");
+    }
 
     #[test]
     fn test_message_content_text_serialize() {
