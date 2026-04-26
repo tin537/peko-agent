@@ -14,9 +14,9 @@ use peko_core::runtime::{build_dual_brain, build_provider_helper};
 use peko_llm::{EmbeddedProvider, LlmEngineConfig};
 use peko_hal::{InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
-    AudioTool, CallTool, DrawTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool,
-    ScreenshotTool, DelegateTool, SensorsTool, ShellTool, SkillsTool, SmsTool, TextInputTool,
-    TouchTool, UiAutomationTool, WebTool, WifiTool,
+    AudioTool, CallTool, DrawTool, FileSystemTool, KeyEventTool, MemoryTool, OcrTool,
+    PackageManagerTool, ScreenshotTool, DelegateTool, SensorsTool, ShellTool, SkillsTool,
+    SmsTool, TextInputTool, TouchTool, UiAutomationTool, WebTool, WifiTool,
 };
 
 fn register_tools(config: &PekoConfig) -> ToolRegistry {
@@ -197,6 +197,11 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
     // is brittle on phones because Chrome's WebView is opaque to
     // uiautomator and screenshots are downscaled to 720p).
     registry.register(WebTool::new());
+
+    // OCR — local tesseract for exact text extraction. Fully offline,
+    // complements the vision model. Falls back gracefully when the
+    // tesseract binary isn't installed on the device.
+    registry.register(OcrTool::new());
 
     registry
 }

@@ -20,6 +20,7 @@ pub mod wifi_tool;
 pub mod audio_tool;
 pub mod draw_tool;
 pub mod web_tool;
+pub mod ocr_tool;
 
 pub use screenshot::ScreenshotTool;
 pub use touch::TouchTool;
@@ -42,6 +43,7 @@ pub use wifi_tool::WifiTool;
 pub use audio_tool::AudioTool;
 pub use draw_tool::DrawTool;
 pub use web_tool::WebTool;
+pub use ocr_tool::OcrTool;
 
 #[cfg(test)]
 mod tests;

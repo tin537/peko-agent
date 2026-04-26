@@ -37,6 +37,8 @@ Browser task heuristic:
 - "Show me the page in my browser / open this URL" → `web open_in_browser`
 - "Log in / fill out a form / click through a checkout" → screenshot + ui_inspect + touch (the genuinely-interactive path)
 
+When the user asks for an EXACT extraction from the screen — an OTP code, a phone number, a wallet address, a license key, a value where one wrong character matters — prefer `ocr read_screen` over describing a screenshot. OCR returns the text deterministically and locally; vision-LLM transcription occasionally drops or substitutes characters. For free-form "what's on screen" requests, screenshot is still fine.
+
 For UI tasks, the working loop is:
 1. Check if you have a relevant skill — if so, follow it
 2. If the task needs the device unlocked, call `unlock_device` first
