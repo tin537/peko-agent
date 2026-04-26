@@ -81,26 +81,49 @@ class RpcDispatcher(
         val req = File(inDir, "$id.json")
         val outJson = File(outDir, "$id.json")
         val done = File(outDir, "$id.done")
+        var doneEmitted = false
         try {
             if (!req.exists()) {
-                writeError(outJson, done, "request json missing"); return
+                writeError(outJson, done, "request json missing"); doneEmitted = true; return
             }
             val body = JSONObject(req.readText())
             val resp = handler(body, RpcContext(id, inDir, outDir))
-            // Write asset first, JSON second, sentinel last — same atomic-ish
-            // ordering peko-agent expects.
+            // Asset first, then JSON. Failure on either still falls
+            // through to the finally block which emits .done so the
+            // agent isn't left polling forever.
             if (resp.assetSrc != null && resp.assetExt != null) {
                 resp.assetSrc.copyTo(File(outDir, "$id.${resp.assetExt}"), overwrite = true)
             }
             outJson.writeText(resp.body.toString())
             done.writeText("")
+            doneEmitted = true
         } catch (t: Throwable) {
             Log.e(TAG, "$topic request $id failed", t)
-            writeError(outJson, done, t.toString())
+            // Best-effort error response. If outJson.writeText itself
+            // throws (disk full), at least try .done with a stub error.
+            try { writeError(outJson, done, t.toString()); doneEmitted = true }
+            catch (t2: Throwable) {
+                Log.e(TAG, "$topic request $id: failed to write error response", t2)
+            }
         } finally {
+            // Belt-and-braces: ensure the agent's poll loop unblocks no
+            // matter what went wrong above. A missing .done forces a
+            // 130s timeout on the Rust side.
+            if (!doneEmitted) {
+                try {
+                    if (!outJson.exists()) {
+                        outJson.writeText(JSONObject()
+                            .put("ok", false)
+                            .put("error", "handler crashed before writing response")
+                            .toString())
+                    }
+                    done.writeText("")
+                } catch (t3: Throwable) {
+                    Log.e(TAG, "$topic request $id: catastrophic — could not write .done", t3)
+                }
+            }
             File(inDir, "$id.start").delete()
             File(inDir, "$id.json").delete()
-            // Clean any input asset (e.g. play_wav input WAV).
             File(inDir, "$id.wav").delete()
         }
     }
@@ -110,5 +133,19 @@ class RpcDispatcher(
         done.writeText("")
     }
 
-    companion object { private const val TAG = "PekoRpc" }
+    companion object {
+        private const val TAG = "PekoRpc"
+
+        /// Validate a stream_id (or any agent-provided identifier that
+        /// becomes part of a filename or path). Allows alphanumerics,
+        /// underscore, dash; caps length to keep filename + asset-path
+        /// strings bounded. Returns the trimmed string if valid, null
+        /// otherwise. Bridge services use this to refuse path-traversal
+        /// attempts via streams named "../../../etc/passwd".
+        fun validateId(s: String?, maxLen: Int = 64): String? {
+            val t = s?.trim() ?: return null
+            if (t.isEmpty() || t.length > maxLen) return null
+            return if (t.all { it.isLetterOrDigit() || it == '-' || it == '_' }) t else null
+        }
+    }
 }

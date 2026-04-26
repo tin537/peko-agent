@@ -323,20 +323,21 @@ fn spawn_worker(s: WorkerSpawn) {
         let id_for_hook = id.clone();
         let task_for_hook = task.clone();
         let hook: peko_core::runtime::IterationHook =
-            Box::new(move |messages: &[Message], iter: usize| {
+            Box::new(move |ctx: peko_core::runtime::IterationContext<'_>| {
                 let bg = bg_for_hook.clone();
                 let id = id_for_hook.clone();
                 let task = task_for_hook.clone();
-                let messages = messages.to_vec();
+                let messages = ctx.messages.to_vec();
+                let prompt = ctx.system_prompt.to_string();
+                let iter = ctx.iteration;
                 tokio::spawn(async move {
-                    let ckpt = Checkpoint {
-                        task,
-                        iterations: iter,
-                        // Token estimate at this point; mark_done writes
-                        // the final exact count.
-                        tokens_so_far: 0,
-                        messages,
-                    };
+                    // Checkpoint::new sanitises out base64 image bytes;
+                    // see background.rs::sanitise_messages. We snapshot
+                    // the system_prompt so a resume after memory/skills
+                    // changed sees the same prompt the original messages
+                    // were generated against.
+                    let ckpt = Checkpoint::new(task, iter, messages)
+                        .with_prompt_snapshot(prompt);
                     if let Err(e) = bg.write_checkpoint(&id, &ckpt).await {
                         tracing::warn!(error = %e, "bg: checkpoint write failed");
                     }

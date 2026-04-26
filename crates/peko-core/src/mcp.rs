@@ -79,11 +79,23 @@ impl McpClient {
             request_id: 0,
         };
 
-        // Initialize MCP session
-        client.initialize().await?;
+        // Initialize MCP session — bounded so a misbehaving server
+        // doesn't hang agent startup. 5s is generous; legitimate
+        // servers handshake in <100ms.
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.initialize())
+            .await
+            .map_err(|_| anyhow::anyhow!(
+                "MCP server '{}' did not complete initialize handshake within 5s",
+                config.name
+            ))??;
 
         // Discover tools
-        client.discover_tools().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), client.discover_tools())
+            .await
+            .map_err(|_| anyhow::anyhow!(
+                "MCP server '{}' did not respond to tools/list within 5s",
+                config.name
+            ))??;
 
         info!(server = %config.name, tools = client.tools.len(), "MCP server connected (stdio)");
         Ok(client)
@@ -235,7 +247,13 @@ pub struct McpToolAdapter {
     server_name: String,
     tool_def: McpToolDef,
     client: Arc<Mutex<McpClient>>,
+    /// Consecutive failure count. Once this hits `MAX_FAILURES`, the
+    /// tool short-circuits with a clear error instead of repeatedly
+    /// hammering a dead server. Reset on next successful call.
+    consecutive_failures: Arc<std::sync::atomic::AtomicU32>,
 }
+
+const MAX_MCP_FAILURES: u32 = 3;
 
 impl McpToolAdapter {
     pub fn new(server_name: &str, tool_def: McpToolDef, client: Arc<Mutex<McpClient>>) -> Self {
@@ -243,6 +261,7 @@ impl McpToolAdapter {
             server_name: server_name.to_string(),
             tool_def,
             client,
+            consecutive_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 }
@@ -266,11 +285,43 @@ impl Tool for McpToolAdapter {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<ToolResult>> + Send + '_>> {
         let client = self.client.clone();
         let name = self.tool_def.name.clone();
+        let server_name = self.server_name.clone();
+        let failures = self.consecutive_failures.clone();
         Box::pin(async move {
+            use std::sync::atomic::Ordering;
+            let prior = failures.load(Ordering::Relaxed);
+            if prior >= MAX_MCP_FAILURES {
+                return Ok(ToolResult::error(format!(
+                    "MCP server '{server_name}' is unavailable ({prior} consecutive \
+                     failures). Tool '{name}' suspended; the LLM should plan around \
+                     this. The peko admin should restart the MCP server, then call \
+                     this tool again to clear the suspension."
+                )));
+            }
+            // Bound the call so a hung server doesn't block the agent.
             let mut c = client.lock().await;
-            match c.call_tool(&name, args).await {
-                Ok(result) => Ok(ToolResult::success(result)),
-                Err(e) => Ok(ToolResult::error(format!("MCP tool error: {}", e))),
+            let call = c.call_tool(&name, args);
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), call).await;
+            drop(c);
+            match outcome {
+                Ok(Ok(result)) => {
+                    failures.store(0, Ordering::Relaxed);
+                    Ok(ToolResult::success(result))
+                }
+                Ok(Err(e)) => {
+                    let n = failures.fetch_add(1, Ordering::Relaxed) + 1;
+                    Ok(ToolResult::error(format!(
+                        "MCP server '{server_name}' tool '{name}' failed ({n}/\
+                         {MAX_MCP_FAILURES}): {e}"
+                    )))
+                }
+                Err(_) => {
+                    let n = failures.fetch_add(1, Ordering::Relaxed) + 1;
+                    Ok(ToolResult::error(format!(
+                        "MCP server '{server_name}' tool '{name}' timed out after 30s \
+                         ({n}/{MAX_MCP_FAILURES} consecutive). Server may be hung."
+                    )))
+                }
             }
         })
     }

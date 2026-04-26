@@ -143,6 +143,36 @@ fn dispatch(
     }
 }
 
+/// Hardening for combo auto-approve: scan the plan body's free text
+/// for references to known non-read-only tool names. The LLM can lie
+/// in `tools_used`, but writing "step 1: call shell ..." in the body
+/// is the natural way to express the intent — and we can detect it.
+/// False positives (e.g. the word "shell" in prose) cost an extra
+/// approval tap; that's the right side of the safety/UX trade.
+fn body_mentions_unsafe_tool(body: &str, declared: &[String]) -> bool {
+    // All currently-registered non-read-only tools. Keep this list
+    // in sync with main.rs::register_tools — when we add a new
+    // dangerous tool, add its name here too. Better safe than sorry:
+    // an unknown tool name in this list just means an extra approval.
+    const UNSAFE: &[&str] = &[
+        "shell", "package_manager", "sms", "call", "telephony",
+        "touch", "key_event", "text_input", "unlock_device",
+        "audio_pcm", "camera", "gps", "delegate", "bg",
+    ];
+    let lc = body.to_lowercase();
+    let declared_lc: Vec<String> = declared.iter().map(|s| s.to_lowercase()).collect();
+    UNSAFE.iter().any(|t| {
+        // Skip tools the plan declared — those are accounted for in
+        // is_plan_safe; we're catching the UNDECLARED ones here.
+        if declared_lc.iter().any(|d| d == t) { return false; }
+        // Word-boundary-ish match: surrounded by whitespace, punctuation,
+        // backtick, or string boundary. Avoids matching "shell" inside
+        // "shellac" but does match "`shell`" and "shell:".
+        let needle = *t;
+        lc.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == needle)
+    })
+}
+
 fn draft(store: &BrainStore, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
     let Some(task) = args["task"].as_str() else {
         return Ok(ToolResult::error("missing 'task'".to_string()));
@@ -156,8 +186,17 @@ fn draft(store: &BrainStore, args: &serde_json::Value) -> anyhow::Result<ToolRes
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
 
+    // Combo auto-approve has THREE conditions, all must hold:
+    //   1) internal=true (came from autonomy loop, not a user message)
+    //   2) every declared tool is in READ_ONLY_TOOLS
+    //   3) the plan body's free-text doesn't reference any non-read-only
+    //      tool by name. The agent could declare safe tools but write
+    //      "step 1: shell rm -rf /" in the body — body_mentions_unsafe
+    //      catches that. Without this gate the LLM could trivially
+    //      bypass approval.
     let safe = is_plan_safe(&tools_used);
-    let needs_approval = !(internal && safe);
+    let body_clean = !body_mentions_unsafe_tool(body, &tools_used);
+    let needs_approval = !(internal && safe && body_clean);
 
     let title = format!("Plan: {task}");
     let safety_line = if safe {

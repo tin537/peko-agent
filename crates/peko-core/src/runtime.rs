@@ -22,12 +22,22 @@ const MEMORY_NUDGE: &str = "\n\n[Memory Nudge] Consider:\
 \n3. Did a skill's steps fail? Improve it with the correct approach.";
 
 /// Phase 22: optional callback fired at the end of each ReAct iteration
-/// with a snapshot of the current message vec + iteration count. The bg
-/// worker uses this to write checkpoint blobs so jobs can be resumed
-/// across agent restarts. Synchronous + non-blocking — implementers
-/// should `tokio::spawn` any I/O so the loop isn't stalled.
+/// with a snapshot of the current state. The bg worker uses this to
+/// write checkpoint blobs so jobs can be resumed across agent restarts.
+/// Synchronous + non-blocking — implementers should `tokio::spawn` any
+/// I/O so the loop isn't stalled.
+pub struct IterationContext<'a> {
+    pub messages: &'a [Message],
+    pub iteration: usize,
+    /// The fully-built system prompt for THIS iteration (after memory,
+    /// skills, user-model injection). Captured into the checkpoint so a
+    /// resume after those caches changed continues with the same prompt
+    /// the original conversation was generated against.
+    pub system_prompt: &'a str,
+}
+
 pub type IterationHook =
-    Box<dyn Fn(&[Message], usize) + Send + Sync>;
+    Box<dyn Fn(IterationContext<'_>) + Send + Sync>;
 
 pub struct AgentRuntime {
     tools: Arc<ToolRegistry>,
@@ -207,6 +217,13 @@ impl AgentRuntime {
         };
         let user_input: &str = &effective_input;
         let mut final_text = String::new();
+        // Cap escalations per task. Each escalation reset budget +
+        // iterations to zero, which a runaway tool could exploit to
+        // extend the loop indefinitely. One escalation is enough for
+        // the legitimate "local couldn't handle it, hand off to cloud"
+        // case.
+        const MAX_ESCALATIONS: usize = 1;
+        let mut escalation_count: usize = 0;
 
         loop {
             if self.budget.should_stop() {
@@ -220,11 +237,16 @@ impl AgentRuntime {
             // Build system prompt with memory injection
             let mut system_prompt_text = self.system_prompt.build(&self.tools);
 
-            // Inject relevant memories on first iteration
+            // Inject relevant memories on first iteration. Retry the
+            // lock briefly (up to 200ms total) before giving up — a
+            // single try_lock fail used to silently degrade context
+            // injection under contention. Errors get logged at error
+            // level and a marker is added to the prompt so the LLM
+            // is aware its history may be partial.
             if total_iterations == 0 {
                 if let Some(ref memory) = self.memory {
-                    match memory.try_lock() {
-                        Ok(mem_store) => {
+                    match try_lock_retry(memory, std::time::Duration::from_millis(200)).await {
+                        Some(mem_store) => {
                             match mem_store.build_context(user_input, 5) {
                                 Ok(ctx) if !ctx.is_empty() => {
                                     system_prompt_text.push_str("\n\n");
@@ -234,7 +256,13 @@ impl AgentRuntime {
                                 _ => {}
                             }
                         }
-                        Err(_) => warn!("memory store locked, skipping memory injection"),
+                        None => {
+                            error!("memory store lock contended >200ms; running without memory context");
+                            system_prompt_text.push_str(
+                                "\n\n[notice: memory context unavailable this turn — \
+                                 the user's prior preferences/facts could not be loaded]"
+                            );
+                        }
                     }
                 }
             }
@@ -242,8 +270,8 @@ impl AgentRuntime {
             // Inject relevant skills on first iteration
             if total_iterations == 0 {
                 if let Some(ref skills) = self.skills {
-                    match skills.try_lock() {
-                        Ok(skill_store) => {
+                    match try_lock_retry(skills, std::time::Duration::from_millis(200)).await {
+                        Some(skill_store) => {
                             let ctx = skill_store.build_context(user_input);
                             if !ctx.is_empty() {
                                 system_prompt_text.push_str("\n\n");
@@ -251,7 +279,12 @@ impl AgentRuntime {
                                 info!("injected skills into prompt");
                             }
                         }
-                        Err(_) => warn!("skill store locked, skipping skill injection"),
+                        None => {
+                            error!("skill store lock contended >200ms; running without skill context");
+                            system_prompt_text.push_str(
+                                "\n\n[notice: skill catalogue unavailable this turn]"
+                            );
+                        }
                     }
                 }
             }
@@ -259,15 +292,17 @@ impl AgentRuntime {
             // Inject user model context on first iteration
             if total_iterations == 0 {
                 if let Some(ref user_model) = self.user_model {
-                    match user_model.try_lock() {
-                        Ok(model) => {
+                    match try_lock_retry(user_model, std::time::Duration::from_millis(200)).await {
+                        Some(model) => {
                             let ctx = model.build_context();
                             if !ctx.is_empty() {
                                 system_prompt_text.push_str("\n\n");
                                 system_prompt_text.push_str(&ctx);
                             }
                         }
-                        Err(_) => warn!("user model locked, skipping user context injection"),
+                        None => {
+                            error!("user model lock contended >200ms; skipping user context");
+                        }
                     }
                 }
             }
@@ -339,8 +374,7 @@ impl AgentRuntime {
                     }
                     StreamEvent::ContentBlockStop { .. } => {
                         if !current_tool_name.is_empty() {
-                            let input: serde_json::Value = serde_json::from_str(&current_tool_input)
-                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                            let input = parse_tool_input(&current_tool_input);
                             tool_calls.push(ToolCall {
                                 id: current_tool_id.clone(),
                                 name: current_tool_name.clone(),
@@ -354,8 +388,7 @@ impl AgentRuntime {
                         stop_reason = sr;
                         // Finalize pending tool call (OpenAI format)
                         if !current_tool_name.is_empty() {
-                            let input: serde_json::Value = serde_json::from_str(&current_tool_input)
-                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                            let input = parse_tool_input(&current_tool_input);
                             tool_calls.push(ToolCall {
                                 id: current_tool_id.clone(),
                                 name: current_tool_name.clone(),
@@ -374,8 +407,7 @@ impl AgentRuntime {
 
             // Finalize any unclosed tool call
             if !current_tool_name.is_empty() {
-                let input: serde_json::Value = serde_json::from_str(&current_tool_input)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                let input = parse_tool_input(&current_tool_input);
                 tool_calls.push(ToolCall {
                     id: current_tool_id.clone(),
                     name: current_tool_name.clone(),
@@ -408,6 +440,17 @@ impl AgentRuntime {
             for tc in &tool_calls {
                 // Intercept escalate tool — switch to cloud brain
                 if tc.name == ESCALATE_TOOL_NAME {
+                    if escalation_count >= MAX_ESCALATIONS {
+                        warn!(
+                            count = escalation_count,
+                            cap = MAX_ESCALATIONS,
+                            "escalation refused: cap reached this task"
+                        );
+                        // Fall through; treat as a normal (no-op) tool
+                        // call so the loop's iteration counter still
+                        // advances toward the budget cap.
+                        continue;
+                    }
                     if let Some(ref brain) = self.brain {
                         let reason = tc.input["reason"].as_str().unwrap_or("local model requested escalation");
                         let analysis = tc.input["analysis"].as_str();
@@ -417,6 +460,7 @@ impl AgentRuntime {
                             reason = reason,
                             local_model = %local_model,
                             cloud_model = brain.cloud_model_name(),
+                            count = escalation_count + 1,
                             "ESCALATING to cloud brain"
                         );
 
@@ -429,6 +473,7 @@ impl AgentRuntime {
                         self.active_brain = Some(BrainChoice::Cloud);
                         self.budget.reset();
                         total_iterations = 0;
+                        escalation_count += 1;
                         escalated = true;
                         break;
                     }
@@ -436,11 +481,28 @@ impl AgentRuntime {
 
                 info!(tool = %tc.name, id = %tc.id, "executing tool");
 
-                let result = match self.tools.execute(&tc.name, tc.input.clone()).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        error!(tool = %tc.name, error = %e, "tool execution failed");
-                        ToolResult::error(format!("Error: {}", e))
+                // Short-circuit: if the LLM's tool-input JSON failed to
+                // parse, the parse_tool_input helper stuffs a marker
+                // into the value. Surface it as a tool-result error
+                // so the LLM can self-correct on the next iteration
+                // instead of dispatching with empty args.
+                let result = if let Some(err) = tc.input.get("__parse_error").and_then(|v| v.as_str()) {
+                    let raw = tc.input.get("__raw").and_then(|v| v.as_str()).unwrap_or("");
+                    let preview: String = raw.chars().take(200).collect();
+                    error!(tool = %tc.name, error = %err, "malformed tool input");
+                    ToolResult::error(format!(
+                        "malformed JSON for tool '{}': {err}. Got first 200 chars: {preview}{} \
+                         Please retry the call with valid JSON.",
+                        tc.name,
+                        if raw.chars().count() > 200 { "…" } else { "" },
+                    ))
+                } else {
+                    match self.tools.execute(&tc.name, tc.input.clone()).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            error!(tool = %tc.name, error = %e, "tool execution failed");
+                            ToolResult::error(format!("Error: {}", e))
+                        }
                     }
                 };
 
@@ -530,7 +592,11 @@ impl AgentRuntime {
             // to persist resume state). Hook is sync-fast — implementers
             // tokio::spawn any actual I/O.
             if let Some(ref hook) = self.iteration_hook {
-                hook(&conversation, total_iterations);
+                hook(IterationContext {
+                    messages: &conversation,
+                    iteration: total_iterations,
+                    system_prompt: &system_prompt_text,
+                });
             }
 
             if let Err(_) = self.budget.decrement() {
@@ -1131,6 +1197,40 @@ fn build_provider_chain(config: &serde_json::Value, names: &[&str]) -> Option<Bo
             info!(count = providers.len(), "cloud chain built with fallback");
             Some(Box::new(ProviderChain::new(providers)))
         }
+    }
+}
+
+/// Acquire a tokio Mutex with bounded retry. try_lock alone fails on
+/// the first contention and silently degrades the caller. This loops
+/// (50ms backoff) up to `total_budget`, then returns None — caller
+/// decides what to do (log + degrade visibly, retry next turn, etc.).
+async fn try_lock_retry<T>(
+    m: &tokio::sync::Mutex<T>,
+    total_budget: std::time::Duration,
+) -> Option<tokio::sync::MutexGuard<'_, T>> {
+    let deadline = std::time::Instant::now() + total_budget;
+    loop {
+        if let Ok(g) = m.try_lock() { return Some(g); }
+        if std::time::Instant::now() >= deadline { return None; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Parse a tool's JSON input from the streaming buffer. On parse failure,
+/// returns an object with `__parse_error` + `__raw` markers; the dispatch
+/// loop in run_task intercepts these and emits a clear ToolResult::error
+/// instead of silently dispatching with empty args (which would let the
+/// LLM believe a malformed call succeeded).
+fn parse_tool_input(raw: &str) -> serde_json::Value {
+    if raw.is_empty() {
+        return serde_json::Value::Object(serde_json::Map::new());
+    }
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => v,
+        Err(e) => serde_json::json!({
+            "__parse_error": e.to_string(),
+            "__raw": raw,
+        }),
     }
 }
 

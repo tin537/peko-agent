@@ -394,21 +394,25 @@ impl TelegramBot {
     }
 
     async fn send_text(&self, chat_id: i64, text: &str) {
-        // Split long messages (Telegram limit: 4096 chars)
+        // Split long messages on CHAR boundaries (Telegram caps at 4096
+        // chars). Byte-chunking corrupted Thai / emoji at the split
+        // boundary — Telegram counts chars, not bytes, and `from_utf8`
+        // on a non-boundary byte slice fails, making us fall back to
+        // "..." and silently drop user data.
         let max_len = self.config.max_message_length.min(4096);
-        let chunks: Vec<&str> = if text.len() <= max_len {
-            vec![text]
+        let chars: Vec<char> = text.chars().collect();
+        let chunks: Vec<String> = if chars.len() <= max_len {
+            vec![text.to_string()]
         } else {
-            text.as_bytes()
-                .chunks(max_len)
-                .map(|chunk| std::str::from_utf8(chunk).unwrap_or("..."))
+            chars.chunks(max_len)
+                .map(|c| c.iter().collect::<String>())
                 .collect()
         };
 
         for chunk in chunks {
             let msg = SendMessage {
                 chat_id,
-                text: chunk.to_string(),
+                text: chunk,
                 parse_mode: None,
             };
 
@@ -571,6 +575,16 @@ impl TelegramBot {
             || !self.config.allowed_users.contains(&user_id)
         {
             self.answer_callback(&cq.id, Some("Unauthorized")).await;
+            return;
+        }
+
+        // Rate-limit callbacks under the same per-user window as text
+        // messages. Without this, a compromised authorised user (or a
+        // misbehaving inline keyboard) could spam plan-approval taps
+        // and burn LLM credits faster than the text-message gate would
+        // allow.
+        if !self.check_rate_limit(user_id).await {
+            self.answer_callback(&cq.id, Some("Rate limited — try again in a minute")).await;
             return;
         }
 

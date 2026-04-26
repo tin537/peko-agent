@@ -143,21 +143,91 @@ pub mod metrics {
 /// after each iteration so the agent can re-spawn the job from where it
 /// left off if the process restarts. Encoded with MessagePack
 /// (rmp-serde) — compact + schema-tolerant.
+///
+/// `system_prompt_snapshot` (Phase 22.1) freezes the prompt the runtime
+/// built for THIS task, so a resume after memory/skills/soul changed
+/// continues with the same context the original messages were generated
+/// against.
+///
+/// `messages` field is sanitised before encode (`Checkpoint::from_messages`):
+/// the base64-bearing `image` field on `ToolResult` variants is dropped
+/// and replaced with a placeholder text. Without this, a vision-heavy
+/// job's checkpoint balloons by ~1.3MB per screenshot (33% base64
+/// overhead × ImageReader output). The agent loses pixel-level recall
+/// of past frames after resume — but it can re-screenshot if needed,
+/// and the checkpoint stays under SQLite blob limits.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Checkpoint {
     pub task: String,
     pub iterations: usize,
     pub tokens_so_far: u64,
     pub messages: Vec<crate::message::Message>,
+    #[serde(default)]
+    pub system_prompt_snapshot: Option<String>,
+    #[serde(default = "default_checkpoint_schema")]
+    pub schema: u32,
 }
 
+fn default_checkpoint_schema() -> u32 { 1 }
+
+/// Hard cap on encoded checkpoint blob size. SQLite supports much
+/// larger blobs but writing megabytes per iteration is bad for I/O
+/// + cache. If we exceed, we drop oldest non-system messages until
+/// we fit.
+const CHECKPOINT_MAX_BYTES: usize = 256 * 1024;
+
 impl Checkpoint {
-    pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
-        rmp_serde::to_vec(self).context("encode checkpoint")
+    pub fn new(task: String, iterations: usize, messages: Vec<crate::message::Message>) -> Self {
+        Self {
+            task,
+            iterations,
+            tokens_so_far: 0,
+            messages: sanitise_messages(messages),
+            system_prompt_snapshot: None,
+            schema: default_checkpoint_schema(),
+        }
     }
+
+    pub fn with_prompt_snapshot(mut self, snapshot: String) -> Self {
+        self.system_prompt_snapshot = Some(snapshot);
+        self
+    }
+
+    pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
+        let mut blob = rmp_serde::to_vec(self).context("encode checkpoint")?;
+        if blob.len() > CHECKPOINT_MAX_BYTES {
+            // Drop oldest user/assistant/tool messages (preserve the
+            // first user message + most recent N) until under budget.
+            let mut shrunk = self.clone();
+            while shrunk.messages.len() > 2 && blob.len() > CHECKPOINT_MAX_BYTES {
+                shrunk.messages.remove(1); // keep msg[0] (original task)
+                blob = rmp_serde::to_vec(&shrunk)?;
+            }
+        }
+        Ok(blob)
+    }
+
     pub fn decode(blob: &[u8]) -> anyhow::Result<Self> {
         rmp_serde::from_slice(blob).context("decode checkpoint")
     }
+}
+
+/// Strip base64 `image` payload from `ToolResult` messages so checkpoint
+/// blobs stay small. Replaces with a marker the LLM can still reason
+/// about ("[image dropped on checkpoint]").
+fn sanitise_messages(msgs: Vec<crate::message::Message>) -> Vec<crate::message::Message> {
+    use crate::message::Message;
+    msgs.into_iter().map(|m| match m {
+        Message::ToolResult { tool_use_id, name, content, is_error, image: Some(_) } => {
+            let marker = if content.is_empty() {
+                "[image attached; dropped on checkpoint, re-capture if needed]".to_string()
+            } else {
+                format!("{content}\n[image attached; dropped on checkpoint, re-capture if needed]")
+            };
+            Message::ToolResult { tool_use_id, name, content: marker, is_error, image: None }
+        }
+        other => other,
+    }).collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -842,12 +912,10 @@ mod tests {
         store.mark_running(&a.id).await;
         store.mark_running(&b.id).await;
 
-        let ckpt = Checkpoint {
-            task: "research a".into(),
-            iterations: 3,
-            tokens_so_far: 1234,
-            messages: vec![crate::message::Message::user("hi".to_string())],
-        };
+        let ckpt = Checkpoint::new(
+            "research a".into(), 3,
+            vec![crate::message::Message::user("hi".to_string())],
+        );
         store.write_checkpoint(&a.id, &ckpt).await.unwrap();
 
         let resumable = store.pending_resumable(chrono::Duration::hours(1)).await;

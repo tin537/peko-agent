@@ -73,6 +73,11 @@ class CameraBridgeService : Service() {
         val reader: ImageReader,
         val captureBuilder: CaptureRequest.Builder,
         val running: AtomicBoolean,
+        /// Set true when CameraDevice.StateCallback.onDisconnected fires.
+        /// stopStreamInternal checks this and skips device.close() to
+        /// avoid the IllegalStateException from double-close on physical
+        /// detach (USB camera, system reclaim).
+        val disconnected: AtomicBoolean = AtomicBoolean(false),
     )
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -223,7 +228,9 @@ class CameraBridgeService : Service() {
         if (!hasPerm()) return err("CAMERA permission not granted")
         if (activeStream.get() != null) return err("a stream is already running; stop it first")
 
-        val streamId = req.optString("stream_id").ifBlank { "cam-${System.nanoTime()}" }
+        val rawId = req.optString("stream_id").ifBlank { "cam-${System.nanoTime()}" }
+        val streamId = com.peko.overlay.bridge.RpcDispatcher.validateId(rawId)
+            ?: return err("invalid stream_id (use [A-Za-z0-9_-]{1,64})")
         val lens = req.optString("lens", "back")
         val fps = req.optDouble("fps", 1.0).coerceIn(0.1, 5.0) // capped to keep storage sane
         val maxFrames = req.optLong("max_frames", 0L) // 0 = unlimited
@@ -235,7 +242,12 @@ class CameraBridgeService : Service() {
         val frameCount = java.util.concurrent.atomic.AtomicLong(0)
 
         // Open camera + create session synchronously, then schedule
-        // periodic captures from cameraHandler.
+        // periodic captures from cameraHandler. The disconnect/close
+        // race is real: onDisconnected on a physical detach used to
+        // call camera.close(), and stopStreamInternal would then
+        // double-close. Now we set a flag and let stopStreamInternal
+        // be the SOLE close path.
+        val disconnected = AtomicBoolean(false)
         val deviceRef = AtomicReference<CameraDevice?>(null)
         val deviceOpened = Semaphore(0)
         val errMsg = AtomicReference<String?>(null)
@@ -243,10 +255,20 @@ class CameraBridgeService : Service() {
             cm.openCamera(cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) { deviceRef.set(camera); deviceOpened.release() }
                 override fun onDisconnected(camera: CameraDevice) {
-                    camera.close(); errMsg.set("disconnected"); deviceOpened.release()
+                    disconnected.set(true)
+                    activeStream.get()?.disconnected?.set(true)
+                    errMsg.set("disconnected")
+                    deviceOpened.release()
+                    // NOTE: do not call camera.close() here — let
+                    // stopStreamInternal handle it via the StreamState
+                    // (see disconnected-flag check there).
                 }
                 override fun onError(camera: CameraDevice, error: Int) {
-                    camera.close(); errMsg.set("onError $error"); deviceOpened.release()
+                    disconnected.set(true)
+                    activeStream.get()?.disconnected?.set(true)
+                    errMsg.set("onError $error")
+                    deviceOpened.release()
+                    try { camera.close() } catch (_: Throwable) {}
                 }
             }, cameraHandler)
         } catch (s: SecurityException) {
@@ -348,7 +370,13 @@ class CameraBridgeService : Service() {
         val s = activeStream.getAndSet(null) ?: return
         s.running.set(false)
         try { s.session.close() } catch (_: Throwable) {}
-        try { s.cameraDevice.close() } catch (_: Throwable) {}
+        // If the camera disconnected itself (USB pull, system reclaim),
+        // the framework already invalidated it — calling close() again
+        // throws IllegalStateException on some devices. Skip in that
+        // case; the device is gone either way.
+        if (!s.disconnected.get()) {
+            try { s.cameraDevice.close() } catch (_: Throwable) {}
+        }
         try { s.reader.close() } catch (_: Throwable) {}
     }
 

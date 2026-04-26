@@ -130,7 +130,9 @@ class LocationBridgeService : Service() {
 
     private fun doStartStream(req: JSONObject): RpcDispatcher.Response {
         if (!hasFineLocPerm()) return errResp("ACCESS_FINE_LOCATION not granted")
-        val streamId = req.optString("stream_id").ifBlank { "loc-${System.nanoTime()}" }
+        val rawId = req.optString("stream_id").ifBlank { "loc-${System.nanoTime()}" }
+        val streamId = RpcDispatcher.validateId(rawId)
+            ?: return errResp("invalid stream_id (use [A-Za-z0-9_-]{1,64})")
         if (activeStreams.containsKey(streamId)) {
             return errResp("stream '$streamId' already running; stop it first")
         }

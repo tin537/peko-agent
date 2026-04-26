@@ -234,6 +234,13 @@ impl BrainStore {
         limit: usize,
         expand_links: bool,
     ) -> anyhow::Result<Vec<Note>> {
+        // Wrap user query as a single FTS5 phrase to neutralise its
+        // special syntax (AND, OR, NOT, *, parens, double-quote).
+        // Without this, a query like `cat" OR "x` is interpreted as
+        // FTS5 boolean ops; worse, weird syntax can blow up the FTS5
+        // engine on edge cases.
+        let safe_query = fts5_escape_phrase(query);
+        let limit_capped = limit.min(200) as i64;
         let mut stmt = self.conn.prepare(
             "SELECT n.id, n.slug, n.title, n.content, n.kind, n.tags, n.created_at, n.updated_at
              FROM notes_fts f
@@ -242,7 +249,7 @@ impl BrainStore {
              ORDER BY rank
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![query, limit as i64], row_to_note)?;
+        let rows = stmt.query_map(params![safe_query, limit_capped], row_to_note)?;
         let mut out: Vec<Note> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         for r in rows {
@@ -371,6 +378,20 @@ fn row_to_note(row: &rusqlite::Row) -> rusqlite::Result<Note> {
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
     })
+}
+
+/// Wrap a free-form user query as a single FTS5 phrase string, escaping
+/// embedded double-quotes by doubling them (FTS5 phrase escape rule).
+/// The returned string is safe to bind to `MATCH ?` — none of FTS5's
+/// boolean operators or wildcards activate, even if the user typed them.
+/// Trims excess whitespace; caps length to 256 chars to bound query
+/// cost. Empty/all-whitespace queries become `"."` so the search
+/// returns nothing rather than erroring.
+fn fts5_escape_phrase(q: &str) -> String {
+    let trimmed: String = q.trim().chars().take(256).collect();
+    if trimmed.is_empty() { return "\".\"".to_string(); }
+    let escaped = trimmed.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }
 
 /// Convert a free-form title into a URL-safe slug. Lowercases ASCII,

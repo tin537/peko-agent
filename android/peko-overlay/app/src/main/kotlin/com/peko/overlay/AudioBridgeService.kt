@@ -71,7 +71,8 @@ class AudioBridgeService : Service() {
     private var inDir: File? = null
     private var outDir: File? = null
     private var tts: TextToSpeech? = null
-    private var ttsReady = false
+    @Volatile private var ttsReady = false
+    private val ttsInitLatch = java.util.concurrent.CountDownLatch(1)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -81,9 +82,12 @@ class AudioBridgeService : Service() {
         outDir = File(filesDir, "audio/out").apply { mkdirs() }
         Log.i(TAG, "audio bridge starting; in=${inDir?.absolutePath} out=${outDir?.absolutePath}")
 
-        // Lazy TTS init — completes async; tts() actions queue if !ready.
+        // Lazy TTS init — completes async; tts() actions await the
+        // latch instead of busy-spinning. Memory ordering on ttsReady
+        // is now @Volatile so the doTts thread sees the write reliably.
         tts = TextToSpeech(this) { status ->
             ttsReady = (status == TextToSpeech.SUCCESS)
+            ttsInitLatch.countDown()
             Log.i(TAG, "tts engine init status=$status ready=$ttsReady")
         }
 
@@ -256,12 +260,12 @@ class AudioBridgeService : Service() {
     // ────── tts ─────────────────────────────────────────────────────
 
     private fun doTts(req: JSONObject, outWav: File): JSONObject {
-        // Wait briefly for engine init.
-        var waited = 0
-        while (!ttsReady && waited < 5000) {
-            Thread.sleep(100); waited += 100
+        // Block on the init latch (signaled in onCreate) instead of
+        // busy-waiting; cleaner and more accurate than 100ms polling.
+        if (!ttsInitLatch.await(5, java.util.concurrent.TimeUnit.SECONDS)) {
+            return JSONObject().put("ok", false).put("error", "TTS engine init did not signal within 5s")
         }
-        if (!ttsReady) return JSONObject().put("ok", false).put("error", "TTS engine not ready after 5s")
+        if (!ttsReady) return JSONObject().put("ok", false).put("error", "TTS engine init failed")
         val text = req.optString("text", "").trim()
         if (text.isEmpty()) return JSONObject().put("ok", false).put("error", "text is empty")
         val lang = req.optString("lang", "en")
@@ -364,12 +368,16 @@ class AudioBridgeService : Service() {
 
     @Volatile private var ambientThread: Thread? = null
     @Volatile private var ambientStreamId: String? = null
+    private val ambientLastError = java.util.concurrent.atomic.AtomicReference<String?>(null)
 
     private fun doStartAmbient(req: JSONObject): JSONObject {
         if (ambientThread != null) {
             return JSONObject().put("ok", false).put("error", "ambient stream already running")
         }
-        val streamId = req.optString("stream_id").ifBlank { "amb-${System.nanoTime()}" }
+        val rawId = req.optString("stream_id").ifBlank { "amb-${System.nanoTime()}" }
+        val streamId = com.peko.overlay.bridge.RpcDispatcher.validateId(rawId)
+            ?: return JSONObject().put("ok", false)
+                .put("error", "invalid stream_id (use [A-Za-z0-9_-]{1,64})")
         val sampleRate = req.optInt("sample_rate", 16_000)
         val windowMs = req.optInt("window_ms", 1000).coerceIn(200, 5000)
         val minRms = req.optDouble("min_rms", 0.0).coerceAtLeast(0.0).toInt()
@@ -417,7 +425,9 @@ class AudioBridgeService : Service() {
                         .put("window_ms", windowMs)
                     store.append("ambient", "audio_stream:$streamId", data)
                 }
-            } catch (_: Throwable) {
+            } catch (t: Throwable) {
+                Log.e(TAG, "ambient stream '$streamId' aborted", t)
+                ambientLastError.set("recorder failed: ${t.javaClass.simpleName}: ${t.message}")
             } finally {
                 try { rec.stop() } catch (_: Throwable) {}
                 rec.release()
@@ -433,7 +443,14 @@ class AudioBridgeService : Service() {
     private fun doStopAmbient(req: JSONObject): JSONObject {
         val want = req.optString("stream_id")
         val active = ambientStreamId
-        if (active == null) return JSONObject().put("ok", false).put("error", "no active ambient stream")
+        if (active == null) {
+            // Even when there's no active stream, surface any captured
+            // error from a thread that died unnoticed — agent might
+            // have stopped polling and would otherwise never see it.
+            val err = ambientLastError.getAndSet(null)
+            return JSONObject().put("ok", false)
+                .put("error", err ?: "no active ambient stream")
+        }
         if (want.isNotBlank() && want != active) {
             return JSONObject().put("ok", false).put("error", "active stream is '$active', not '$want'")
         }
@@ -441,7 +458,9 @@ class AudioBridgeService : Service() {
         ambientThread = null
         ambientStreamId = null
         try { t?.interrupt(); t?.join(2000) } catch (_: Throwable) {}
-        return JSONObject().put("ok", true).put("stream_id", active)
+        val out = JSONObject().put("ok", true).put("stream_id", active)
+        ambientLastError.getAndSet(null)?.let { out.put("warning", it) }
+        return out
     }
 
     // ────── WAV helpers (16-bit PCM, little-endian) ───────────────
