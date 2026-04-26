@@ -281,6 +281,12 @@ async fn main() -> anyhow::Result<()> {
     ));
     info!("research pipeline initialized");
 
+    // Plan tool (Phase 18C). Multi-step task drafting + Telegram
+    // approval flow + combo auto-approve. Plans persist as kind="plan"
+    // brain notes; status tracked via tags.
+    registry.register(peko_tools_android::PlanTool::new(brain_store.clone()));
+    info!("plan tool initialized");
+
     // Skills system
     let skills_path = config.agent.data_dir.join("skills");
     let skill_store = Arc::new(Mutex::new(

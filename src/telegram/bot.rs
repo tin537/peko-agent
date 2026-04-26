@@ -13,6 +13,53 @@ use peko_transport::LlmProvider;
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
 
+/// Plan marker the agent emits in its response when it has drafted
+/// a plan. Two kinds, distinguished by the middle segment of the
+/// marker: `[plan:approve:<slug>]` requires a Telegram tap;
+/// `[plan:auto:<slug>]` was deemed safe by the combo check
+/// (read-only tools + internal task) and the bot fires execute
+/// without asking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanMarkerKind { Approve, Auto }
+
+#[derive(Debug, Clone)]
+struct PlanMarker {
+    kind: PlanMarkerKind,
+    slug: String,
+    /// Response text with the marker line removed, for sending to
+    /// Telegram so the user sees the body without the meta-tag.
+    body: String,
+}
+
+fn parse_plan_marker(text: &str) -> Option<PlanMarker> {
+    let mut found: Option<(PlanMarkerKind, String, String)> = None;
+    let mut kept_lines: Vec<&str> = Vec::with_capacity(text.lines().count());
+    for line in text.lines() {
+        if found.is_none() {
+            if let Some(slug) = extract_marker(line, "[plan:approve:") {
+                found = Some((PlanMarkerKind::Approve, slug, line.to_string()));
+                continue;
+            }
+            if let Some(slug) = extract_marker(line, "[plan:auto:") {
+                found = Some((PlanMarkerKind::Auto, slug, line.to_string()));
+                continue;
+            }
+        }
+        kept_lines.push(line);
+    }
+    let (kind, slug, _) = found?;
+    let body = kept_lines.join("\n").trim().to_string();
+    Some(PlanMarker { kind, slug, body })
+}
+
+fn extract_marker(line: &str, prefix: &str) -> Option<String> {
+    let i = line.find(prefix)? + prefix.len();
+    let rest = &line[i..];
+    let end = rest.find(']')?;
+    let slug = rest[..end].trim();
+    if slug.is_empty() { None } else { Some(slug.to_string()) }
+}
+
 /// Char-aware string truncation. Defensive against multi-byte UTF-8
 /// (Thai / CJK / emoji): byte-indexed slicing here would panic the
 /// whole tokio worker the same way phase13's compressor bug did.
@@ -63,6 +110,15 @@ struct TgResponse<T> {
 struct TgUpdate {
     update_id: i64,
     message: Option<TgMessage>,
+    callback_query: Option<TgCallbackQuery>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TgCallbackQuery {
+    id: String,
+    from: TgUser,
+    message: Option<TgMessage>,
+    data: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,6 +287,9 @@ impl TelegramBot {
                         if let Some(msg) = update.message {
                             self.handle_message(msg).await;
                         }
+                        if let Some(cq) = update.callback_query {
+                            self.handle_callback_query(cq).await;
+                        }
                     }
                 }
                 Err(e) => {
@@ -273,12 +332,56 @@ impl TelegramBot {
             .query(&[
                 ("offset", offset.to_string()),
                 ("timeout", "30".to_string()),
-                ("allowed_updates", "[\"message\"]".to_string()),
+                // callback_query added so plan-approval inline buttons
+                // (Phase 18C) actually deliver presses to this poller.
+                ("allowed_updates", "[\"message\",\"callback_query\"]".to_string()),
             ])
             .send().await?
             .json().await?;
 
         Ok(resp.result.unwrap_or_default())
+    }
+
+    /// Send a message with inline-keyboard approve/cancel buttons.
+    /// Used by the plan-approval flow: when an agent response contains
+    /// `[plan:approve:<slug>]`, we strip the marker and re-send the
+    /// body with buttons whose callback_data carries the slug.
+    async fn send_with_approve_cancel(&self, chat_id: i64, body: &str, slug: &str) {
+        let payload = serde_json::json!({
+            "chat_id": chat_id,
+            "text": body,
+            "reply_markup": {
+                "inline_keyboard": [[
+                    {"text": "✅ Approve", "callback_data": format!("plan:approve:{slug}")},
+                    {"text": "❌ Cancel",  "callback_data": format!("plan:cancel:{slug}")},
+                ]]
+            }
+        });
+        if let Err(e) = self
+            .client
+            .post(self.api_url("sendMessage"))
+            .json(&payload)
+            .send()
+            .await
+        {
+            error!(error = %e, slug, "failed to send plan-approval message");
+        }
+    }
+
+    /// Acknowledge a callback_query so Telegram clears the loading
+    /// spinner on the user's button. Required even if we display no
+    /// alert text — Telegram retries unacked callbacks.
+    async fn answer_callback(&self, callback_id: &str, text: Option<&str>) {
+        let mut payload = serde_json::json!({"callback_query_id": callback_id});
+        if let Some(t) = text {
+            payload["text"] = serde_json::Value::String(t.to_string());
+        }
+        let _ = self
+            .client
+            .post(self.api_url("answerCallbackQuery"))
+            .json(&payload)
+            .send()
+            .await;
     }
 
     async fn send_text(&self, chat_id: i64, text: &str) {
@@ -396,7 +499,42 @@ impl TelegramBot {
                 } else {
                     response.text.clone()
                 };
-                self.send_text(chat_id, &agent_text).await;
+
+                // Plan-approval interception (Phase 18C). When the
+                // agent's response contains `[plan:approve:<slug>]`,
+                // strip the marker and re-send the body with inline
+                // keyboard. `[plan:auto:<slug>]` is the combo
+                // auto-approve marker; we silently fire a follow-up
+                // task that executes the plan instead of asking.
+                let parsed = parse_plan_marker(&agent_text);
+                let display_text = parsed
+                    .as_ref()
+                    .map(|m| m.body.clone())
+                    .unwrap_or_else(|| agent_text.clone());
+
+                match parsed.as_ref() {
+                    Some(m) if m.kind == PlanMarkerKind::Approve => {
+                        self.send_with_approve_cancel(chat_id, &display_text, &m.slug).await;
+                    }
+                    Some(m) if m.kind == PlanMarkerKind::Auto => {
+                        // Inform the user, then dispatch execute.
+                        self.send_text(
+                            chat_id,
+                            &format!("⚙️ Auto-approved plan {}, executing.", m.slug),
+                        )
+                        .await;
+                        let exec_input = format!(
+                            "Execute the approved plan `{}`. Call `plan execute slug={}` and follow the body.",
+                            m.slug, m.slug
+                        );
+                        if let Ok(exec_resp) = self.run_agent_task(&exec_input).await {
+                            self.send_text(chat_id, &exec_resp.text).await;
+                        }
+                    }
+                    _ => {
+                        self.send_text(chat_id, &display_text).await;
+                    }
+                }
 
                 self.send_text(chat_id, &format!(
                     "[{} iterations | session: {}]",
@@ -407,10 +545,57 @@ impl TelegramBot {
                 // gets it in its prefix. Failures during agent task
                 // execution are NOT recorded — keeping the history
                 // clean of error noise.
-                self.record_turn(chat_id, text.clone(), agent_text).await;
+                self.record_turn(chat_id, text.clone(), display_text).await;
             }
             Err(e) => {
                 self.send_text(chat_id, &format!("Error: {}", e)).await;
+            }
+        }
+    }
+
+    async fn handle_callback_query(&self, cq: TgCallbackQuery) {
+        let user_id = cq.from.id;
+        let chat_id = cq.message.as_ref().map(|m| m.chat.id).unwrap_or(0);
+
+        // Same auth gate as text messages.
+        if self.config.allowed_users.is_empty()
+            || !self.config.allowed_users.contains(&user_id)
+        {
+            self.answer_callback(&cq.id, Some("Unauthorized")).await;
+            return;
+        }
+
+        let data = cq.data.unwrap_or_default();
+        // Callback data shape: "plan:approve:<slug>" or "plan:cancel:<slug>".
+        let parts: Vec<&str> = data.splitn(3, ':').collect();
+        if parts.len() != 3 || parts[0] != "plan" {
+            self.answer_callback(&cq.id, Some("unknown action")).await;
+            return;
+        }
+        let action = parts[1];
+        let slug = parts[2];
+        match action {
+            "approve" => {
+                self.answer_callback(&cq.id, Some("Approved")).await;
+                self.send_text(chat_id, &format!("✅ Approved plan `{slug}` — executing.")).await;
+                let exec_input = format!(
+                    "The user has approved plan `{slug}`. Call `plan execute slug={slug}` and follow the steps in its body."
+                );
+                if let Ok(resp) = self.run_agent_task(&exec_input).await {
+                    self.send_text(chat_id, &resp.text).await;
+                }
+            }
+            "cancel" => {
+                self.answer_callback(&cq.id, Some("Cancelled")).await;
+                let cancel_input = format!(
+                    "The user has cancelled plan `{slug}`. Call `plan cancel slug={slug}` and acknowledge."
+                );
+                if let Ok(resp) = self.run_agent_task(&cancel_input).await {
+                    self.send_text(chat_id, &resp.text).await;
+                }
+            }
+            other => {
+                self.answer_callback(&cq.id, Some(&format!("unknown: {other}"))).await;
             }
         }
     }
@@ -625,6 +810,43 @@ mod tests {
         assert!(bot.check_rate_limit(222).await);
         assert!(bot.check_rate_limit(222).await);
         assert!(!bot.check_rate_limit(222).await);
+    }
+
+    #[test]
+    fn plan_marker_approve_extracted() {
+        let resp = "Here's the plan:\n\n1. Do X\n2. Do Y\n\n[plan:approve:plan-2026-04-26-abc123]";
+        let m = parse_plan_marker(resp).expect("approve marker");
+        assert_eq!(m.kind, PlanMarkerKind::Approve);
+        assert_eq!(m.slug, "plan-2026-04-26-abc123");
+        assert!(!m.body.contains("[plan:"));
+        assert!(m.body.contains("Do X"));
+    }
+
+    #[test]
+    fn plan_marker_auto_extracted() {
+        let resp = "[plan:auto:weekly-research]\n\nAuto-approved plan body.";
+        let m = parse_plan_marker(resp).expect("auto marker");
+        assert_eq!(m.kind, PlanMarkerKind::Auto);
+        assert_eq!(m.slug, "weekly-research");
+        assert_eq!(m.body, "Auto-approved plan body.");
+    }
+
+    #[test]
+    fn plan_marker_no_match_returns_none() {
+        assert!(parse_plan_marker("just text, no marker").is_none());
+        assert!(parse_plan_marker("[plan:wat:xyz]").is_none());
+        assert!(parse_plan_marker("[plan:approve:]").is_none());
+    }
+
+    #[test]
+    fn plan_marker_only_first_match_consumed() {
+        // Defensive: if the agent emits two markers, only the first
+        // is acted on. Both should be stripped from the body though
+        // — wait, the second one stays; that's fine since the bot
+        // already kicked off action on the first.
+        let resp = "[plan:approve:slug-a]\n[plan:approve:slug-b]\nbody";
+        let m = parse_plan_marker(resp).unwrap();
+        assert_eq!(m.slug, "slug-a");
     }
 
     #[test]
