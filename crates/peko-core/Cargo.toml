@@ -20,3 +20,4 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 libc = "0.2"
 base64.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+rmp-serde = "1.3"

@@ -53,7 +53,7 @@ pub use call_pipeline::{CallStore, CallRecord, CallMetadata, spawn as spawn_call
 pub use notebook::{BrainStats, BrainStore, Note, parse_wikilinks, slugify};
 pub use background::{
     estimate_tokens as estimate_bg_tokens, metrics as bg_metrics, BgJob, BgStatus, BgStore,
-    DailyStats,
+    Checkpoint, DailyStats,
 };
 
 #[cfg(test)]

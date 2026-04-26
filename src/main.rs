@@ -409,6 +409,26 @@ async fn main() -> anyhow::Result<()> {
     // workers can build agent runtimes against the live registry.
     *bg_tools_handle.write().await = Some(tools_arc.clone());
 
+    // Phase 22: resume any bg jobs left in `Running` state from a prior
+    // process by replaying their last checkpoint. Stale (>1h) or
+    // checkpoint-less rows are auto-marked Failed inside
+    // pending_resumable so they don't pollute Running forever.
+    let resumed = peko_tools_android::resume_pending_bg_jobs(
+        bg_store.clone(),
+        tools_arc.clone(),
+        config_arc.clone(),
+        db_path.clone(),
+        memory_store.clone(),
+        skill_store.clone(),
+        soul_arc.clone(),
+        config.bg.clone(),
+        chrono::Duration::hours(1),
+    )
+    .await;
+    if resumed > 0 {
+        info!(count = resumed, "Phase 22: resumed bg jobs from checkpoints");
+    }
+
     // Reflector (Phase A) — only wired when autonomy.reflection is on.
     // Uses a provider built from config. Reflection runs in the background
     // per task; failures are logged at warn and don't affect the user.

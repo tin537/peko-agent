@@ -21,6 +21,14 @@ const MEMORY_NUDGE: &str = "\n\n[Memory Nudge] Consider:\
 \n2. Did you complete a multi-step task? Save it as a skill for next time.\
 \n3. Did a skill's steps fail? Improve it with the correct approach.";
 
+/// Phase 22: optional callback fired at the end of each ReAct iteration
+/// with a snapshot of the current message vec + iteration count. The bg
+/// worker uses this to write checkpoint blobs so jobs can be resumed
+/// across agent restarts. Synchronous + non-blocking — implementers
+/// should `tokio::spawn` any I/O so the loop isn't stalled.
+pub type IterationHook =
+    Box<dyn Fn(&[Message], usize) + Send + Sync>;
+
 pub struct AgentRuntime {
     tools: Arc<ToolRegistry>,
     budget: IterationBudget,
@@ -37,6 +45,12 @@ pub struct AgentRuntime {
     brain: Option<Arc<DualBrain>>,
     /// Which brain is currently active for this task.
     active_brain: Option<BrainChoice>,
+    /// Phase 22: per-iteration hook for mid-run checkpointing.
+    iteration_hook: Option<IterationHook>,
+    /// Phase 22: when set, run_task uses this conversation + iteration
+    /// count as its starting state instead of the freshly-built one.
+    /// Used for resuming a Running bg job across restarts.
+    resume_state: Option<(Vec<Message>, usize, String)>,
 }
 
 #[derive(Debug)]
@@ -87,7 +101,28 @@ impl AgentRuntime {
             nudge_interval: 5,
             brain: None,
             active_brain: None,
+            iteration_hook: None,
+            resume_state: None,
         }
+    }
+
+    pub fn with_iteration_hook(mut self, hook: IterationHook) -> Self {
+        self.iteration_hook = Some(hook);
+        self
+    }
+
+    /// Phase 22: pre-seed conversation + iteration count so a Running
+    /// bg job picked up from disk continues where it left off. The
+    /// `user_input` passed to `run_task` is ignored when this is set
+    /// (the saved task string takes priority).
+    pub fn with_resume_state(
+        mut self,
+        messages: Vec<Message>,
+        iterations: usize,
+        original_task: String,
+    ) -> Self {
+        self.resume_state = Some((messages, iterations, original_task));
+        self
     }
 
     pub fn with_system_prompt(mut self, prompt: SystemPrompt) -> Self {
@@ -147,11 +182,30 @@ impl AgentRuntime {
 
         self.budget.reset();
 
-        let session_id = self.session.create_session(user_input)?;
-        let mut conversation = vec![Message::user(user_input.to_string())];
-        self.session.append_message(&session_id, &conversation[0])?;
-
-        let mut total_iterations: usize = 0;
+        // Phase 22: if a resume_state is present, hydrate from it.
+        // Otherwise, begin a fresh session from `user_input`.
+        let resume = self.resume_state.take();
+        let (session_id, mut conversation, mut total_iterations, effective_input) = match resume {
+            Some((messages, iter, original_task)) => {
+                info!(
+                    iterations = iter,
+                    msg_count = messages.len(),
+                    "Phase 22: resuming bg job from checkpoint"
+                );
+                let sid = self.session.create_session(&original_task)?;
+                for m in &messages {
+                    self.session.append_message(&sid, m)?;
+                }
+                (sid, messages, iter, original_task)
+            }
+            None => {
+                let sid = self.session.create_session(user_input)?;
+                let conv = vec![Message::user(user_input.to_string())];
+                self.session.append_message(&sid, &conv[0])?;
+                (sid, conv, 0, user_input.to_string())
+            }
+        };
+        let user_input: &str = &effective_input;
         let mut final_text = String::new();
 
         loop {
@@ -471,6 +525,13 @@ impl AgentRuntime {
             }
 
             total_iterations += 1;
+
+            // Phase 22: fire mid-run checkpoint hook (bg jobs use this
+            // to persist resume state). Hook is sync-fast — implementers
+            // tokio::spawn any actual I/O.
+            if let Some(ref hook) = self.iteration_hook {
+                hook(&conversation, total_iterations);
+            }
 
             if let Err(_) = self.budget.decrement() {
                 warn!("iteration budget exhausted after {} iterations", total_iterations);

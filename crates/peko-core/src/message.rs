@@ -8,7 +8,7 @@ pub struct ToolCall {
     pub input: serde_json::Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     System(String),
     User(String),
@@ -25,7 +25,7 @@ pub enum Message {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageData {
     pub base64: String,
     pub media_type: String,

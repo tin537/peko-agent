@@ -131,6 +131,33 @@ pub mod metrics {
     pub const BUDGET_REJECTED: &str = "budget_rejected";
     pub const TOKENS_USED: &str = "tokens_used";
     pub const ITERATIONS: &str = "iterations";
+    /// Phase 22: a Running job from a prior process resumed from its
+    /// checkpoint after agent restart.
+    pub const RESUMED: &str = "resumed";
+    /// Phase 22: a Running job that had no checkpoint (or stale) was
+    /// marked Failed instead of being silently orphaned.
+    pub const ORPHANED: &str = "orphaned";
+}
+
+/// Phase 22 mid-run resume payload. The bg worker writes one of these
+/// after each iteration so the agent can re-spawn the job from where it
+/// left off if the process restarts. Encoded with MessagePack
+/// (rmp-serde) — compact + schema-tolerant.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct Checkpoint {
+    pub task: String,
+    pub iterations: usize,
+    pub tokens_so_far: u64,
+    pub messages: Vec<crate::message::Message>,
+}
+
+impl Checkpoint {
+    pub fn encode(&self) -> anyhow::Result<Vec<u8>> {
+        rmp_serde::to_vec(self).context("encode checkpoint")
+    }
+    pub fn decode(blob: &[u8]) -> anyhow::Result<Self> {
+        rmp_serde::from_slice(blob).context("decode checkpoint")
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -424,6 +451,102 @@ impl BgStore {
         self.mark_failed(id, format!("timeout: exceeded {secs}s")).await;
     }
 
+    /// Phase 22: persist the bg worker's mid-run state. Called after
+    /// each iteration so the job can be resumed across restarts. Writes
+    /// `checkpoint_blob` + `checkpoint_at` only; status stays `Running`.
+    pub async fn write_checkpoint(&self, id: &str, ckpt: &Checkpoint) -> anyhow::Result<()> {
+        let blob = ckpt.encode()?;
+        let now = Utc::now().to_rfc3339();
+        let id_str = id.to_string();
+        // Mirror the in-memory iteration count so `bg status` reflects
+        // checkpoint progress even for jobs nobody waits on.
+        if let Some(job) = self.inner.jobs.write().await.get_mut(id) {
+            job.iterations = ckpt.iterations;
+        }
+        self.write_through(move |conn| {
+            conn.execute(
+                "UPDATE bg_jobs SET checkpoint_blob = ?1, checkpoint_at = ?2,
+                                    iterations = ?3
+                 WHERE id = ?4",
+                params![blob, now, ckpt.iterations as i64, id_str],
+            )?;
+            Ok(())
+        })
+        .await;
+        Ok(())
+    }
+
+    /// Phase 22: scan for `Running` jobs left behind by a prior agent
+    /// process. Returns (job, decoded checkpoint) for jobs whose
+    /// checkpoint is fresh enough (`max_age` window); jobs older than
+    /// the window are auto-marked failed via `ORPHANED` so they don't
+    /// pollute Running forever.
+    pub async fn pending_resumable(
+        &self,
+        max_age: chrono::Duration,
+    ) -> Vec<(BgJob, Checkpoint)> {
+        let cutoff = Utc::now() - max_age;
+        let cutoff_str = cutoff.to_rfc3339();
+        let mut out: Vec<(BgJob, Checkpoint)> = Vec::new();
+        let mut to_orphan: Vec<(String, String)> = Vec::new();
+
+        // Snapshot rows from disk (in-memory map already mirrors them).
+        let rows: Vec<(String, Option<Vec<u8>>, Option<String>)> = {
+            let db = self.inner.db.lock().await;
+            let Some(conn) = db.as_ref() else { return out };
+            let mut stmt = match conn.prepare(
+                "SELECT id, checkpoint_blob, checkpoint_at FROM bg_jobs
+                 WHERE status = 'running'",
+            ) {
+                Ok(s) => s,
+                Err(_) => return out,
+            };
+            let mapped = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<Vec<u8>>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            });
+            match mapped {
+                Ok(it) => it.filter_map(|r| r.ok()).collect(),
+                Err(_) => Vec::new(),
+            }
+        };
+
+        for (id, blob, ckpt_at) in rows {
+            let too_old = ckpt_at
+                .as_deref()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.with_timezone(&Utc) < cutoff)
+                .unwrap_or(true); // no checkpoint_at ⇒ treat as too old / never checkpointed
+            let Some(blob) = blob else {
+                to_orphan.push((id, "no checkpoint written before restart".into()));
+                continue;
+            };
+            if too_old {
+                to_orphan.push((id, format!("checkpoint older than {} hours", max_age.num_hours())));
+                continue;
+            }
+            let Ok(ckpt) = Checkpoint::decode(&blob) else {
+                to_orphan.push((id, "checkpoint decode failed (schema drift?)".into()));
+                continue;
+            };
+            if let Some(job) = self.get(&id).await {
+                out.push((job, ckpt));
+            }
+        }
+
+        for (id, reason) in to_orphan {
+            self.bump_metric(metrics::ORPHANED, 1).await;
+            self.mark_failed(&id, reason).await;
+            // mark_failed already bumps FAILED — we accept the double
+            // count (orphaned ⊆ failed) as deliberate categorisation.
+        }
+
+        out
+    }
+
     pub async fn mark_cancelled(&self, id: &str) -> bool {
         let now = Utc::now();
         let mut jobs = self.inner.jobs.write().await;
@@ -581,31 +704,6 @@ pub fn estimate_tokens(task: &str, iterations: usize, response_text: &str) -> u6
     task_tokens + response_tokens + iteration_tokens
 }
 
-/// Forward-compat for Phase 22 mid-run resume. The `checkpoint_blob`
-/// column is reserved in the schema today; this helper writes a
-/// best-effort serialised form so a future runtime can rehydrate. The
-/// current bg_tool worker doesn't call this — it's a hook waiting
-/// for the resume layer to land.
-#[allow(dead_code)]
-pub async fn write_checkpoint(
-    store: &BgStore,
-    job_id: &str,
-    blob: Vec<u8>,
-) -> anyhow::Result<()> {
-    let now = Utc::now().to_rfc3339();
-    let id = job_id.to_string();
-    store
-        .write_through(move |conn| {
-            conn.execute(
-                "UPDATE bg_jobs SET checkpoint_blob = ?1, checkpoint_at = ?2 WHERE id = ?3",
-                params![blob, now, id],
-            )?;
-            Ok(())
-        })
-        .await;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -720,6 +818,40 @@ mod tests {
         store.mark_done(&j.id, "ok".into(), None, 2, 1500).await;
         let used = store.tokens_used_today().await;
         assert_eq!(used, 1500);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_roundtrip_and_resume_window() {
+        let dir = std::env::temp_dir().join(format!("peko-bg-ckpt-{}", rand_token()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("bg.db");
+        let store = BgStore::open(&db).await.unwrap();
+
+        // Two running jobs: A has a fresh checkpoint, B has none.
+        let a = store.enqueue("research a".into(), None).await;
+        let b = store.enqueue("research b".into(), None).await;
+        store.mark_running(&a.id).await;
+        store.mark_running(&b.id).await;
+
+        let ckpt = Checkpoint {
+            task: "research a".into(),
+            iterations: 3,
+            tokens_so_far: 1234,
+            messages: vec![crate::message::Message::user("hi".to_string())],
+        };
+        store.write_checkpoint(&a.id, &ckpt).await.unwrap();
+
+        let resumable = store.pending_resumable(chrono::Duration::hours(1)).await;
+        assert_eq!(resumable.len(), 1, "only A is resumable");
+        assert_eq!(resumable[0].0.id, a.id);
+        assert_eq!(resumable[0].1.iterations, 3);
+
+        // B should have been auto-orphaned (marked failed).
+        let b_after = store.get(&b.id).await.unwrap();
+        assert_eq!(b_after.status, BgStatus::Failed);
+        assert!(b_after.error.as_deref().unwrap_or("").contains("no checkpoint"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

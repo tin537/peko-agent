@@ -51,7 +51,7 @@ pub use ocr_tool::OcrTool;
 pub use brain_tool::BrainTool;
 pub use research_tool::ResearchTool;
 pub use plan_tool::PlanTool;
-pub use bg_tool::{new_tools_handle, BgTool, ToolsHandle};
+pub use bg_tool::{new_tools_handle, resume_pending_bg_jobs, BgTool, ToolsHandle};
 
 #[cfg(test)]
 mod tests;

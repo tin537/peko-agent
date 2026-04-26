@@ -18,7 +18,8 @@ use peko_config::{AgentConfig, BgConfig};
 use peko_core::runtime::{build_provider_helper, AgentRuntime};
 use peko_core::tool::{Tool, ToolRegistry, ToolResult};
 use peko_core::{
-    bg_metrics, estimate_bg_tokens, BgStore, MemoryStore, SessionStore, SkillStore, SystemPrompt,
+    bg_metrics, estimate_bg_tokens, BgStore, Checkpoint, MemoryStore, Message, SessionStore,
+    SkillStore, SystemPrompt,
 };
 use serde_json::json;
 use std::future::Future;
@@ -218,40 +219,86 @@ async fn fire(
     let short = job.short_id().to_string();
     let wall_clock_secs = cfg.max_wall_clock_secs;
 
-    // Spawn the agent runtime asynchronously. The job's status updates
-    // happen inside the spawn so the fire-action returns immediately.
-    let bg_for_worker = bg.clone();
-    let id_for_worker = id.clone();
-    tokio::spawn(async move {
-        bg_for_worker.mark_running(&id_for_worker).await;
+    spawn_worker(WorkerSpawn {
+        bg: bg.clone(),
+        id: id.clone(),
+        task: task.clone(),
+        tools,
+        config,
+        db_path,
+        memory,
+        skills,
+        soul,
+        max_iter,
+        wall_clock_secs,
+        resume: None,
+    });
 
-        // Build a fresh AgentRuntime using the same plumbing as the
-        // delegate tool (ProviderChain, SessionStore, MemoryStore, etc.).
-        // Cloning Arc<ToolRegistry> means the bg worker shares the
-        // parent's tool surface, including this `bg` tool itself —
-        // which lets bg jobs fire further bg jobs if they choose.
+    Ok(ToolResult::success(format!(
+        "🟡 bg job started — id `{short}` ({}). Use `bg status id={short}` or `bg wait id={short}`.",
+        name.unwrap_or_else(|| "unnamed".into())
+    )))
+}
+
+struct WorkerSpawn {
+    bg: BgStore,
+    id: String,
+    task: String,
+    tools: Arc<ToolRegistry>,
+    config: Arc<Mutex<serde_json::Value>>,
+    db_path: std::path::PathBuf,
+    memory: Arc<Mutex<MemoryStore>>,
+    skills: Arc<Mutex<SkillStore>>,
+    soul: Arc<Mutex<String>>,
+    max_iter: usize,
+    wall_clock_secs: u64,
+    /// Phase 22: when set, the worker resumes from this checkpoint
+    /// instead of starting fresh. The `task` field above is ignored in
+    /// favour of `resume.task` so a restored job carries its original
+    /// user input even if the resume scaffold pads `task` with a
+    /// summary.
+    resume: Option<Checkpoint>,
+}
+
+fn spawn_worker(s: WorkerSpawn) {
+    let WorkerSpawn {
+        bg,
+        id,
+        task,
+        tools,
+        config,
+        db_path,
+        memory,
+        skills,
+        soul,
+        max_iter,
+        wall_clock_secs,
+        resume,
+    } = s;
+
+    tokio::spawn(async move {
+        bg.mark_running(&id).await;
+
+        // Build a fresh AgentRuntime — same plumbing as the delegate
+        // tool. Cloning Arc<ToolRegistry> means the bg worker shares
+        // the parent's tool surface, including this `bg` tool, so
+        // bg-spawned jobs can fire further bg jobs if they choose.
         let config_val = config.lock().await.clone();
         let provider = match build_provider_helper(&config_val) {
             Ok(p) => p,
             Err(e) => {
-                bg_for_worker
-                    .mark_failed(&id_for_worker, format!("no provider: {e}"))
-                    .await;
+                bg.mark_failed(&id, format!("no provider: {e}")).await;
                 return;
             }
         };
         let session = match SessionStore::open(&db_path) {
             Ok(s) => s,
             Err(e) => {
-                bg_for_worker
-                    .mark_failed(&id_for_worker, format!("session open: {e}"))
-                    .await;
+                bg.mark_failed(&id, format!("session open: {e}")).await;
                 return;
             }
         };
         let agent_config = AgentConfig {
-            // Per-job override clamped to bg config; keeps a runaway
-            // tool-call loop from burning the daily budget.
             max_iterations: max_iter,
             context_window: config_val["agent"]["context_window"]
                 .as_u64()
@@ -269,18 +316,62 @@ async fn fire(
         let soul_text = soul.lock().await.clone();
         let prompt = SystemPrompt::new().with_soul(soul_text);
 
+        // Phase 22: per-iteration checkpoint hook. The closure clones
+        // the BgStore (Arc inside) + id + task and spawns a tokio task
+        // for the SQLite write so the agent loop never blocks on disk.
+        let bg_for_hook = bg.clone();
+        let id_for_hook = id.clone();
+        let task_for_hook = task.clone();
+        let hook: peko_core::runtime::IterationHook =
+            Box::new(move |messages: &[Message], iter: usize| {
+                let bg = bg_for_hook.clone();
+                let id = id_for_hook.clone();
+                let task = task_for_hook.clone();
+                let messages = messages.to_vec();
+                tokio::spawn(async move {
+                    let ckpt = Checkpoint {
+                        task,
+                        iterations: iter,
+                        // Token estimate at this point; mark_done writes
+                        // the final exact count.
+                        tokens_so_far: 0,
+                        messages,
+                    };
+                    if let Err(e) = bg.write_checkpoint(&id, &ckpt).await {
+                        tracing::warn!(error = %e, "bg: checkpoint write failed");
+                    }
+                });
+            });
+
         let mut runtime = AgentRuntime::new(&agent_config, tools, provider, session)
             .with_system_prompt(prompt)
             .with_memory(memory)
-            .with_skills(skills);
+            .with_skills(skills)
+            .with_iteration_hook(hook);
 
-        // Wall-clock timeout protects against stuck LLM calls + runaway
-        // tool loops. Approximate token usage is recorded into the
-        // catalog + the daily metric so `bg stats` can show "today's
-        // tokens used" and the budget check on subsequent fires can
-        // reject when over.
-        let task_for_runtime = task.clone();
-        let run = runtime.run_task(&task_for_runtime);
+        // Phase 22: if resuming, hydrate runtime with the saved state.
+        // run_task ignores its user_input arg when resume_state is set,
+        // so we still pass `task` (used for session metadata).
+        let run_input = if let Some(ckpt) = resume {
+            tracing::info!(
+                job = %id,
+                iter = ckpt.iterations,
+                msgs = ckpt.messages.len(),
+                "Phase 22: resuming bg worker from checkpoint"
+            );
+            bg.bump_metric(bg_metrics::RESUMED, 1).await;
+            let task_for_resume = ckpt.task.clone();
+            runtime = runtime.with_resume_state(
+                ckpt.messages,
+                ckpt.iterations,
+                ckpt.task,
+            );
+            task_for_resume
+        } else {
+            task.clone()
+        };
+
+        let run = runtime.run_task(&run_input);
         let outcome = if wall_clock_secs > 0 {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(wall_clock_secs),
@@ -301,36 +392,62 @@ async fn fire(
                 } else {
                     resp.text.clone()
                 };
-                let tokens = estimate_bg_tokens(&task, resp.iterations, &resp.text);
-                bg_for_worker
-                    .mark_done(
-                        &id_for_worker,
-                        result,
-                        Some(resp.session_id),
-                        resp.iterations,
-                        tokens,
-                    )
-                    .await;
+                let tokens = estimate_bg_tokens(&run_input, resp.iterations, &resp.text);
+                bg.mark_done(
+                    &id,
+                    result,
+                    Some(resp.session_id),
+                    resp.iterations,
+                    tokens,
+                )
+                .await;
             }
             Some(Err(e)) => {
-                bg_for_worker
-                    .mark_failed(&id_for_worker, format!("run_task: {e}"))
-                    .await;
+                bg.mark_failed(&id, format!("run_task: {e}")).await;
             }
             None => {
-                // Timeout — separate metric so introspection differentiates
-                // genuine failures from time-bounded kills.
-                bg_for_worker
-                    .mark_timeout(&id_for_worker, wall_clock_secs)
-                    .await;
+                bg.mark_timeout(&id, wall_clock_secs).await;
             }
         }
     });
+}
 
-    Ok(ToolResult::success(format!(
-        "🟡 bg job started — id `{short}` ({}). Use `bg status id={short}` or `bg wait id={short}`.",
-        name.unwrap_or_else(|| "unnamed".into())
-    )))
+/// Phase 22: re-spawn workers for `Running` jobs that survived a prior
+/// process crash/restart and have a recent enough checkpoint. Stale or
+/// checkpoint-less Running rows are auto-marked Failed by
+/// `BgStore::pending_resumable`. Call this from main.rs AFTER the tools
+/// handle is wired (workers need the live registry to spawn agent
+/// runtimes).
+pub async fn resume_pending_bg_jobs(
+    bg: BgStore,
+    tools: Arc<ToolRegistry>,
+    config: Arc<Mutex<serde_json::Value>>,
+    db_path: std::path::PathBuf,
+    memory: Arc<Mutex<MemoryStore>>,
+    skills: Arc<Mutex<SkillStore>>,
+    soul: Arc<Mutex<String>>,
+    bg_config: BgConfig,
+    max_age: chrono::Duration,
+) -> usize {
+    let pending = bg.pending_resumable(max_age).await;
+    let count = pending.len();
+    for (job, ckpt) in pending {
+        spawn_worker(WorkerSpawn {
+            bg: bg.clone(),
+            id: job.id.clone(),
+            task: ckpt.task.clone(),
+            tools: tools.clone(),
+            config: config.clone(),
+            db_path: db_path.clone(),
+            memory: memory.clone(),
+            skills: skills.clone(),
+            soul: soul.clone(),
+            max_iter: bg_config.max_iterations,
+            wall_clock_secs: bg_config.max_wall_clock_secs,
+            resume: Some(ckpt),
+        });
+    }
+    count
 }
 
 async fn status(bg: BgStore, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
