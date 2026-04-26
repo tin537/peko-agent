@@ -269,6 +269,18 @@ async fn main() -> anyhow::Result<()> {
     registry.register(peko_tools_android::BrainTool::new(brain_store.clone()));
     info!(brain_db = %brain_db_path.display(), brain_dir = %brain_dir.display(), "brain system initialized");
 
+    // Research tool (Phase 18B). End-to-end pipeline:
+    // search → fetch top N → save per-source brain notes → synthesise
+    // an overview note that wikilinks every source. Synthesis posts to
+    // the localhost web API; falls back to source-only mode if that
+    // endpoint isn't reachable (e.g. agent started without web UI).
+    let synth_endpoint = Some(format!("http://127.0.0.1:{port}/api/llm/synth"));
+    registry.register(peko_tools_android::ResearchTool::new(
+        brain_store.clone(),
+        synth_endpoint,
+    ));
+    info!("research pipeline initialized");
+
     // Skills system
     let skills_path = config.agent.data_dir.join("skills");
     let skill_store = Arc::new(Mutex::new(

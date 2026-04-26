@@ -22,6 +22,7 @@ pub mod draw_tool;
 pub mod web_tool;
 pub mod ocr_tool;
 pub mod brain_tool;
+pub mod research_tool;
 
 pub use screenshot::ScreenshotTool;
 pub use touch::TouchTool;
@@ -46,6 +47,7 @@ pub use draw_tool::DrawTool;
 pub use web_tool::WebTool;
 pub use ocr_tool::OcrTool;
 pub use brain_tool::BrainTool;
+pub use research_tool::ResearchTool;
 
 #[cfg(test)]
 mod tests;

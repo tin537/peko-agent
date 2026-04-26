@@ -372,6 +372,65 @@ pub(crate) struct SearchHit {
 /// (recommended; brave.com/search/api, free 2k queries/month). Falls
 /// back to DuckDuckGo HTML scraping when no key is available — fragile
 /// but works without auth.
+/// Internal pub(crate) wrapper around the search backends. Used by
+/// `research_tool` to feed raw hits into a multi-step pipeline.
+pub(crate) async fn search_internal(
+    query: &str,
+    max_results: usize,
+) -> anyhow::Result<Vec<SearchHit>> {
+    let q = query.trim();
+    if q.is_empty() {
+        anyhow::bail!("query is empty");
+    }
+    let brave_key = std::env::var("PEKO_BRAVE_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    match brave_key {
+        Some(key) => Ok(search_brave(q, &key, max_results).await?.1),
+        None => Ok(search_ddg(q, max_results).await?.1),
+    }
+}
+
+/// Internal: GET a URL, strip HTML to readable text, return up to
+/// `max_chars`. Mirrors `fetch` but returns the text directly.
+pub(crate) async fn fetch_extract_internal(
+    url: &str,
+    max_chars: usize,
+) -> anyhow::Result<String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        anyhow::bail!("only http/https URLs accepted");
+    }
+    let client = reqwest::Client::builder()
+        .timeout(FETCH_TIMEOUT)
+        .user_agent(DEFAULT_USER_AGENT)
+        .build()?;
+    let resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("HTTP {}", resp.status());
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = resp.bytes().await?;
+    if bytes.len() > HARD_MAX_BYTES {
+        anyhow::bail!("body {}B exceeds {}B cap", bytes.len(), HARD_MAX_BYTES);
+    }
+    let body = String::from_utf8_lossy(&bytes);
+    let text = if content_type.contains("text/html")
+        || (content_type.is_empty() && body.contains("<html"))
+    {
+        html_to_text(&body)
+    } else if content_type.contains("application/json") || content_type.starts_with("text/") {
+        body.to_string()
+    } else {
+        anyhow::bail!("non-text content-type '{}'", content_type);
+    };
+    Ok(truncate_chars(&text, max_chars))
+}
+
 async fn search(query: &str, max_results: usize) -> anyhow::Result<ToolResult> {
     let q = query.trim();
     if q.is_empty() {
