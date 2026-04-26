@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
-# Install tesseract OCR on the Android device for use by the agent's
-# `ocr` tool. Two paths supported:
+# Install tesseract OCR on the Android device. The recommended path
+# bundles tesseract directly into the Magisk module via:
 #
-#   1. (recommended) Use Termux. If Termux is already installed,
-#      run `pkg install tesseract tesseract-data-eng` inside Termux,
-#      then symlink the binary so the agent finds it without
-#      knowing the Termux internal path.
+#   1. ./scripts/build-tesseract-android.sh   (one-time, ~10 min)
+#         cross-compiles libpng + leptonica + cpu_features + tesseract
+#         for arm64-android via the NDK, drops outputs into
+#         magisk/peko-module/system/{bin,etc/tessdata}/
 #
-#   2. (manual) Download a prebuilt static arm64 tesseract binary
-#      and tessdata, push to /data/peko/bin/. This script doesn't
-#      automate the download because no single canonical static
-#      build exists; we point the user at the right place instead.
+#   2. ./magisk/build-module.sh               (rebuild the .zip)
+#
+#   3. Flash the new module via Magisk Manager → reboot
+#
+# After reboot the tesseract binary lives at /system/bin/tesseract
+# and the agent's `ocr` tool finds it automatically. The Magisk
+# customize.sh sets perms; service.sh exports TESSDATA_PREFIX.
+#
+# This script is for ad-hoc / pre-Magisk-flash testing — push the
+# already-built artifacts straight to /data/peko/bin/ on a live
+# device so the agent can use OCR before the next reflash.
 
-set -uo pipefail
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 ADB=${ADB:-adb}
 
 step() { printf "\n\033[1;34m▶ %s\033[0m\n" "$*"; }
@@ -22,51 +31,54 @@ warn() { printf "  \033[1;33m!\033[0m %s\n" "$*"; }
 step "Preflight"
 "$ADB" get-state >/dev/null 2>&1 || { echo "no adb device"; exit 1; }
 
-step "Probe existing tesseract"
+BUNDLED_BIN="$REPO_ROOT/magisk/peko-module/system/bin/tesseract"
+BUNDLED_TESSDATA="$REPO_ROOT/magisk/peko-module/system/etc/tessdata"
+
+if [[ ! -x "$BUNDLED_BIN" ]] || [[ ! -d "$BUNDLED_TESSDATA" ]]; then
+    warn "no bundled tesseract found at $BUNDLED_BIN"
+    warn "build it first:  ./scripts/build-tesseract-android.sh"
+    exit 1
+fi
+
+step "Probe existing tesseract on device"
 EXISTING=$("$ADB" shell 'su -c "
   for p in /data/peko/bin/tesseract /data/local/tmp/tesseract \
-           /system/bin/tesseract /data/data/com.termux/files/usr/bin/tesseract; do
+           /system/bin/tesseract; do
     if [ -x \"\$p\" ]; then echo \$p; exit 0; fi
   done
   command -v tesseract 2>/dev/null
 "' 2>&1 | tr -d '\r')
+[[ -n "$EXISTING" ]] && ok "found existing: $EXISTING"
 
-if [[ -n "$EXISTING" ]]; then
-    ok "tesseract already installed at: $EXISTING"
-    "$ADB" shell "su -c '$EXISTING --version 2>&1'" | head -3 | sed 's/^/    /'
-    exit 0
+step "Push bundled tesseract → /data/peko/bin/"
+"$ADB" push "$BUNDLED_BIN" /data/local/tmp/tesseract >/dev/null
+"$ADB" push "$BUNDLED_TESSDATA" /data/local/tmp/ >/dev/null
+"$ADB" shell "su -c '
+  mkdir -p /data/peko/bin /data/peko/tessdata
+  cp /data/local/tmp/tesseract /data/peko/bin/tesseract
+  chmod 0755 /data/peko/bin/tesseract
+  cp -r /data/local/tmp/tessdata/* /data/peko/tessdata/
+  chmod 0644 /data/peko/tessdata/*.traineddata
+'"
+ok "pushed binary + tessdata"
+
+step "Smoke test"
+VER=$("$ADB" shell "su -c 'TESSDATA_PREFIX=/data/peko/tessdata /data/peko/bin/tesseract --version 2>&1 | head -1'" 2>&1 | tr -d '\r')
+ok "$VER"
+
+LANGS=$("$ADB" shell "su -c 'TESSDATA_PREFIX=/data/peko/tessdata /data/peko/bin/tesseract --list-langs 2>&1 | tail -n +2'" 2>&1 | tr -d '\r' | tr '\n' ' ')
+ok "languages available: $LANGS"
+
+step "End-to-end OCR test"
+"$ADB" shell 'su -c "input keyevent KEYCODE_WAKEUP && sleep 1 && screencap -p /data/local/tmp/peko-ocr-test.png"'
+TEXT=$("$ADB" shell "su -c 'TESSDATA_PREFIX=/data/peko/tessdata /data/peko/bin/tesseract /data/local/tmp/peko-ocr-test.png stdout -l eng --psm 6 2>/dev/null | head -10'" 2>&1)
+if [[ -n "$TEXT" ]]; then
+    ok "OCR returned text:"
+    echo "$TEXT" | sed 's/^/    /'
+else
+    warn "OCR returned empty result (screen might be dark/locked)"
 fi
 
-step "No tesseract found. Recommended install paths"
-cat <<'EOF'
-  Option 1 — Termux (easiest):
-    1. Install Termux from F-Droid: https://f-droid.org/packages/com.termux/
-    2. Open Termux, run:
-         pkg update
-         pkg install tesseract tesseract-data-eng tesseract-data-tha
-    3. From your Mac, symlink the Termux binary so the agent can find it:
-         adb shell 'su -c "
-           mkdir -p /data/peko/bin
-           ln -sf /data/data/com.termux/files/usr/bin/tesseract /data/peko/bin/tesseract
-           chmod 755 /data/peko/bin/tesseract
-         "'
-
-  Option 2 — Magisk module bundle (if you don't want Termux):
-    Pull a static arm64 tesseract binary + tessdata onto the
-    device. Recommended source (community arm64 build):
-      https://github.com/Madeesh-Kannan/aarch64-android-tesseract
-    Then:
-      adb push tesseract /data/local/tmp/tesseract
-      adb push tessdata /data/local/tmp/tessdata
-      adb shell 'su -c "
-        mkdir -p /data/peko/bin
-        cp /data/local/tmp/tesseract /data/peko/bin/tesseract
-        chmod 755 /data/peko/bin/tesseract
-        mkdir -p /data/peko/tessdata
-        cp -r /data/local/tmp/tessdata/* /data/peko/tessdata/
-        echo \"export TESSDATA_PREFIX=/data/peko/tessdata\" >> /data/adb/modules/peko_agent/service.sh
-      "'
-
-  After either path, verify with:
-    adb shell 'su -c "/data/peko/bin/tesseract --version"'
-EOF
+step "Done"
+echo "  Tesseract is now usable by the agent's `ocr` tool."
+echo "  For a permanent install: rebuild + flash the Magisk module."

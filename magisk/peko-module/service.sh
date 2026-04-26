@@ -138,6 +138,16 @@ if [ -f "$LOG" ]; then
     mv "$LOG" "$LOG.1"
 fi
 
+# Tesseract's data path. The bundled traineddata files live under
+# /system/etc/tessdata (mounted from the Magisk module's
+# system/etc/tessdata/). Setting TESSDATA_PREFIX here means
+# peko-agent's `ocr` tool — which exec's tesseract — picks up the
+# right language data without needing every invocation to pass
+# --tessdata-dir. If the user didn't bundle tesseract, this var is
+# harmless: tesseract isn't installed, the OCR tool returns its
+# typed "not found" error.
+export TESSDATA_PREFIX=/system/etc/tessdata
+
 # Start the LLM daemon first (abstract UDS @peko-llm). Fail-safe — if the
 # user hasn't pushed a GGUF model, the daemon will error and peko-agent
 # will route everything to cloud via the dual-brain fallback.

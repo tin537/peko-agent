@@ -248,15 +248,38 @@ fn run_tesseract(
     lang: &str,
     psm: u32,
 ) -> anyhow::Result<ToolResult> {
-    let out = Command::new(bin)
-        .arg(image)
+    // Tesseract reads TESSDATA_PREFIX from env to find traineddata
+    // files. The Magisk module's service.sh exports
+    //   TESSDATA_PREFIX=/system/etc/tessdata
+    // so this just works after a Magisk install + reboot. For ad-hoc
+    // installs (Termux, /data/peko/bin), users can either set the env
+    // var themselves or pass --tessdata-dir; we honour the env-var
+    // path here and let `tesseract` itself surface a clear error if
+    // the dir is missing.
+    let mut cmd = Command::new(bin);
+    cmd.arg(image)
         .arg("stdout")
         .args(["-l", lang])
         .args(["--psm", &psm.to_string()])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
+        .stderr(Stdio::piped());
+    // If TESSDATA_PREFIX is unset, fall back to the most likely
+    // bundled / Termux / /data/peko paths so the user doesn't need to
+    // export it themselves.
+    if std::env::var_os("TESSDATA_PREFIX").is_none() {
+        for guess in [
+            "/system/etc/tessdata",
+            "/data/peko/tessdata",
+            "/data/data/com.termux/files/usr/share/tessdata",
+        ] {
+            if Path::new(guess).is_dir() {
+                cmd.env("TESSDATA_PREFIX", guess);
+                break;
+            }
+        }
+    }
+    let out = cmd.output();
     let out = match out {
         Ok(o) => o,
         Err(e) => return Ok(ToolResult::error(format!("spawn tesseract: {e}"))),
