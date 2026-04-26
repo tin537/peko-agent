@@ -29,16 +29,17 @@ class PekoOverlayApp : Application() {
             nm.createNotificationChannel(channel)
         }
 
-        // Phase 5: bring up the audio bridge unconditionally on app
-        // start. The service is cheap when idle (FileObserver only) and
-        // the agent expects it to be ready as soon as the device is up.
-        // BootReceiver also starts it directly on boot.
-        try {
-            startForegroundService(Intent(this, AudioBridgeService::class.java))
-        } catch (_: Throwable) {
-            // start-from-app is restricted on some Android versions when
-            // the activity context isn't visible; BootReceiver will
-            // recover next boot.
+        // Phase 5 + 23: bring up every bridge service on app start.
+        // Each service is cheap when idle (FileObserver only) and the
+        // agent expects them to be ready as soon as the device is up.
+        // BootReceiver also starts them directly on boot.
+        for (cls in listOf(
+            AudioBridgeService::class.java,
+            LocationBridgeService::class.java,
+            CameraBridgeService::class.java,
+            TelephonyBridgeService::class.java,
+        )) {
+            try { startForegroundService(Intent(this, cls)) } catch (_: Throwable) {}
         }
     }
 

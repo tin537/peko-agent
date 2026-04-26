@@ -62,26 +62,30 @@ impl Tool for AudioPcmTool {
          nodes, so we can't open them directly). \
          \
          Actions: \
-         record { duration_ms: int (≤120000), sample_rate?: 16000, \
-             channels?: 1, source?: \"mic\"|\"voice_recognition\"|\
-             \"voice_communication\" } — returns { wav_path: \"/data/...\", \
-             duration_ms, sample_rate, channels, size_bytes }. \
-         play_wav { wav_path: \"/path/to/file.wav\" } — plays a 16-bit \
-             PCM WAV; returns { duration_ms }. \
-         tts { text: \"...\", lang?: \"en\", rate?: 1.0, pitch?: 1.0 } \
-             — synthesises speech to a WAV, then plays it; returns \
-             { wav_path, duration_ms_played }. \
+         record { duration_ms, sample_rate?:16000, channels?:1, source? } \
+             — one-shot record, returns wav_path + size. \
+         play_wav { wav_path } — plays a 16-bit PCM WAV. \
+         tts { text, lang?:\"en\", rate?, pitch? } — synthesises speech \
+             to a WAV, then plays it. \
+         route_get — returns { mode, speaker, bluetooth_sco, \
+             wired_headset_on, music_active, volume_music, volume_voice_call }. \
+         route_set { mode?:\"normal\"|\"in_call\"|\"in_communication\"|\"ringtone\", \
+             speaker?:bool, bluetooth_sco?:bool } — switches the audio \
+             route at the AudioManager level. \
+         start_ambient { stream_id?, sample_rate?:16000, window_ms?:1000, \
+             min_rms?:0 } — begin continuous ambient capture; per-window \
+             features (rms, peak, zero-crossing rate) flow into the \
+             events store as type=\"ambient\". Poll via the `events` tool. \
+         stop_ambient { stream_id }. \
          \
-         Output WAV files land at /data/peko/audio/<id>.wav for record \
-         and tts so the agent can pass them to follow-up tools (e.g. \
-         OCR/transcription pipelines)."
+         Output WAV files land at /data/peko/audio/<id>.wav for record + tts."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "enum": ["record", "play_wav", "tts"] },
+                "action": { "type": "string", "enum": ["record", "play_wav", "tts", "route_get", "route_set", "start_ambient", "stop_ambient"] },
                 "duration_ms": { "type": "integer" },
                 "sample_rate": { "type": "integer" },
                 "channels": { "type": "integer" },
@@ -108,9 +112,11 @@ impl Tool for AudioPcmTool {
                 "record" => record(&root, &args).await,
                 "play_wav" => play_wav(&root, &args).await,
                 "tts" => tts(&root, &args).await,
+                "route_get" | "route_set" | "start_ambient" | "stop_ambient" =>
+                    forward_simple(&args).await,
                 "" => Ok(ToolResult::error("missing 'action'".to_string())),
                 other => Ok(ToolResult::error(format!(
-                    "unknown action '{other}'. valid: record, play_wav, tts"
+                    "unknown action '{other}'."
                 ))),
             }
         })
@@ -118,6 +124,31 @@ impl Tool for AudioPcmTool {
 }
 
 // ───── actions ─────────────────────────────────────────────────────
+
+/// Phase 23 — forward route + ambient actions through the shared
+/// bridge client. These don't return assets; just JSON.
+async fn forward_simple(args: &serde_json::Value) -> anyhow::Result<ToolResult> {
+    use crate::bridge_client::{pick_timeout, send, BridgeRequest};
+    let timeout = pick_timeout(args, 10);
+    let resp = send(BridgeRequest {
+        topic: "audio",
+        body: args.clone(),
+        input_asset: None,
+        input_asset_ext: "bin",
+        timeout,
+    }).await?;
+    if !resp.json["ok"].as_bool().unwrap_or(false) {
+        return Ok(ToolResult::error(format!(
+            "audio_pcm {} failed: {}",
+            args["action"].as_str().unwrap_or("?"),
+            resp.json["error"].as_str().unwrap_or("(no error)")
+        )));
+    }
+    Ok(ToolResult::success(format!(
+        "🎚 {}\n\n{}", args["action"].as_str().unwrap_or("?"),
+        serde_json::to_string_pretty(&resp.json).unwrap_or_default()
+    )))
+}
 
 async fn record(root: &Path, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
     let duration_ms = args["duration_ms"].as_u64().unwrap_or(5000).clamp(100, 120_000);

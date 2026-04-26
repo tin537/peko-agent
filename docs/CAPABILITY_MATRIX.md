@@ -53,8 +53,11 @@ Status legend:
 | Audio topology + mixer + media volume | ✅ | 🟡 | 4 | `/proc/asound`, `tinymix`, `cmd audio get-volume`. Lane A only sees ALSA + tinymix; media volume needs framework |
 | PCM record / playback / TTS | ✅ | 🟡 | 5 | Bridge in PekoOverlay priv-app (AudioRecord, AudioTrack, TextToSpeech). File-based RPC via `/data/data/com.peko.overlay/files/audio/{in,out}/`. Verified on-device: 1.5s mic record → 48KB 16-bit PCM WAV; TTS "Hello from Peko" → 122KB WAV in <2s. Lane A 🟡 because it requires the priv-app + audioserver — Lane A would need the overlay APK transplanted or a separate tinyalsa pipeline |
 | Self-rendered overlay UI (`draw` tool) | ✅ | ✅ | 5 | `peko-renderer` crate: rect/line/text via embedded 5x7 font, returns PNG. Lane A blits to fbdev |
-| Camera | ❌ | ❌ | — | Camera HAL is binder/vendor-blob only |
-| GPS | ❌ | ❌ | — | gnss HAL binder-only |
+| Camera | ✅ | 🟡 | 23 | One-shot capture + 1-FPS frame stream via PekoOverlay priv-app (Camera2 → ImageReader). Verified on OnePlus 6T: back camera 1280×720 → 178KB JPEG. Streaming frames flow into shared events.db; agent polls via `events { type:"frame" }`. Lane A 🟡: needs cameraserver alive |
+| GPS | ✅ | ❌ | 23 | One-shot fix + continuous stream via LocationManager (gnss HAL through framework). Verified on OnePlus 6T: outdoor fix → lat/lon ±9.6m in <15s. Stream samples flow into events.db. Lane A ❌: gnss is binder-only, no kernel path |
+| Telephony info (sim/carrier/signal/cells) | ✅ | ❌ | 23 | Read-only TelephonyManager bridge. Verified: SIM_STATE_READY, carrier "TRUE-H" / TH, LTE, phone number returned. Lane A ❌: telephony stack is RILD+binder |
+| Audio routing (mode/speaker/SCO) | ✅ | 🟡 | 23 | AudioManager.setMode + setSpeakerphoneOn. Lane A: depends on audioserver |
+| Ambient sound stream (RMS/peak/zero-crossing) | ✅ | 🟡 | 23 | 16kHz mono windowed feature extraction; 1-second windows logged to events.db. Classification deferred to Phase 24 (TFLite YAMNet) or cloud pipeline |
 
 ## LLM runtime
 

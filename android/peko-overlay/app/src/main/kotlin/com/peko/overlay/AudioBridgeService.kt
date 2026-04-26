@@ -11,6 +11,7 @@ import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import com.peko.overlay.bridge.EventStore
 import android.os.Build
 import android.os.FileObserver
 import android.os.IBinder
@@ -138,6 +139,10 @@ class AudioBridgeService : Service() {
                 "record" -> doRecord(req, outWavFile)
                 "play_wav" -> doPlay(File(inDir, "$id.wav"))
                 "tts" -> doTts(req, outWavFile)
+                "route_get" -> doRouteGet()
+                "route_set" -> doRouteSet(req)
+                "start_ambient" -> doStartAmbient(req)
+                "stop_ambient" -> doStopAmbient(req)
                 else -> JSONObject().put("ok", false).put("error", "unknown action '$action'")
             }
             outJsonFile.writeText(result.toString())
@@ -301,6 +306,142 @@ class AudioBridgeService : Service() {
             .put("size_bytes", outWav.length())
             .put("text", text)
             .put("lang", lang)
+    }
+
+    // ────── route get/set ──────────────────────────────────────────
+
+    private fun doRouteGet(): JSONObject {
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        val mode = when (am.mode) {
+            AudioManager.MODE_NORMAL -> "NORMAL"
+            AudioManager.MODE_IN_CALL -> "IN_CALL"
+            AudioManager.MODE_IN_COMMUNICATION -> "IN_COMMUNICATION"
+            AudioManager.MODE_RINGTONE -> "RINGTONE"
+            else -> "MODE_${am.mode}"
+        }
+        return JSONObject()
+            .put("ok", true)
+            .put("mode", mode)
+            .put("speaker", am.isSpeakerphoneOn)
+            .put("bluetooth_sco", am.isBluetoothScoOn)
+            .put("wired_headset_on", @Suppress("DEPRECATION") am.isWiredHeadsetOn)
+            .put("music_active", am.isMusicActive)
+            .put("volume_music",
+                am.getStreamVolume(AudioManager.STREAM_MUSIC).toString() + "/" +
+                    am.getStreamMaxVolume(AudioManager.STREAM_MUSIC))
+            .put("volume_voice_call",
+                am.getStreamVolume(AudioManager.STREAM_VOICE_CALL).toString() + "/" +
+                    am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL))
+    }
+
+    private fun doRouteSet(req: JSONObject): JSONObject {
+        val am = getSystemService(AUDIO_SERVICE) as AudioManager
+        if (req.has("mode")) {
+            am.mode = when (req.optString("mode")) {
+                "normal" -> AudioManager.MODE_NORMAL
+                "in_call" -> AudioManager.MODE_IN_CALL
+                "in_communication" -> AudioManager.MODE_IN_COMMUNICATION
+                "ringtone" -> AudioManager.MODE_RINGTONE
+                else -> return JSONObject().put("ok", false).put("error", "bad mode '${req.optString("mode")}'")
+            }
+        }
+        if (req.has("speaker")) am.isSpeakerphoneOn = req.optBoolean("speaker")
+        if (req.has("bluetooth_sco")) {
+            if (req.optBoolean("bluetooth_sco")) am.startBluetoothSco() else am.stopBluetoothSco()
+        }
+        return doRouteGet()
+    }
+
+    // ────── ambient sound stream ──────────────────────────────────
+    //
+    // Captures 16kHz mono PCM in 1-second windows; for each window
+    // emits an "ambient" event with low-cost features (RMS energy,
+    // peak amplitude, zero-crossing rate). The shim does not classify
+    // — that's deferred. The agent can poll events and ship interesting
+    // windows to a downstream classifier (cloud Whisper, on-device
+    // YAMNet later, etc.). This gives the agent ambient awareness
+    // without bundling ML models in the APK.
+
+    @Volatile private var ambientThread: Thread? = null
+    @Volatile private var ambientStreamId: String? = null
+
+    private fun doStartAmbient(req: JSONObject): JSONObject {
+        if (ambientThread != null) {
+            return JSONObject().put("ok", false).put("error", "ambient stream already running")
+        }
+        val streamId = req.optString("stream_id").ifBlank { "amb-${System.nanoTime()}" }
+        val sampleRate = req.optInt("sample_rate", 16_000)
+        val windowMs = req.optInt("window_ms", 1000).coerceIn(200, 5000)
+        val minRms = req.optDouble("min_rms", 0.0).coerceAtLeast(0.0).toInt()
+        val channelMask = AudioFormat.CHANNEL_IN_MONO
+        val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
+        if (minBuf <= 0) {
+            return JSONObject().put("ok", false).put("error", "AudioRecord unsupported config")
+        }
+        val bufSize = (sampleRate * windowMs / 1000 * 2).coerceAtLeast(minBuf)
+        val rec = AudioRecord(MediaRecorder.AudioSource.MIC, sampleRate, channelMask,
+            AudioFormat.ENCODING_PCM_16BIT, bufSize)
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            rec.release()
+            return JSONObject().put("ok", false).put("error", "AudioRecord init failed (RECORD_AUDIO?)")
+        }
+        ambientStreamId = streamId
+        val store = EventStore.get(this)
+        val window = ShortArray(sampleRate * windowMs / 1000)
+        ambientThread = thread(start = true, name = "PekoAmbient") {
+            rec.startRecording()
+            try {
+                while (Thread.currentThread() == ambientThread && !Thread.currentThread().isInterrupted) {
+                    val n = rec.read(window, 0, window.size)
+                    if (n <= 0) continue
+                    var sumSq = 0.0
+                    var peak = 0
+                    var zc = 0
+                    var prev: Short = 0
+                    for (i in 0 until n) {
+                        val s = window[i].toInt()
+                        sumSq += (s.toDouble() * s.toDouble())
+                        val a = if (s < 0) -s else s
+                        if (a > peak) peak = a
+                        if (i > 0 && ((prev.toInt() >= 0) != (s >= 0))) zc++
+                        prev = window[i]
+                    }
+                    val rms = kotlin.math.sqrt(sumSq / n).toInt()
+                    if (rms < minRms) continue
+                    val data = JSONObject()
+                        .put("rms", rms)
+                        .put("peak", peak)
+                        .put("zc", zc)
+                        .put("samples", n)
+                        .put("sample_rate", sampleRate)
+                        .put("window_ms", windowMs)
+                    store.append("ambient", "audio_stream:$streamId", data)
+                }
+            } catch (_: Throwable) {
+            } finally {
+                try { rec.stop() } catch (_: Throwable) {}
+                rec.release()
+            }
+        }
+        return JSONObject()
+            .put("ok", true)
+            .put("stream_id", streamId)
+            .put("sample_rate", sampleRate)
+            .put("window_ms", windowMs)
+    }
+
+    private fun doStopAmbient(req: JSONObject): JSONObject {
+        val want = req.optString("stream_id")
+        val active = ambientStreamId
+        if (active == null) return JSONObject().put("ok", false).put("error", "no active ambient stream")
+        if (want.isNotBlank() && want != active) {
+            return JSONObject().put("ok", false).put("error", "active stream is '$active', not '$want'")
+        }
+        val t = ambientThread
+        ambientThread = null
+        ambientStreamId = null
+        try { t?.interrupt(); t?.join(2000) } catch (_: Throwable) {}
+        return JSONObject().put("ok", true).put("stream_id", active)
     }
 
     // ────── WAV helpers (16-bit PCM, little-endian) ───────────────

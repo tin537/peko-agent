@@ -20,3 +20,4 @@ uuid.workspace = true
 chrono.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

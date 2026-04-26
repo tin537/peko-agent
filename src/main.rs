@@ -210,6 +210,18 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
     // isn't installed, calls time out gracefully with a clear error.
     registry.register(peko_tools_android::AudioPcmTool::new());
 
+    // Phase 23 — vendor-binder shim (camera / GPS / telephony / events
+    // poller). Same priv-app bridge pattern as audio_pcm. Each tool
+    // talks to its own service in PekoOverlay over file-RPC; streaming
+    // sources (camera frames, GPS samples, ambient audio) flow through
+    // the shared events.db SQLite read by the events tool. Registered
+    // unconditionally so the agent can attempt them and get a clean
+    // error if the priv-app is missing.
+    registry.register(peko_tools_android::GpsTool::new());
+    registry.register(peko_tools_android::TelephonyTool::new());
+    registry.register(peko_tools_android::CameraTool::new());
+    registry.register(peko_tools_android::EventsTool::new());
+
     registry
 }
 
