@@ -255,6 +255,20 @@ async fn main() -> anyhow::Result<()> {
     registry.register(MemoryTool::new(memory_store.clone()));
     info!("memory system initialized");
 
+    // Second-brain / knowledge graph (Phase 18A). Stores long-form
+    // markdown notes with [[wikilink]] graph + FTS5 index. Files land
+    // at <data_dir>/brain/<slug>.md so the user can read them with any
+    // markdown editor and the agent can cross-link findings between
+    // sessions.
+    let brain_db_path = config.agent.data_dir.join("brain.db");
+    let brain_dir = config.agent.data_dir.join("brain");
+    let brain_store = Arc::new(Mutex::new(
+        peko_core::BrainStore::open(&brain_db_path, &brain_dir)
+            .context("failed to open brain database")?
+    ));
+    registry.register(peko_tools_android::BrainTool::new(brain_store.clone()));
+    info!(brain_db = %brain_db_path.display(), brain_dir = %brain_dir.display(), "brain system initialized");
+
     // Skills system
     let skills_path = config.agent.data_dir.join("skills");
     let skill_store = Arc::new(Mutex::new(

@@ -22,6 +22,7 @@ pub mod goal;
 pub mod gardener;
 pub mod hardware;
 pub mod call_pipeline;
+pub mod notebook;
 
 pub use message::{Message, ToolCall};
 pub use tool::{Tool, ToolRegistry, ToolResult};
@@ -48,6 +49,7 @@ pub use goal::{GoalGenerator, Pattern, PatternKind};
 pub use gardener::{GardenerConfig, spawn as spawn_gardener};
 pub use hardware::{resolve_modem, DetectedHardware};
 pub use call_pipeline::{CallStore, CallRecord, CallMetadata, spawn as spawn_call_pipeline};
+pub use notebook::{BrainStats, BrainStore, Note, parse_wikilinks, slugify};
 
 #[cfg(test)]
 mod runtime_tests;
