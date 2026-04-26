@@ -540,9 +540,11 @@ async fn stats(
     out.push_str(&format!("Last {days} day(s):\n"));
     for s in &recent {
         out.push_str(&format!(
-            "  {} — fired {} done {} fail {} cancel {} timeout {} budget-rej {} tokens {} iters {}\n",
+            "  {} — fired {} done {} fail {} cancel {} timeout {} \
+             budget-rej {} resumed {} orphaned {} tokens {} iters {}\n",
             s.date, s.fired, s.completed, s.failed, s.cancelled,
-            s.timeout, s.budget_rejected, s.tokens_used, s.iterations,
+            s.timeout, s.budget_rejected, s.resumed, s.orphaned,
+            s.tokens_used, s.iterations,
         ));
     }
     Ok(ToolResult::success(out))

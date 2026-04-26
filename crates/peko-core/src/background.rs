@@ -171,6 +171,11 @@ pub struct DailyStats {
     pub budget_rejected: u64,
     pub tokens_used: u64,
     pub iterations: u64,
+    /// Phase 22: jobs resumed from checkpoint after agent restart.
+    pub resumed: u64,
+    /// Phase 22: Running rows auto-failed because checkpoint was
+    /// missing or older than the resume window.
+    pub orphaned: u64,
 }
 
 /// In-memory + on-disk job store. The struct is cheap to clone (Arc
@@ -323,6 +328,7 @@ impl BgStore {
                 date: key.clone(),
                 fired: 0, completed: 0, failed: 0, cancelled: 0,
                 timeout: 0, budget_rejected: 0, tokens_used: 0, iterations: 0,
+                resumed: 0, orphaned: 0,
             };
             let rows = conn.prepare(
                 "SELECT metric, value FROM bg_stats WHERE date = ?1",
@@ -342,6 +348,8 @@ impl BgStore {
                             "budget_rejected" => stats.budget_rejected = v,
                             "tokens_used" => stats.tokens_used = v,
                             "iterations" => stats.iterations = v,
+                            "resumed" => stats.resumed = v,
+                            "orphaned" => stats.orphaned = v,
                             _ => {}
                         }
                     }

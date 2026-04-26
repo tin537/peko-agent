@@ -235,9 +235,13 @@ async fn main() -> anyhow::Result<()> {
     let config = PekoConfig::load(&config_path)
         .context(format!("failed to load config from {}", config_path.display()))?;
 
+    // ANSI colors only when stdout is a real terminal — keeps log files
+    // greppable instead of full of `\x1b[2m...\x1b[0m` escape clutter.
+    let use_ansi = unsafe { libc::isatty(libc::STDOUT_FILENO) } != 0;
     tracing_subscriber::fmt()
         .with_env_filter(&config.agent.log_level)
         .with_target(false)
+        .with_ansi(use_ansi)
         .init();
 
     info!(config = %config_path.display(), "peko-agent starting");

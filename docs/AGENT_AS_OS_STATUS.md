@@ -67,10 +67,32 @@ The numbers below are real, measured on a OnePlus 6T (codename
 | 2     | sensors + battery          | PASS         |
 | 3     | wifi backends              | PASS         |
 | 4     | audio topology + mixer     | PASS         |
+| 21    | bg persistence + budget    | PASS         |
+| 22    | bg mid-run resume + orphan | PASS         |
 
 Re-run anytime: `make device-test PHASE=all`.
 
-Unit tests: 170 across 7 crates, all green.
+Unit tests: 176 across 7 crates, all green (incl. checkpoint roundtrip
++ 1-hour resume window).
+
+## Background tasks (v0.4.1)
+
+Peko's `bg` tool is now the right answer for "research / scrape /
+multi-step plan" work that takes more than a few seconds:
+
+- **Persistent**: every fire is catalogued at `<data_dir>/bg.db`.
+  Catalog survives restart; finished jobs are still queryable.
+- **Bounded**: per-day token budget, per-job wall-clock cap, ReAct
+  iteration cap, max-concurrent. Configured in `[bg]` (defaults
+  apply when absent).
+- **Resumable**: a job that was Running when the agent crashed picks
+  up at the last iteration's conversation snapshot on next boot —
+  if the checkpoint is fresher than 1 hour. Otherwise it's auto-
+  failed with a clear reason.
+- **Self-introspectable**: `bg stats` shows the agent its own usage
+  (fired / completed / failed / cancelled / timeout / budget-rejected
+  / resumed / orphaned / tokens / iterations) per day so the agent
+  can adapt its own behaviour.
 
 ## What "100%" means
 
