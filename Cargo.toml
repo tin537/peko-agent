@@ -52,6 +52,7 @@ peko-core.workspace = true
 peko-hal.workspace = true
 peko-tools-android.workspace = true
 peko-llm.workspace = true
+peko-stt.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

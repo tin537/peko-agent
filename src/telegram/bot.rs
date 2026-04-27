@@ -785,6 +785,12 @@ impl TelegramBot {
                 }
             }
             //
+            // ── STT info (Phase 25) — direct, no LLM call
+            //
+            "/stt" => {
+                self.cmd_stt_info(chat_id).await;
+            }
+            //
             // ── Forward-to-agent shortcuts (sugar over agent task)
             //
             "/research" => {
@@ -875,6 +881,31 @@ impl TelegramBot {
             }
             Err(e) => self.send_text(chat_id, &format!("list err: {e}")).await,
         }
+    }
+
+    async fn cmd_stt_info(&self, chat_id: i64) {
+        let model_path = std::path::PathBuf::from(peko_stt::DEFAULT_MODEL_PATH);
+        let model_present = model_path.exists();
+        let model_size = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
+        let model_mb = model_size / (1024 * 1024);
+        let bin = peko_stt::discover_bin();
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
+        let lines = vec![
+            "🎙 *STT (offline)*".to_string(),
+            String::new(),
+            format!("model: `{}`", model_path.display()),
+            format!("  present: {}", if model_present { "✅" } else { "❌ — push via scripts/download-whisper-model.sh" }),
+            format!("  size:    {model_mb} MiB ({model_size} bytes)"),
+            String::new(),
+            format!("binary: {}",
+                bin.as_ref().map(|p| format!("`{}`", p.display()))
+                    .unwrap_or_else(|| "❌ not found in any of /system/bin, /data/adb/modules/peko_agent/system/bin, /data/local/tmp".to_string())),
+            String::new(),
+            format!("CPU threads: {threads}"),
+            String::new(),
+            "tools: `transcribe`, `start_streaming`, `stop_streaming`, `streaming_status`, `info`".to_string(),
+        ];
+        self.send_text(chat_id, &lines.join("\n")).await;
     }
 
     async fn cmd_bg_list(&self, chat_id: i64) {

@@ -142,12 +142,27 @@ impl Engine {
     pub fn model_path(&self) -> &Path { &self.model_path }
     pub fn bin_path(&self) -> &Path { &self.bin_path }
 
-    /// Transcribe a 16-bit PCM WAV file. whisper-cli accepts mono /
-    /// stereo / any common sample rate and resamples internally.
+    /// Transcribe a 16-bit PCM WAV file. whisper-cli is strict — it
+    /// requires 16 kHz mono 16-bit PCM. Anything else gets a clear
+    /// "must be 16 kHz" error. We pre-process via [`ensure_16khz_mono`]
+    /// so callers can hand us TTS output (typically 22 kHz) and other
+    /// arbitrary WAVs without thinking about it.
     pub async fn transcribe(&self, wav_path: &Path, opts: &TranscribeOpts) -> anyhow::Result<Transcript> {
         if !wav_path.exists() {
             return Err(anyhow!("WAV file missing: {}", wav_path.display()));
         }
+        // Normalise sample rate / channel count up front; returns Some(tmp_path)
+        // when a converted copy was written, or None when the input was
+        // already 16kHz mono (no work needed).
+        let normalised = ensure_16khz_mono(wav_path).await
+            .with_context(|| format!("normalise {}", wav_path.display()))?;
+        let effective_path: PathBuf = match normalised {
+            Some(ref p) => p.clone(),
+            None => wav_path.to_path_buf(),
+        };
+        // Owns the tmp file's lifetime — drops it when this scope exits.
+        let _tmp_guard = NormalisedTmp(normalised);
+        let wav_path = effective_path.as_path();
         // -oj writes a JSON file alongside the input WAV — note the
         // upstream behaviour APPENDS ".json" rather than replacing the
         // extension, so foo.wav → foo.wav.json. We harvest from there
@@ -284,6 +299,144 @@ fn detect_language_from_stderr(stderr: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// If `wav` is already 16 kHz mono 16-bit PCM, return None (no work).
+/// Otherwise decode → downmix → linear-resample → write a tmp WAV at
+/// 16 kHz mono and return its path. The caller wraps this in
+/// [`NormalisedTmp`] so it gets cleaned up via Drop. Linear interp is
+/// good enough for whisper input (model is robust to mild aliasing);
+/// using a heavy resampler would be over-engineering.
+async fn ensure_16khz_mono(wav: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let bytes = tokio::fs::read(wav).await
+        .with_context(|| format!("read {}", wav.display()))?;
+    let header = parse_wav_header(&bytes)?;
+    if header.sample_rate == 16_000 && header.channels == 1 && header.bits_per_sample == 16 {
+        return Ok(None);
+    }
+    if header.bits_per_sample != 16 {
+        return Err(anyhow!(
+            "WAV is {}-bit; only 16-bit PCM supported. Convert first.",
+            header.bits_per_sample
+        ));
+    }
+    // Decode → downmix to mono i16 (in f32 for resample maths).
+    let payload = &bytes[header.data_offset..header.data_offset + header.data_len];
+    let ch = header.channels as usize;
+    let frame_bytes = 2 * ch;
+    let n_frames = payload.len() / frame_bytes;
+    let mut mono_f32: Vec<f32> = Vec::with_capacity(n_frames);
+    let inv = 1.0_f32 / 32768.0;
+    for f in 0..n_frames {
+        let start = f * frame_bytes;
+        let mut acc = 0.0_f32;
+        for c in 0..ch {
+            let off = start + c * 2;
+            acc += i16::from_le_bytes([payload[off], payload[off + 1]]) as f32 * inv;
+        }
+        mono_f32.push(acc / ch as f32);
+    }
+    // Resample to 16kHz (linear).
+    let resampled: Vec<f32> = if header.sample_rate == 16_000 {
+        mono_f32
+    } else {
+        let ratio = 16_000.0_f32 / header.sample_rate as f32;
+        let out_len = (mono_f32.len() as f32 * ratio).max(1.0) as usize;
+        let mut out = Vec::with_capacity(out_len);
+        for i in 0..out_len {
+            let src = i as f32 / ratio;
+            let lo = src.floor() as usize;
+            let hi = (lo + 1).min(mono_f32.len() - 1);
+            let frac = src - lo as f32;
+            out.push(mono_f32[lo] * (1.0 - frac) + mono_f32[hi] * frac);
+        }
+        out
+    };
+    // Encode back to 16-bit PCM mono 16 kHz WAV.
+    let pcm_i16: Vec<i16> = resampled.into_iter()
+        .map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+        .collect();
+    let data: Vec<u8> = pcm_i16.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let tmp = std::env::temp_dir().join(format!(
+        "peko-stt-{}-{}.wav",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos()).unwrap_or(0)
+    ));
+    let mut wav_bytes = Vec::with_capacity(44 + data.len());
+    wav_bytes.extend_from_slice(b"RIFF");
+    wav_bytes.extend_from_slice(&((36 + data.len()) as u32).to_le_bytes());
+    wav_bytes.extend_from_slice(b"WAVE");
+    wav_bytes.extend_from_slice(b"fmt ");
+    wav_bytes.extend_from_slice(&16u32.to_le_bytes());
+    wav_bytes.extend_from_slice(&1u16.to_le_bytes());          // PCM
+    wav_bytes.extend_from_slice(&1u16.to_le_bytes());          // 1 ch
+    wav_bytes.extend_from_slice(&16_000u32.to_le_bytes());     // sample rate
+    wav_bytes.extend_from_slice(&32_000u32.to_le_bytes());     // byte rate
+    wav_bytes.extend_from_slice(&2u16.to_le_bytes());          // block align
+    wav_bytes.extend_from_slice(&16u16.to_le_bytes());         // bits/sample
+    wav_bytes.extend_from_slice(b"data");
+    wav_bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    wav_bytes.extend_from_slice(&data);
+    tokio::fs::write(&tmp, &wav_bytes).await
+        .with_context(|| format!("write tmp wav {}", tmp.display()))?;
+    Ok(Some(tmp))
+}
+
+struct WavHeader {
+    sample_rate: u32,
+    channels: u16,
+    bits_per_sample: u16,
+    data_offset: usize,
+    data_len: usize,
+}
+
+fn parse_wav_header(bytes: &[u8]) -> anyhow::Result<WavHeader> {
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(anyhow!("not a WAV file"));
+    }
+    let mut sample_rate: u32 = 0;
+    let mut channels: u16 = 0;
+    let mut bits_per_sample: u16 = 0;
+    let mut data_offset: usize = 0;
+    let mut data_len: usize = 0;
+    let mut i = 12usize;
+    while i + 8 <= bytes.len() {
+        let id = &bytes[i..i + 4];
+        let size = u32::from_le_bytes(bytes[i + 4..i + 8].try_into().unwrap()) as usize;
+        match id {
+            b"fmt " => {
+                let p = i + 8;
+                channels = u16::from_le_bytes([bytes[p + 2], bytes[p + 3]]);
+                sample_rate = u32::from_le_bytes(bytes[p + 4..p + 8].try_into().unwrap());
+                bits_per_sample = u16::from_le_bytes([bytes[p + 14], bytes[p + 15]]);
+            }
+            b"data" => {
+                data_offset = i + 8;
+                data_len = size.min(bytes.len() - data_offset);
+                break;
+            }
+            _ => {}
+        }
+        i += 8 + size;
+    }
+    if data_offset == 0 {
+        return Err(anyhow!("WAV has no data chunk"));
+    }
+    Ok(WavHeader { sample_rate, channels, bits_per_sample, data_offset, data_len })
+}
+
+/// Drop guard that deletes the resampled tmp WAV after transcribe
+/// returns. Without this we'd leak a file per call into /tmp on Linux
+/// (which is bounded but ugly).
+struct NormalisedTmp(Option<PathBuf>);
+impl Drop for NormalisedTmp {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
 }
 
 #[cfg(test)]
