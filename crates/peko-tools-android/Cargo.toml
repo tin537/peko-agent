@@ -8,6 +8,7 @@ peko-core.workspace = true
 peko-config.workspace = true
 peko-hal.workspace = true
 peko-renderer.workspace = true
+peko-stt.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

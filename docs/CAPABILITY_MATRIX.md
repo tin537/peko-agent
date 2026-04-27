@@ -58,6 +58,7 @@ Status legend:
 | Telephony info (sim/carrier/signal/cells) | ✅ | ❌ | 23 | Read-only TelephonyManager bridge. Verified: SIM_STATE_READY, carrier "TRUE-H" / TH, LTE, phone number returned. Lane A ❌: telephony stack is RILD+binder |
 | Audio routing (mode/speaker/SCO) | ✅ | 🟡 | 23 | AudioManager.setMode + setSpeakerphoneOn. Lane A: depends on audioserver |
 | Ambient sound stream (RMS/peak/zero-crossing) | ✅ | 🟡 | 23 | 16kHz mono windowed feature extraction; 1-second windows logged to events.db. Classification deferred to Phase 24 (TFLite YAMNet) or cloud pipeline |
+| Speech-to-text (offline, multilingual) | ✅ | ✅ | 25 | whisper.cpp `whisper-cli` shell-out, ggml-base multilingual model (~150 MB at /data/peko/models/whisper.bin). Verified live on OnePlus 6T: 3s 16kHz mono recording → Thai text in ~3-5s on 4 A75 cores. Lang auto-detect (`-l auto`). No cloud round-trip. Build via `crates/peko-stt-bin/build-android.sh`; same NDK/cmake recipe as peko-llm-daemon |
 
 ## LLM runtime
 

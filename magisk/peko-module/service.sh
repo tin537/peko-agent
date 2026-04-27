@@ -152,6 +152,17 @@ if pm list packages 2>/dev/null | grep -q '^package:com.peko.shim.sms$'; then
     # queries the content provider periodically anyway.
 fi
 
+# Phase 25 STT model check — the `stt` tool needs a whisper.cpp model
+# at /data/peko/models/whisper.bin. We don't ship the file (~150 MB+)
+# in the Magisk module; the user pushes it via
+# `scripts/download-whisper-model.sh`. Just log a hint at boot if it's
+# absent so the operator knows STT will fail until they push one.
+if [ ! -f /data/peko/models/whisper.bin ]; then
+    echo "[peko] STT model missing at /data/peko/models/whisper.bin — \
+push one via scripts/download-whisper-model.sh to enable on-device \
+speech recognition" >> /data/peko/peko.log
+fi
+
 # Rotate the log so we don't bloat — keep last 5 runs.
 # Shift oldest-to-newest: .4→.5, .3→.4, ... .1→.2, then current→.1
 if [ -f "$LOG" ]; then

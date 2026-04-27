@@ -210,6 +210,13 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
     // isn't installed, calls time out gracefully with a clear error.
     registry.register(peko_tools_android::AudioPcmTool::new());
 
+    // Phase 25 — offline STT via embedded whisper.cpp. Model file lives
+    // at /data/peko/models/whisper.bin (push via
+    // scripts/download-whisper-model.sh). Tool is registered
+    // unconditionally; if the model isn't pushed yet the first call
+    // returns a clear "push the model" error rather than crashing.
+    registry.register(peko_tools_android::SttTool::new());
+
     // Phase 23 — vendor-binder shim (camera / GPS / telephony / events
     // poller). Same priv-app bridge pattern as audio_pcm. Each tool
     // talks to its own service in PekoOverlay over file-RPC; streaming
