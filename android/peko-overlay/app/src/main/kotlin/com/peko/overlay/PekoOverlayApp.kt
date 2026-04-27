@@ -4,6 +4,7 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 
 /**
@@ -26,6 +27,19 @@ class PekoOverlayApp : Application() {
             }
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             nm.createNotificationChannel(channel)
+        }
+
+        // Phase 5 + 23: bring up every bridge service on app start.
+        // Each service is cheap when idle (FileObserver only) and the
+        // agent expects them to be ready as soon as the device is up.
+        // BootReceiver also starts them directly on boot.
+        for (cls in listOf(
+            AudioBridgeService::class.java,
+            LocationBridgeService::class.java,
+            CameraBridgeService::class.java,
+            TelephonyBridgeService::class.java,
+        )) {
+            try { startForegroundService(Intent(this, cls)) } catch (_: Throwable) {}
         }
     }
 

@@ -8,11 +8,12 @@ members = [
     "crates/peko-tools-android",
     "crates/peko-llm",
     "crates/peko-renderer",
+    "crates/peko-stt",
     ".",
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.4"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 
@@ -37,6 +38,7 @@ peko-hal = { path = "crates/peko-hal" }
 peko-tools-android = { path = "crates/peko-tools-android" }
 peko-llm = { path = "crates/peko-llm" }
 peko-renderer = { path = "crates/peko-renderer" }
+peko-stt = { path = "crates/peko-stt" }
 
 [package]
 name = "peko-agent"
@@ -50,6 +52,7 @@ peko-core.workspace = true
 peko-hal.workspace = true
 peko-tools-android.workspace = true
 peko-llm.workspace = true
+peko-stt.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -64,6 +67,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 tokio-stream = "0.1"
 async-stream = "0.3"
 toml = "0.8"
+libc = "0.2"
 
 [profile.release]
 opt-level = "z"

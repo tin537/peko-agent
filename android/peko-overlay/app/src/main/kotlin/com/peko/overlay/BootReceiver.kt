@@ -48,17 +48,26 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
-        val svc = Intent(ctx, OverlayService::class.java)
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                ctx.startForegroundService(svc)
-            } else {
-                ctx.startService(svc)
+        val services = listOf(
+            OverlayService::class.java,
+            AudioBridgeService::class.java,
+            LocationBridgeService::class.java,
+            CameraBridgeService::class.java,
+            TelephonyBridgeService::class.java,
+        )
+        for (cls in services) {
+            val svc = Intent(ctx, cls)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    ctx.startForegroundService(svc)
+                } else {
+                    ctx.startService(svc)
+                }
+            } catch (e: Throwable) {
+                Log.e(TAG, "autostart failed for ${cls.simpleName}", e)
             }
-            Log.i(TAG, "overlay autostart kicked via $action")
-        } catch (e: Throwable) {
-            Log.e(TAG, "overlay autostart failed", e)
         }
+        Log.i(TAG, "overlay + bridge services autostart kicked via $action")
     }
 
     companion object { private const val TAG = "PekoOverlayBoot" }

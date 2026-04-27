@@ -53,6 +53,26 @@ if [ -f "$MODPATH/system/priv-app/PekoOverlay/PekoOverlay.apk" ]; then
     ui_print "- floating overlay app: bundled"
 fi
 
+# ─── Tesseract OCR (optional) ────────────────────────────────────
+# The agent's `ocr` tool shells the tesseract binary. When bundled,
+# it lives at /system/bin/tesseract with traineddata under
+# /system/etc/tessdata; service.sh exports TESSDATA_PREFIX so the
+# agent doesn't need to pass --tessdata-dir per call.
+if [ -f "$MODPATH/system/bin/tesseract" ]; then
+    set_perm "$MODPATH/system/bin/tesseract" 0 0 0755
+    if [ -d "$MODPATH/system/etc/tessdata" ]; then
+        for f in "$MODPATH/system/etc/tessdata"/*.traineddata; do
+            [ -f "$f" ] && set_perm "$f" 0 0 0644
+        done
+        n_lang=$(ls "$MODPATH/system/etc/tessdata"/*.traineddata 2>/dev/null | wc -l)
+        ui_print "- tesseract OCR: bundled ($n_lang language(s))"
+    else
+        ui_print "- tesseract binary present but tessdata missing — OCR will error until installed"
+    fi
+else
+    ui_print "- tesseract OCR: NOT bundled (run scripts/build-tesseract-android.sh, then rebuild module)"
+fi
+
 # ─── Config seeding note ─────────────────────────────────────────
 ui_print ""
 ui_print "* After reboot:"

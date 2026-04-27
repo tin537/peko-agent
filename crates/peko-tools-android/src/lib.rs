@@ -20,6 +20,18 @@ pub mod wifi_tool;
 pub mod audio_tool;
 pub mod draw_tool;
 pub mod web_tool;
+pub mod ocr_tool;
+pub mod brain_tool;
+pub mod research_tool;
+pub mod plan_tool;
+pub mod bg_tool;
+pub mod audio_pcm_tool;
+pub mod stt_tool;
+pub mod bridge_client;
+pub mod gps_tool;
+pub mod telephony_tool;
+pub mod camera_tool;
+pub mod events_tool;
 
 pub use screenshot::ScreenshotTool;
 pub use touch::TouchTool;
@@ -42,6 +54,17 @@ pub use wifi_tool::WifiTool;
 pub use audio_tool::AudioTool;
 pub use draw_tool::DrawTool;
 pub use web_tool::WebTool;
+pub use ocr_tool::OcrTool;
+pub use brain_tool::BrainTool;
+pub use research_tool::ResearchTool;
+pub use plan_tool::PlanTool;
+pub use bg_tool::{new_tools_handle, resume_pending_bg_jobs, BgTool, ToolsHandle};
+pub use audio_pcm_tool::AudioPcmTool;
+pub use stt_tool::SttTool;
+pub use gps_tool::GpsTool;
+pub use telephony_tool::TelephonyTool;
+pub use camera_tool::CameraTool;
+pub use events_tool::EventsTool;
 
 #[cfg(test)]
 mod tests;

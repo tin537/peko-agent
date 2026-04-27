@@ -14,9 +14,9 @@ use peko_core::runtime::{build_dual_brain, build_provider_helper};
 use peko_llm::{EmbeddedProvider, LlmEngineConfig};
 use peko_hal::{InputDevice, SerialModem, UInputDevice};
 use peko_tools_android::{
-    AudioTool, CallTool, DrawTool, FileSystemTool, KeyEventTool, MemoryTool, PackageManagerTool,
-    ScreenshotTool, DelegateTool, SensorsTool, ShellTool, SkillsTool, SmsTool, TextInputTool,
-    TouchTool, UiAutomationTool, WebTool, WifiTool,
+    AudioTool, CallTool, DrawTool, FileSystemTool, KeyEventTool, MemoryTool, OcrTool,
+    PackageManagerTool, ScreenshotTool, DelegateTool, SensorsTool, ShellTool, SkillsTool,
+    SmsTool, TextInputTool, TouchTool, UiAutomationTool, WebTool, WifiTool,
 };
 
 fn register_tools(config: &PekoConfig) -> ToolRegistry {
@@ -198,6 +198,37 @@ fn register_tools(config: &PekoConfig) -> ToolRegistry {
     // uiautomator and screenshots are downscaled to 720p).
     registry.register(WebTool::new());
 
+    // OCR — local tesseract for exact text extraction. Fully offline,
+    // complements the vision model. Falls back gracefully when the
+    // tesseract binary isn't installed on the device.
+    registry.register(OcrTool::new());
+
+    // Phase 5 — PCM record / play / TTS via PekoOverlay AudioBridge.
+    // Bridge runs in the priv-app because audioserver owns the kernel
+    // ALSA nodes; AudioRecord / AudioTrack / TextToSpeech are the only
+    // way in. Tool is registered unconditionally — if the priv-app
+    // isn't installed, calls time out gracefully with a clear error.
+    registry.register(peko_tools_android::AudioPcmTool::new());
+
+    // Phase 25 — offline STT via embedded whisper.cpp. Model file lives
+    // at /data/peko/models/whisper.bin (push via
+    // scripts/download-whisper-model.sh). Tool is registered
+    // unconditionally; if the model isn't pushed yet the first call
+    // returns a clear "push the model" error rather than crashing.
+    registry.register(peko_tools_android::SttTool::new());
+
+    // Phase 23 — vendor-binder shim (camera / GPS / telephony / events
+    // poller). Same priv-app bridge pattern as audio_pcm. Each tool
+    // talks to its own service in PekoOverlay over file-RPC; streaming
+    // sources (camera frames, GPS samples, ambient audio) flow through
+    // the shared events.db SQLite read by the events tool. Registered
+    // unconditionally so the agent can attempt them and get a clean
+    // error if the priv-app is missing.
+    registry.register(peko_tools_android::GpsTool::new());
+    registry.register(peko_tools_android::TelephonyTool::new());
+    registry.register(peko_tools_android::CameraTool::new());
+    registry.register(peko_tools_android::EventsTool::new());
+
     registry
 }
 
@@ -230,9 +261,13 @@ async fn main() -> anyhow::Result<()> {
     let config = PekoConfig::load(&config_path)
         .context(format!("failed to load config from {}", config_path.display()))?;
 
+    // ANSI colors only when stdout is a real terminal — keeps log files
+    // greppable instead of full of `\x1b[2m...\x1b[0m` escape clutter.
+    let use_ansi = unsafe { libc::isatty(libc::STDOUT_FILENO) } != 0;
     tracing_subscriber::fmt()
         .with_env_filter(&config.agent.log_level)
         .with_target(false)
+        .with_ansi(use_ansi)
         .init();
 
     info!(config = %config_path.display(), "peko-agent starting");
@@ -249,6 +284,43 @@ async fn main() -> anyhow::Result<()> {
     ));
     registry.register(MemoryTool::new(memory_store.clone()));
     info!("memory system initialized");
+
+    // Second-brain / knowledge graph (Phase 18A). Stores long-form
+    // markdown notes with [[wikilink]] graph + FTS5 index. Files land
+    // at <data_dir>/brain/<slug>.md so the user can read them with any
+    // markdown editor and the agent can cross-link findings between
+    // sessions.
+    let brain_db_path = config.agent.data_dir.join("brain.db");
+    let brain_dir = config.agent.data_dir.join("brain");
+    let brain_store = Arc::new(Mutex::new(
+        peko_core::BrainStore::open(&brain_db_path, &brain_dir)
+            .context("failed to open brain database")?
+    ));
+    registry.register(peko_tools_android::BrainTool::new(brain_store.clone()));
+    info!(brain_db = %brain_db_path.display(), brain_dir = %brain_dir.display(), "brain system initialized");
+
+    // Research tool (Phase 18B). End-to-end pipeline:
+    // search → fetch top N → save per-source brain notes → synthesise
+    // an overview note that wikilinks every source. Synthesis posts to
+    // the localhost web API; falls back to source-only mode if that
+    // endpoint isn't reachable (e.g. agent started without web UI).
+    let synth_endpoint = Some(format!("http://127.0.0.1:{port}/api/llm/synth"));
+    registry.register(peko_tools_android::ResearchTool::new(
+        brain_store.clone(),
+        synth_endpoint,
+    ));
+    info!("research pipeline initialized");
+
+    // Plan tool (Phase 18C). Multi-step task drafting + Telegram
+    // approval flow + combo auto-approve. Plans persist as kind="plan"
+    // brain notes; status tracked via tags.
+    registry.register(peko_tools_android::PlanTool::new(brain_store.clone()));
+    info!("plan tool initialized");
+
+    // Background tasks (Phase 19) — registered later, after the
+    // skill_store, config_arc, soul_arc are constructed and right
+    // before the registry is wrapped in Arc. See "Background tasks
+    // registration" below.
 
     // Skills system
     let skills_path = config.agent.data_dir.join("skills");
@@ -337,7 +409,71 @@ async fn main() -> anyhow::Result<()> {
     let config_arc = Arc::new(Mutex::new(config_json));
     let soul_arc = Arc::new(Mutex::new(system_prompt.soul_text().to_string()));
 
+    // Background tasks registration (Phase 19, persisted in Phase 21).
+    // BgStore opens an SQLite catalog at <data_dir>/bg.db so prior jobs
+    // survive restarts (in-flight jobs are NOT re-run — see background.rs).
+    // The bg_tools_handle is created here, passed to BgTool, then `set`
+    // to the final tools_arc a few lines below — that breaks the
+    // chicken-and-egg between "registry contains BgTool" and "BgTool
+    // needs Arc<registry> to spawn agent runtimes."
+    let bg_db_path = config.agent.data_dir.join("bg.db");
+    let bg_store = peko_core::BgStore::open(&bg_db_path)
+        .await
+        .context("failed to open bg job catalog")?;
+    let bg_tools_handle = peko_tools_android::new_tools_handle();
+
+    // Phase 25 follow-up: build the TelegramSender once here (when
+    // [telegram] is configured) so BgTool can ping completed jobs and
+    // the existing Scheduler can keep using its own clone. Avoids
+    // duplicating the sender setup in two places.
+    let bg_notifier: Option<TelegramSender> = config.telegram.as_ref()
+        .filter(|tg| !tg.bot_token.trim().is_empty() && !tg.allowed_users.is_empty())
+        .map(|tg| TelegramSender::new(tg.bot_token.clone(), tg.allowed_users.clone()));
+
+    let mut bg_tool = peko_tools_android::BgTool::new(
+        bg_store.clone(),
+        bg_tools_handle.clone(),
+        config_arc.clone(),
+        db_path.clone(),
+        memory_store.clone(),
+        skill_store.clone(),
+        soul_arc.clone(),
+        config.bg.clone(),
+    );
+    if let Some(ref n) = bg_notifier {
+        bg_tool = bg_tool.with_notifier(n.clone());
+    }
+    registry.register(bg_tool);
+    info!(bg_db = %bg_db_path.display(),
+        notifier = bg_notifier.is_some(),
+        "background task store initialized");
+
     let tools_arc = Arc::new(registry);
+
+    // Now that tools_arc exists, hand it to the bg holder so spawned
+    // workers can build agent runtimes against the live registry.
+    *bg_tools_handle.write().await = Some(tools_arc.clone());
+
+    // Phase 22: resume any bg jobs left in `Running` state from a prior
+    // process by replaying their last checkpoint. Stale (>1h) or
+    // checkpoint-less rows are auto-marked Failed inside
+    // pending_resumable so they don't pollute Running forever.
+    let resumed = peko_tools_android::resume_pending_bg_jobs(
+        bg_store.clone(),
+        tools_arc.clone(),
+        config_arc.clone(),
+        db_path.clone(),
+        memory_store.clone(),
+        skill_store.clone(),
+        soul_arc.clone(),
+        config.bg.clone(),
+        chrono::Duration::hours(1),
+        bg_notifier.clone(),
+    )
+    .await;
+    if resumed > 0 {
+        info!(count = resumed, "Phase 22: resumed bg jobs from checkpoints");
+    }
 
     // Reflector (Phase A) — only wired when autonomy.reflection is on.
     // Uses a provider built from config. Reflection runs in the background
@@ -384,8 +520,14 @@ async fn main() -> anyhow::Result<()> {
             cron: config.autonomy.memory_gardener_cron.clone(),
             ..Default::default()
         };
-        let _ = peko_core::spawn_gardener(memory_store.clone(), gcfg);
-        info!(cron = %config.autonomy.memory_gardener_cron, "memory gardener started");
+        // Phase 25 follow-up: hand the bg store to the gardener so its
+        // daily pass also prunes terminal bg jobs older than 7 days.
+        let _ = peko_core::gardener::spawn_with_bg(
+            memory_store.clone(),
+            Some(bg_store.clone()),
+            gcfg,
+        );
+        info!(cron = %config.autonomy.memory_gardener_cron, "memory + bg gardener started");
     } else {
         info!("autonomy.memory_gardener=false — gardener disabled");
     }
@@ -506,6 +648,8 @@ async fn main() -> anyhow::Result<()> {
                 memory_store.clone(),
                 skill_store.clone(),
                 soul_arc.clone(),
+                brain_store.clone(),
+                bg_store.clone(),
             );
             tokio::spawn(async move { bot.run().await });
             info!(

@@ -25,6 +25,31 @@
          contract — peko should be ambient, not a manually-relaunched app. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Phase 5 audio bridge — see AudioBridgeService.kt.
+         RECORD_AUDIO is dangerous; granted at boot via service.sh.
+         FOREGROUND_SERVICE_MICROPHONE / _MEDIA_PLAYBACK lets AudioRecord
+         and AudioTrack stay live while the user is in another app. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- Phase 23 vendor-binder shim. Each row is the Android-permission
+         hook that gets us to the underlying HAL through the framework
+         (camera HAL via CameraDevice, gnss HAL via LocationManager,
+         radio HAL via TelephonyManager). pm grant flips them at boot. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <application
         android:name=".PekoOverlayApp"
         android:label="@string/app_name"
@@ -53,6 +78,34 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="draggable agent overlay that must stay resident while user navigates other apps" />
+        </service>
+
+        <!-- Phase 5 — peko-agent ↔ AudioRecord / AudioTrack / TTS bridge.
+             FGS type 'microphone|mediaPlayback' so recording + playback
+             both work when the screen is off / user is in another app. -->
+        <service
+            android:name=".AudioBridgeService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|mediaPlayback" />
+
+        <!-- Phase 23 vendor-binder shim services. -->
+        <service
+            android:name=".LocationBridgeService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+        <service
+            android:name=".CameraBridgeService"
+            android:exported="false"
+            android:foregroundServiceType="camera" />
+
+        <service
+            android:name=".TelephonyBridgeService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="read-only telephony info bridge for the agent" />
         </service>
 
         <!-- Auto-start the overlay on every boot. See BootReceiver.kt for

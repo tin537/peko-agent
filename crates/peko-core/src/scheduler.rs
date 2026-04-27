@@ -88,14 +88,26 @@ impl Scheduler {
         soul: Arc<Mutex<String>>,
         telegram_sender: Option<TelegramSender>,
     ) -> Self {
-        let parsed_crons: Vec<Option<CronExpr>> = tasks.iter().map(|t| {
+        // Parse every cron expression up front. A bad expression used
+        // to silently set Some(c)→None and the task would never fire,
+        // leaving the operator wondering why their daily research cron
+        // produced no notes. Now we also stamp the task with a clear
+        // last_error string so /api/schedule surfaces broken tasks
+        // visibly. Parse failures NO LONGER block startup — disabled
+        // tasks are still listed so the operator can fix and reload —
+        // but they're loud at error level + visible in the API.
+        let mut tasks = tasks;
+        let parsed_crons: Vec<Option<CronExpr>> = tasks.iter_mut().map(|t| {
             match CronExpr::parse(&t.cron) {
                 Ok(c) => {
                     info!(name = %t.name, cron = %t.cron, desc = %c.describe(), "scheduled task registered");
                     Some(c)
                 }
                 Err(e) => {
-                    error!(name = %t.name, cron = %t.cron, error = %e, "invalid cron expression");
+                    error!(name = %t.name, cron = %t.cron, error = %e,
+                        "invalid cron expression — task will NEVER fire until fixed");
+                    t.enabled = false;
+                    t.last_error = Some(format!("invalid cron '{}': {e}", t.cron));
                     None
                 }
             }

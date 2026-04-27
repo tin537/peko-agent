@@ -32,7 +32,7 @@ impl Default for ScreenshotTool {
 
 /// Resize image to fit within MAX_DIMENSION and encode as JPEG quality 80.
 /// Returns (base64, width, height, size_kb).
-fn resize_and_encode(img: &image::DynamicImage) -> (String, u32, u32, usize) {
+fn resize_and_encode(img: &image::DynamicImage) -> (String, u32, u32, usize, &'static str) {
     let (orig_w, orig_h) = (img.width(), img.height());
 
     let resized = if orig_w > MAX_DIMENSION || orig_h > MAX_DIMENSION {
@@ -46,25 +46,36 @@ fn resize_and_encode(img: &image::DynamicImage) -> (String, u32, u32, usize) {
 
     let (w, h) = (resized.width(), resized.height());
 
-    let mut jpeg_bytes = Vec::new();
-    let mut cursor = Cursor::new(&mut jpeg_bytes);
+    let mut bytes = Vec::new();
+    let mut cursor = Cursor::new(&mut bytes);
 
-    let _format = if resized.write_to(&mut cursor, image::ImageFormat::Jpeg).is_ok() {
+    // Try JPEG first (smaller, lossy is fine for vision LLM input).
+    // Fall back to PNG only if JPEG encoding fails (rare — typically
+    // alpha-channel weirdness on certain framebuffer sources).
+    let format = if resized.write_to(&mut cursor, image::ImageFormat::Jpeg).is_ok() {
         "image/jpeg"
     } else {
-        jpeg_bytes.clear();
-        cursor = Cursor::new(&mut jpeg_bytes);
-        resized.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
-        "image/png"
+        bytes.clear();
+        cursor = Cursor::new(&mut bytes);
+        match resized.write_to(&mut cursor, image::ImageFormat::Png) {
+            Ok(_) => "image/png",
+            Err(_) => {
+                // Both encoders failed — return an empty payload with
+                // a marker MIME so the caller can detect it explicitly
+                // instead of seeing a "successful" empty JPEG.
+                bytes.clear();
+                "image/x-encode-failed"
+            }
+        }
     };
 
-    let size_kb = jpeg_bytes.len() / 1024;
+    let size_kb = bytes.len() / 1024;
     let b64 = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
-        &jpeg_bytes,
+        &bytes,
     );
 
-    (b64, w, h, size_kb)
+    (b64, w, h, size_kb, format)
 }
 
 fn capture_via_backend(mut backend: Box<dyn DisplayCapture>) -> anyhow::Result<ToolResult> {
@@ -79,13 +90,16 @@ fn capture_via_backend(mut backend: Box<dyn DisplayCapture>) -> anyhow::Result<T
     let img = image::RgbaImage::from_raw(w, h, buf.data)
         .ok_or_else(|| anyhow::anyhow!("backend {name} returned mis-sized buffer"))?;
     let dyn_img = image::DynamicImage::ImageRgba8(img);
-    let (b64, ow, oh, size_kb) = resize_and_encode(&dyn_img);
+    let (b64, ow, oh, size_kb, mime) = resize_and_encode(&dyn_img);
+    if mime == "image/x-encode-failed" {
+        anyhow::bail!("backend {name} produced a buffer that neither JPEG nor PNG encoder accepted");
+    }
     Ok(ToolResult::with_image(
         format!(
-            "Screenshot via {name} ({ow}x{oh}, {size_kb}KB). The image is attached."
+            "Screenshot via {name} ({ow}x{oh}, {size_kb}KB, {mime}). The image is attached."
         ),
         b64,
-        "image/jpeg".to_string(),
+        mime.to_string(),
     ))
 }
 

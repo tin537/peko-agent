@@ -1,7 +1,7 @@
 id=peko_agent
 name=Peko Agent
-version=v0.4.0
-versionCode=4
+version=v0.4.4
+versionCode=44
 author=Peko Agent project
-description=Autonomous AI agent-as-OS for Android. Installs peko-agent + peko-llm-daemon (+ peko-blit-test, peko-drm-test for Lane A bring-up) into /system/bin with boot-time services. v0.4.0 ships display/sensors/wifi/audio/renderer HAL + DRM master + dumb buffer (Phase 1-9). Multi-provider cloud chain, full autonomy stack, optional floating overlay app. Web UI on :8080. Verified on OnePlus 6T (fajita) / arm64.
+description=Autonomous AI agent-as-OS for Android. v0.4.4: offline Thai-capable STT (whisper.cpp), bg → Telegram completion notifications, audit-driven hardening (CleanupGuard / UTF-8 / plan auto-approve / RpcDispatcher), vendor-binder shim (camera + GPS + telephony) + streaming event bus, bg persistence + checkpoint resume, PCM record / playback / TTS, ambient-audio heuristic labels. Installs peko-agent + peko-llm-daemon + tesseract + whisper-cli into /system/bin with boot-time services and PekoOverlay + PekoSmsShim priv-apps. Multi-provider cloud chain, full autonomy stack, web UI on :8080, Telegram bot. Verified end-to-end on OnePlus 6T (fajita) / arm64 / LineageOS 20.
 updateJson=

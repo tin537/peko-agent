@@ -7,11 +7,68 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use peko_config::TelegramConfig;
-use peko_core::{AgentRuntime, AgentResponse, SessionStore, ToolRegistry, MemoryStore, SkillStore, SystemPrompt};
+use peko_core::{AgentRuntime, AgentResponse, BgStore, BrainStore, SessionStore, ToolRegistry, MemoryStore, SkillStore, SystemPrompt};
 use peko_config::AgentConfig;
 use peko_transport::LlmProvider;
 
 const TELEGRAM_API: &str = "https://api.telegram.org";
+
+/// Plan marker the agent emits in its response when it has drafted
+/// a plan. Two kinds, distinguished by the middle segment of the
+/// marker: `[plan:approve:<slug>]` requires a Telegram tap;
+/// `[plan:auto:<slug>]` was deemed safe by the combo check
+/// (read-only tools + internal task) and the bot fires execute
+/// without asking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PlanMarkerKind { Approve, Auto }
+
+#[derive(Debug, Clone)]
+struct PlanMarker {
+    kind: PlanMarkerKind,
+    slug: String,
+    /// Response text with the marker line removed, for sending to
+    /// Telegram so the user sees the body without the meta-tag.
+    body: String,
+}
+
+fn parse_plan_marker(text: &str) -> Option<PlanMarker> {
+    let mut found: Option<(PlanMarkerKind, String, String)> = None;
+    let mut kept_lines: Vec<&str> = Vec::with_capacity(text.lines().count());
+    for line in text.lines() {
+        if found.is_none() {
+            if let Some(slug) = extract_marker(line, "[plan:approve:") {
+                found = Some((PlanMarkerKind::Approve, slug, line.to_string()));
+                continue;
+            }
+            if let Some(slug) = extract_marker(line, "[plan:auto:") {
+                found = Some((PlanMarkerKind::Auto, slug, line.to_string()));
+                continue;
+            }
+        }
+        kept_lines.push(line);
+    }
+    let (kind, slug, _) = found?;
+    let body = kept_lines.join("\n").trim().to_string();
+    Some(PlanMarker { kind, slug, body })
+}
+
+fn extract_marker(line: &str, prefix: &str) -> Option<String> {
+    let i = line.find(prefix)? + prefix.len();
+    let rest = &line[i..];
+    let end = rest.find(']')?;
+    let slug = rest[..end].trim();
+    if slug.is_empty() { None } else { Some(slug.to_string()) }
+}
+
+/// Char-aware string truncation. Defensive against multi-byte UTF-8
+/// (Thai / CJK / emoji): byte-indexed slicing here would panic the
+/// whole tokio worker the same way phase13's compressor bug did.
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect::<String>() + "…"
+}
 
 pub struct TelegramBot {
     client: Client,
@@ -26,10 +83,24 @@ pub struct TelegramBot {
     memory: Arc<Mutex<MemoryStore>>,
     skills: Arc<Mutex<SkillStore>>,
     soul: Arc<Mutex<String>>,
+    /// Direct handle to the brain so /brain /find /note /recent /plans
+    /// /wonder slash commands hit SQLite without an LLM round-trip.
+    brain: Arc<Mutex<BrainStore>>,
+    /// Direct handle for /jobs /cancel /wait commands.
+    bg: BgStore,
     /// Per-user sliding-window timestamps of recent task starts.
     /// Used to enforce TelegramConfig::rate_limit_per_minute.
     rate_window: Mutex<HashMap<i64, Vec<Instant>>>,
+    /// Per-chat conversation memory: the last few (user_input, agent_text)
+    /// turns. Pseudo-continuity — full session resume via SessionStore +
+    /// run_turn would need a runtime refactor; the prepend-context
+    /// approach gives multi-turn coherence at the cost of a single
+    /// truncated string passed back to the LLM each call.
+    chat_history: Mutex<HashMap<i64, Vec<(String, String)>>>,
 }
+
+const CHAT_HISTORY_KEEP_TURNS: usize = 3;
+const CHAT_HISTORY_PER_TURN_CHARS: usize = 1500;
 
 // ── Telegram API types ──
 
@@ -44,6 +115,15 @@ struct TgResponse<T> {
 struct TgUpdate {
     update_id: i64,
     message: Option<TgMessage>,
+    callback_query: Option<TgCallbackQuery>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TgCallbackQuery {
+    id: String,
+    from: TgUser,
+    message: Option<TgMessage>,
+    data: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +172,8 @@ impl TelegramBot {
         memory: Arc<Mutex<MemoryStore>>,
         skills: Arc<Mutex<SkillStore>>,
         soul: Arc<Mutex<String>>,
+        brain: Arc<Mutex<BrainStore>>,
+        bg: BgStore,
     ) -> Self {
         Self {
             client: Client::builder()
@@ -105,8 +187,54 @@ impl TelegramBot {
             memory,
             skills,
             soul,
+            brain,
+            bg,
             rate_window: Mutex::new(HashMap::new()),
+            chat_history: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Build the LLM-input string for a chat: optionally prefixed with
+    /// the last few turns so multi-turn references like "scroll down"
+    /// or "tap the second one" have context.
+    async fn build_continuation_input(&self, chat_id: i64, user_input: &str) -> String {
+        let history = self.chat_history.lock().await;
+        let Some(turns) = history.get(&chat_id) else {
+            return user_input.to_string();
+        };
+        if turns.is_empty() {
+            return user_input.to_string();
+        }
+        let mut buf = String::from("[Recent turns in this chat — for context only, the user's latest request is at the bottom]\n\n");
+        for (u, a) in turns.iter() {
+            // Char-aware truncation per turn so big tool results don't
+            // explode the prefix. The compressor in the runtime will
+            // dedupe / trim further if needed.
+            let u_short = truncate_chars(u, CHAT_HISTORY_PER_TURN_CHARS);
+            let a_short = truncate_chars(a, CHAT_HISTORY_PER_TURN_CHARS);
+            buf.push_str(&format!("USER: {u_short}\nAGENT: {a_short}\n\n"));
+        }
+        buf.push_str("---\nUser's latest request:\n");
+        buf.push_str(user_input);
+        buf
+    }
+
+    /// Append a (user, agent) pair to the chat's history, dropping the
+    /// oldest turn once the deque is full. Called from `handle_message`
+    /// after a successful agent response.
+    async fn record_turn(&self, chat_id: i64, user_input: String, agent_text: String) {
+        let mut history = self.chat_history.lock().await;
+        let entry = history.entry(chat_id).or_insert_with(Vec::new);
+        entry.push((user_input, agent_text));
+        let len = entry.len();
+        if len > CHAT_HISTORY_KEEP_TURNS {
+            entry.drain(0..len - CHAT_HISTORY_KEEP_TURNS);
+        }
+    }
+
+    async fn reset_chat_history(&self, chat_id: i64) {
+        let mut history = self.chat_history.lock().await;
+        history.remove(&chat_id);
     }
 
     fn api_url(&self, method: &str) -> String {
@@ -168,6 +296,9 @@ impl TelegramBot {
                         if let Some(msg) = update.message {
                             self.handle_message(msg).await;
                         }
+                        if let Some(cq) = update.callback_query {
+                            self.handle_callback_query(cq).await;
+                        }
                     }
                 }
                 Err(e) => {
@@ -210,7 +341,9 @@ impl TelegramBot {
             .query(&[
                 ("offset", offset.to_string()),
                 ("timeout", "30".to_string()),
-                ("allowed_updates", "[\"message\"]".to_string()),
+                // callback_query added so plan-approval inline buttons
+                // (Phase 18C) actually deliver presses to this poller.
+                ("allowed_updates", "[\"message\",\"callback_query\"]".to_string()),
             ])
             .send().await?
             .json().await?;
@@ -218,22 +351,68 @@ impl TelegramBot {
         Ok(resp.result.unwrap_or_default())
     }
 
+    /// Send a message with inline-keyboard approve/cancel buttons.
+    /// Used by the plan-approval flow: when an agent response contains
+    /// `[plan:approve:<slug>]`, we strip the marker and re-send the
+    /// body with buttons whose callback_data carries the slug.
+    async fn send_with_approve_cancel(&self, chat_id: i64, body: &str, slug: &str) {
+        let payload = serde_json::json!({
+            "chat_id": chat_id,
+            "text": body,
+            "reply_markup": {
+                "inline_keyboard": [[
+                    {"text": "✅ Approve", "callback_data": format!("plan:approve:{slug}")},
+                    {"text": "❌ Cancel",  "callback_data": format!("plan:cancel:{slug}")},
+                ]]
+            }
+        });
+        if let Err(e) = self
+            .client
+            .post(self.api_url("sendMessage"))
+            .json(&payload)
+            .send()
+            .await
+        {
+            error!(error = %e, slug, "failed to send plan-approval message");
+        }
+    }
+
+    /// Acknowledge a callback_query so Telegram clears the loading
+    /// spinner on the user's button. Required even if we display no
+    /// alert text — Telegram retries unacked callbacks.
+    async fn answer_callback(&self, callback_id: &str, text: Option<&str>) {
+        let mut payload = serde_json::json!({"callback_query_id": callback_id});
+        if let Some(t) = text {
+            payload["text"] = serde_json::Value::String(t.to_string());
+        }
+        let _ = self
+            .client
+            .post(self.api_url("answerCallbackQuery"))
+            .json(&payload)
+            .send()
+            .await;
+    }
+
     async fn send_text(&self, chat_id: i64, text: &str) {
-        // Split long messages (Telegram limit: 4096 chars)
+        // Split long messages on CHAR boundaries (Telegram caps at 4096
+        // chars). Byte-chunking corrupted Thai / emoji at the split
+        // boundary — Telegram counts chars, not bytes, and `from_utf8`
+        // on a non-boundary byte slice fails, making us fall back to
+        // "..." and silently drop user data.
         let max_len = self.config.max_message_length.min(4096);
-        let chunks: Vec<&str> = if text.len() <= max_len {
-            vec![text]
+        let chars: Vec<char> = text.chars().collect();
+        let chunks: Vec<String> = if chars.len() <= max_len {
+            vec![text.to_string()]
         } else {
-            text.as_bytes()
-                .chunks(max_len)
-                .map(|chunk| std::str::from_utf8(chunk).unwrap_or("..."))
+            chars.chunks(max_len)
+                .map(|c| c.iter().collect::<String>())
                 .collect()
         };
 
         for chunk in chunks {
             let msg = SendMessage {
                 chat_id,
-                text: chunk.to_string(),
+                text: chunk,
                 parse_mode: None,
             };
 
@@ -318,26 +497,128 @@ impl TelegramBot {
             return;
         }
 
-        // Run agent task
+        // Run agent task — prepend recent turns from this chat as
+        // context so multi-turn references work ("scroll down", "tap
+        // the second one"). The agent's own context compressor will
+        // trim if the prefix is too large.
         self.send_typing(chat_id).await;
 
-        match self.run_agent_task(&text).await {
+        let agent_input = self.build_continuation_input(chat_id, &text).await;
+
+        match self.run_agent_task(&agent_input).await {
             Ok(response) => {
-                // Send response text
-                if !response.text.is_empty() {
-                    self.send_text(chat_id, &response.text).await;
+                let agent_text = if response.text.is_empty() {
+                    "(task completed with no text response)".to_string()
                 } else {
-                    self.send_text(chat_id, "(task completed with no text response)").await;
+                    response.text.clone()
+                };
+
+                // Plan-approval interception (Phase 18C). When the
+                // agent's response contains `[plan:approve:<slug>]`,
+                // strip the marker and re-send the body with inline
+                // keyboard. `[plan:auto:<slug>]` is the combo
+                // auto-approve marker; we silently fire a follow-up
+                // task that executes the plan instead of asking.
+                let parsed = parse_plan_marker(&agent_text);
+                let display_text = parsed
+                    .as_ref()
+                    .map(|m| m.body.clone())
+                    .unwrap_or_else(|| agent_text.clone());
+
+                match parsed.as_ref() {
+                    Some(m) if m.kind == PlanMarkerKind::Approve => {
+                        self.send_with_approve_cancel(chat_id, &display_text, &m.slug).await;
+                    }
+                    Some(m) if m.kind == PlanMarkerKind::Auto => {
+                        // Inform the user, then dispatch execute.
+                        self.send_text(
+                            chat_id,
+                            &format!("⚙️ Auto-approved plan {}, executing.", m.slug),
+                        )
+                        .await;
+                        let exec_input = format!(
+                            "Execute the approved plan `{}`. Call `plan execute slug={}` and follow the body.",
+                            m.slug, m.slug
+                        );
+                        if let Ok(exec_resp) = self.run_agent_task(&exec_input).await {
+                            self.send_text(chat_id, &exec_resp.text).await;
+                        }
+                    }
+                    _ => {
+                        self.send_text(chat_id, &display_text).await;
+                    }
                 }
 
-                // Send iteration info
                 self.send_text(chat_id, &format!(
                     "[{} iterations | session: {}]",
                     response.iterations, &response.session_id[..8]
                 )).await;
+
+                // Record the turn so the next message in this chat
+                // gets it in its prefix. Failures during agent task
+                // execution are NOT recorded — keeping the history
+                // clean of error noise.
+                self.record_turn(chat_id, text.clone(), display_text).await;
             }
             Err(e) => {
                 self.send_text(chat_id, &format!("Error: {}", e)).await;
+            }
+        }
+    }
+
+    async fn handle_callback_query(&self, cq: TgCallbackQuery) {
+        let user_id = cq.from.id;
+        let chat_id = cq.message.as_ref().map(|m| m.chat.id).unwrap_or(0);
+
+        // Same auth gate as text messages.
+        if self.config.allowed_users.is_empty()
+            || !self.config.allowed_users.contains(&user_id)
+        {
+            self.answer_callback(&cq.id, Some("Unauthorized")).await;
+            return;
+        }
+
+        // Rate-limit callbacks under the same per-user window as text
+        // messages. Without this, a compromised authorised user (or a
+        // misbehaving inline keyboard) could spam plan-approval taps
+        // and burn LLM credits faster than the text-message gate would
+        // allow.
+        if !self.check_rate_limit(user_id).await {
+            self.answer_callback(&cq.id, Some("Rate limited — try again in a minute")).await;
+            return;
+        }
+
+        let data = cq.data.unwrap_or_default();
+        // Callback data shape: "plan:approve:<slug>" or "plan:cancel:<slug>".
+        let parts: Vec<&str> = data.splitn(3, ':').collect();
+        if parts.len() != 3 || parts[0] != "plan" {
+            self.answer_callback(&cq.id, Some("unknown action")).await;
+            return;
+        }
+        let action = parts[1];
+        let slug = parts[2];
+        match action {
+            "approve" => {
+                self.answer_callback(&cq.id, Some("Approved")).await;
+                self.send_text(chat_id, &format!("✅ Approved plan `{slug}` — executing.")).await;
+                let exec_input = format!(
+                    "The user has approved plan `{slug}`. Call `plan execute slug={slug}` and follow the steps in its body."
+                );
+                if let Ok(resp) = self.run_agent_task(&exec_input).await {
+                    self.send_text(chat_id, &resp.text).await;
+                }
+            }
+            "cancel" => {
+                self.answer_callback(&cq.id, Some("Cancelled")).await;
+                let cancel_input = format!(
+                    "The user has cancelled plan `{slug}`. Call `plan cancel slug={slug}` and acknowledge."
+                );
+                if let Ok(resp) = self.run_agent_task(&cancel_input).await {
+                    self.send_text(chat_id, &resp.text).await;
+                }
+            }
+            other => {
+                self.answer_callback(&cq.id, Some(&format!("unknown: {other}"))).await;
             }
         }
     }
@@ -347,16 +628,38 @@ impl TelegramBot {
         match parts[0] {
             "/start" | "/help" => {
                 self.send_text(chat_id,
-                    "Peko Agent — Android Agent-as-OS\n\n\
-                     Send me any task and I'll execute it on the device.\n\n\
-                     Commands:\n\
-                     /status — Device status and memory\n\
-                     /screenshot — Take a screenshot\n\
-                     /memories — List saved memories\n\
-                     /skills — List learned skills\n\
-                     /apps — List installed apps\n\
-                     /help — This message"
+                    "🤖 *Peko Agent*  — Android Agent-as-OS\n\n\
+                     Send me any task. I remember the last 3 turns of this chat.\n\n\
+                     *Device:*\n\
+                     /status — agent status\n\
+                     /screenshot — current screen\n\
+                     /apps — installed user apps\n\
+                     /battery — battery summary\n\
+                     /wifi — wifi summary\n\
+                     /home /back /unlock — quick keys\n\n\
+                     *Brain (long-term memory):*\n\
+                     /find <q> or /brain <q> — search notes\n\
+                     /note <title>=<content> — save a note\n\
+                     /wonder <q> — save an open question for autonomy\n\
+                     /recent [N] — most-recent notes\n\
+                     /plans — pending/active plans\n\
+                     /memories /skills — internal memory + skills\n\n\
+                     *Background tasks:*\n\
+                     /jobs — list bg jobs\n\
+                     /wait <id> — wait + show result\n\
+                     /cancel <id> — cancel a bg job\n\
+                     /research <topic> — fire research as bg job\n\n\
+                     *Voice (Phase 25):*\n\
+                     /stt — STT model + binary status\n\
+                     \"ฟังหน่อย\" / \"listen for me\" — triggers voice_loop\n\
+                     skill (record → transcribe → reply via TTS)\n\n\
+                     /new — reset chat memory\n\
+                     /help — this message"
                 ).await;
+            }
+            "/new" => {
+                self.reset_chat_history(chat_id).await;
+                self.send_text(chat_id, "Chat memory cleared. Fresh start.").await;
             }
             "/status" => {
                 let mem = peko_core::MemMonitor::snapshot();
@@ -424,10 +727,245 @@ impl TelegramBot {
                     Err(e) => self.send_text(chat_id, &format!("Error: {}", e)).await,
                 }
             }
+            //
+            // ── Brain (Phase 18A) — direct SQLite access, no LLM round-trip
+            //
+            "/brain" | "/find" => {
+                let query = parts.get(1).unwrap_or(&"").trim();
+                if query.is_empty() {
+                    self.send_text(chat_id, "Usage: /find <query>").await;
+                } else {
+                    self.cmd_brain_search(chat_id, query).await;
+                }
+            }
+            "/note" => {
+                // /note <title> = <content>      OR    /note <title>=<content>
+                let body = parts.get(1).map(|s| s.to_string()).unwrap_or_default();
+                let (title, content) = match body.split_once('=') {
+                    Some((t, c)) => (t.trim().to_string(), c.trim().to_string()),
+                    None => (body.trim().to_string(), String::new()),
+                };
+                if title.is_empty() {
+                    self.send_text(chat_id, "Usage: /note <title> = <content>").await;
+                } else {
+                    self.cmd_brain_save(chat_id, &title, &content, "note").await;
+                }
+            }
+            "/wonder" => {
+                let q = parts.get(1).unwrap_or(&"").trim();
+                if q.is_empty() {
+                    self.send_text(chat_id, "Usage: /wonder <open question for the autonomy loop to revisit>").await;
+                } else {
+                    self.cmd_brain_save(chat_id, q, "", "wonder").await;
+                }
+            }
+            "/recent" => {
+                let n: usize = parts.get(1).and_then(|s| s.trim().parse().ok()).unwrap_or(10);
+                self.cmd_brain_recent(chat_id, n, None).await;
+            }
+            "/plans" => {
+                self.cmd_brain_recent(chat_id, 20, Some("plan")).await;
+            }
+            //
+            // ── Background jobs (Phase 19) — direct BgStore, no LLM
+            //
+            "/jobs" | "/bg" => {
+                self.cmd_bg_list(chat_id).await;
+            }
+            "/cancel" => {
+                let id = parts.get(1).unwrap_or(&"").trim();
+                if id.is_empty() {
+                    self.send_text(chat_id, "Usage: /cancel <short_id>").await;
+                } else {
+                    self.cmd_bg_cancel(chat_id, id).await;
+                }
+            }
+            "/wait" => {
+                let id = parts.get(1).unwrap_or(&"").trim();
+                if id.is_empty() {
+                    self.send_text(chat_id, "Usage: /wait <short_id>").await;
+                } else {
+                    self.cmd_bg_wait(chat_id, id).await;
+                }
+            }
+            //
+            // ── STT info (Phase 25) — direct, no LLM call
+            //
+            "/stt" => {
+                self.cmd_stt_info(chat_id).await;
+            }
+            //
+            // ── Forward-to-agent shortcuts (sugar over agent task)
+            //
+            "/research" => {
+                let topic = parts.get(1).unwrap_or(&"").trim();
+                if topic.is_empty() {
+                    self.send_text(chat_id, "Usage: /research <topic>").await;
+                } else {
+                    let task = format!(
+                        "Run `bg fire {{ task: \"research do topic={topic}\", name: \"research-{}\" }}` and report the bg job id.",
+                        topic.chars().take(30).collect::<String>()
+                    );
+                    self.send_typing(chat_id).await;
+                    match self.run_agent_task(&task).await {
+                        Ok(r) => self.send_text(chat_id, &r.text).await,
+                        Err(e) => self.send_text(chat_id, &format!("err: {e}")).await,
+                    }
+                }
+            }
+            "/unlock" => self.forward_to_agent(chat_id, "Call the unlock_device tool to wake and unlock the phone.").await,
+            "/home" => self.forward_to_agent(chat_id, "Press the HOME hardware button using key_event.").await,
+            "/back" => self.forward_to_agent(chat_id, "Press the BACK hardware button using key_event.").await,
+            "/wifi" => self.forward_to_agent(chat_id, "Call wifi status and summarise the result.").await,
+            "/battery" => self.forward_to_agent(chat_id, "Call sensors battery and summarise.").await,
             _ => {
                 self.send_text(chat_id, "Unknown command. Try /help").await;
             }
         }
+    }
+
+    async fn forward_to_agent(&self, chat_id: i64, task: &str) {
+        self.send_typing(chat_id).await;
+        match self.run_agent_task(task).await {
+            Ok(r) => self.send_text(chat_id, &r.text).await,
+            Err(e) => self.send_text(chat_id, &format!("err: {e}")).await,
+        }
+    }
+
+    async fn cmd_brain_search(&self, chat_id: i64, query: &str) {
+        let store = self.brain.lock().await;
+        match store.search(query, 8, true) {
+            Ok(notes) if notes.is_empty() => {
+                self.send_text(chat_id, &format!("No brain notes match '{query}'.")).await;
+            }
+            Ok(notes) => {
+                let mut out = format!("🧠 {} matches for '{query}':\n", notes.len());
+                for n in notes.iter().take(8) {
+                    let preview: String = n.content.chars().take(120).collect();
+                    out.push_str(&format!(
+                        "\n• [{}] **{}** _({})_\n  {}\n",
+                        n.kind, n.title, n.slug,
+                        preview.replace('\n', " ")
+                    ));
+                }
+                self.send_text(chat_id, &out).await;
+            }
+            Err(e) => self.send_text(chat_id, &format!("brain search err: {e}")).await,
+        }
+    }
+
+    async fn cmd_brain_save(&self, chat_id: i64, title: &str, content: &str, kind: &str) {
+        let store = self.brain.lock().await;
+        match store.save(title, content, Some(kind), &[]) {
+            Ok(n) => self.send_text(chat_id, &format!("✅ Saved {kind} '{}' (slug: {})", n.title, n.slug)).await,
+            Err(e) => self.send_text(chat_id, &format!("save err: {e}")).await,
+        }
+    }
+
+    async fn cmd_brain_recent(&self, chat_id: i64, n: usize, kind: Option<&str>) {
+        let store = self.brain.lock().await;
+        match store.list_recent(n.min(50), kind) {
+            Ok(notes) if notes.is_empty() => {
+                self.send_text(chat_id, &format!("No notes (kind={})", kind.unwrap_or("any"))).await;
+            }
+            Ok(notes) => {
+                let mut out = format!(
+                    "📝 {} recent note(s){}:\n",
+                    notes.len(),
+                    kind.map(|k| format!(" (kind={k})")).unwrap_or_default()
+                );
+                for note in notes {
+                    let when = note.updated_at.split('T').next().unwrap_or(&note.updated_at).to_string();
+                    out.push_str(&format!(
+                        "\n• [{}] **{}** ({}) — {}",
+                        note.kind, note.title, when, note.slug
+                    ));
+                }
+                self.send_text(chat_id, &out).await;
+            }
+            Err(e) => self.send_text(chat_id, &format!("list err: {e}")).await,
+        }
+    }
+
+    async fn cmd_stt_info(&self, chat_id: i64) {
+        let model_path = std::path::PathBuf::from(peko_stt::DEFAULT_MODEL_PATH);
+        let model_present = model_path.exists();
+        let model_size = std::fs::metadata(&model_path).map(|m| m.len()).unwrap_or(0);
+        let model_mb = model_size / (1024 * 1024);
+        let bin = peko_stt::discover_bin();
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
+        let lines = vec![
+            "🎙 *STT (offline)*".to_string(),
+            String::new(),
+            format!("model: `{}`", model_path.display()),
+            format!("  present: {}", if model_present { "✅" } else { "❌ — push via scripts/download-whisper-model.sh" }),
+            format!("  size:    {model_mb} MiB ({model_size} bytes)"),
+            String::new(),
+            format!("binary: {}",
+                bin.as_ref().map(|p| format!("`{}`", p.display()))
+                    .unwrap_or_else(|| "❌ not found in any of /system/bin, /data/adb/modules/peko_agent/system/bin, /data/local/tmp".to_string())),
+            String::new(),
+            format!("CPU threads: {threads}"),
+            String::new(),
+            "tools: `transcribe`, `start_streaming`, `stop_streaming`, `streaming_status`, `info`".to_string(),
+        ];
+        self.send_text(chat_id, &lines.join("\n")).await;
+    }
+
+    async fn cmd_bg_list(&self, chat_id: i64) {
+        let jobs = self.bg.list(true).await;
+        if jobs.is_empty() {
+            self.send_text(chat_id, "No bg jobs.").await;
+            return;
+        }
+        let mut out = format!("🔄 {} bg job(s):\n", jobs.len());
+        for j in jobs.iter().take(20) {
+            let task_short: String = j.task.chars().take(80).collect();
+            out.push_str(&format!(
+                "\n• [{:?}] `{}` — {} ({})\n  {}\n",
+                j.status, j.short_id(),
+                j.name.as_deref().unwrap_or("unnamed"),
+                j.created_at.format("%H:%M:%S"),
+                task_short
+            ));
+        }
+        self.send_text(chat_id, &out).await;
+    }
+
+    async fn cmd_bg_cancel(&self, chat_id: i64, id_arg: &str) {
+        let Some(id) = self.bg.resolve(id_arg).await else {
+            self.send_text(chat_id, &format!("No bg job '{id_arg}'.")).await;
+            return;
+        };
+        if self.bg.mark_cancelled(&id).await {
+            self.send_text(chat_id, &format!("🛑 cancelled bg `{id_arg}`.")).await;
+        } else {
+            self.send_text(chat_id, &format!("bg `{id_arg}` already terminal.")).await;
+        }
+    }
+
+    async fn cmd_bg_wait(&self, chat_id: i64, id_arg: &str) {
+        let Some(id) = self.bg.resolve(id_arg).await else {
+            self.send_text(chat_id, &format!("No bg job '{id_arg}'.")).await;
+            return;
+        };
+        self.send_typing(chat_id).await;
+        let Some(job) = self.bg.wait(&id, Some(60_000)).await else {
+            self.send_text(chat_id, "vanished mid-wait").await;
+            return;
+        };
+        if !job.status.is_terminal() {
+            self.send_text(chat_id, &format!(
+                "⏱ bg `{}` still {:?} after 60s. /wait again or /jobs.",
+                job.short_id(), job.status
+            )).await;
+            return;
+        }
+        let body = job.result.as_deref().unwrap_or_else(|| job.error.as_deref().unwrap_or("(no output)"));
+        self.send_text(chat_id, &format!(
+            "✅ bg `{}` {:?} ({} iter):\n\n{}",
+            job.short_id(), job.status, job.iterations, body
+        )).await;
     }
 
     async fn run_agent_task(&self, input: &str) -> anyhow::Result<AgentResponse> {
@@ -505,6 +1043,9 @@ mod tests {
         let mem_db = tmp.join("memory.sqlite");
         let skills_dir = tmp.join("skills");
         std::fs::create_dir_all(&skills_dir).ok();
+        let brain_dir = tmp.join("brain");
+        std::fs::create_dir_all(&brain_dir).ok();
+        let brain = BrainStore::open(&tmp.join("brain.sqlite"), &brain_dir).unwrap();
         TelegramBot::new(
             cfg,
             Arc::new(Mutex::new(serde_json::json!({}))),
@@ -513,6 +1054,8 @@ mod tests {
             Arc::new(Mutex::new(MemoryStore::open(&mem_db).unwrap())),
             Arc::new(Mutex::new(SkillStore::open(&skills_dir).unwrap())),
             Arc::new(Mutex::new(String::new())),
+            Arc::new(Mutex::new(brain)),
+            BgStore::new(),
         )
     }
 
@@ -543,6 +1086,43 @@ mod tests {
         assert!(bot.check_rate_limit(222).await);
         assert!(bot.check_rate_limit(222).await);
         assert!(!bot.check_rate_limit(222).await);
+    }
+
+    #[test]
+    fn plan_marker_approve_extracted() {
+        let resp = "Here's the plan:\n\n1. Do X\n2. Do Y\n\n[plan:approve:plan-2026-04-26-abc123]";
+        let m = parse_plan_marker(resp).expect("approve marker");
+        assert_eq!(m.kind, PlanMarkerKind::Approve);
+        assert_eq!(m.slug, "plan-2026-04-26-abc123");
+        assert!(!m.body.contains("[plan:"));
+        assert!(m.body.contains("Do X"));
+    }
+
+    #[test]
+    fn plan_marker_auto_extracted() {
+        let resp = "[plan:auto:weekly-research]\n\nAuto-approved plan body.";
+        let m = parse_plan_marker(resp).expect("auto marker");
+        assert_eq!(m.kind, PlanMarkerKind::Auto);
+        assert_eq!(m.slug, "weekly-research");
+        assert_eq!(m.body, "Auto-approved plan body.");
+    }
+
+    #[test]
+    fn plan_marker_no_match_returns_none() {
+        assert!(parse_plan_marker("just text, no marker").is_none());
+        assert!(parse_plan_marker("[plan:wat:xyz]").is_none());
+        assert!(parse_plan_marker("[plan:approve:]").is_none());
+    }
+
+    #[test]
+    fn plan_marker_only_first_match_consumed() {
+        // Defensive: if the agent emits two markers, only the first
+        // is acted on. Both should be stripped from the body though
+        // — wait, the second one stays; that's fine since the bot
+        // already kicked off action on the first.
+        let resp = "[plan:approve:slug-a]\n[plan:approve:slug-b]\nbody";
+        let m = parse_plan_marker(resp).unwrap();
+        assert_eq!(m.slug, "slug-a");
     }
 
     #[test]

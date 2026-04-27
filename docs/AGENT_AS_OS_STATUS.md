@@ -51,7 +51,7 @@ This is a one-line summary per capability:
 - ✅ Wi-Fi control (Lane B `cmd wifi`; Lane A `wpa_supplicant` ctrl socket)
 - ✅ Audio topology + tinymix + media volume
 - ✅ Self-rendered overlay UI (peko-renderer, embedded 5x7 font)
-- ⏳ PCM record/play (Phase 7 via overlay APK shim)
+- ✅ PCM record/play + TextToSpeech (Phase 5; via PekoOverlay priv-app bridge — audioserver owns ALSA, this is the only sane path on stock Android)
 - ⏳ DRM master + frameworkless boot (Phase 7)
 - ❌ Camera (HAL is binder/vendor-blob; never planned)
 - ❌ GPS (gnss HAL is binder; never planned)
@@ -67,10 +67,35 @@ The numbers below are real, measured on a OnePlus 6T (codename
 | 2     | sensors + battery          | PASS         |
 | 3     | wifi backends              | PASS         |
 | 4     | audio topology + mixer     | PASS         |
+| 5     | PCM record + play + TTS    | PASS         |
+| 21    | bg persistence + budget    | PASS         |
+| 22    | bg mid-run resume + orphan | PASS         |
+| 23    | Camera + GPS + Telephony   | PASS         |
+| 25    | Offline STT (Thai+English) | PASS         |
 
 Re-run anytime: `make device-test PHASE=all`.
 
-Unit tests: 170 across 7 crates, all green.
+Unit tests: 176 across 7 crates, all green (incl. checkpoint roundtrip
++ 1-hour resume window).
+
+## Background tasks (v0.4.1)
+
+Peko's `bg` tool is now the right answer for "research / scrape /
+multi-step plan" work that takes more than a few seconds:
+
+- **Persistent**: every fire is catalogued at `<data_dir>/bg.db`.
+  Catalog survives restart; finished jobs are still queryable.
+- **Bounded**: per-day token budget, per-job wall-clock cap, ReAct
+  iteration cap, max-concurrent. Configured in `[bg]` (defaults
+  apply when absent).
+- **Resumable**: a job that was Running when the agent crashed picks
+  up at the last iteration's conversation snapshot on next boot —
+  if the checkpoint is fresher than 1 hour. Otherwise it's auto-
+  failed with a clear reason.
+- **Self-introspectable**: `bg stats` shows the agent its own usage
+  (fired / completed / failed / cancelled / timeout / budget-rejected
+  / resumed / orphaned / tokens / iterations) per day so the agent
+  can adapt its own behaviour.
 
 ## What "100%" means
 

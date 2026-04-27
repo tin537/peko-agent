@@ -25,6 +25,24 @@ if pm list packages 2>/dev/null | grep -q '^package:com.peko.overlay$'; then
     # unconditionally.
     pm grant com.peko.overlay android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
 
+    # Phase 5 audio bridge — RECORD_AUDIO is dangerous. priv-app status
+    # alone doesn't grant runtime perms; pm grant is what flips it.
+    # AudioBridgeService refuses to start AudioRecord without it.
+    pm grant com.peko.overlay android.permission.RECORD_AUDIO >/dev/null 2>&1 || true
+
+    # Phase 23 vendor-binder shim — camera, GPS, telephony. Each is a
+    # dangerous runtime perm; pm grant is the only thing that flips it
+    # for a priv-app on a fresh install.
+    for perm in \
+        android.permission.CAMERA \
+        android.permission.ACCESS_FINE_LOCATION \
+        android.permission.ACCESS_COARSE_LOCATION \
+        android.permission.ACCESS_BACKGROUND_LOCATION \
+        android.permission.READ_PHONE_STATE \
+        android.permission.READ_PHONE_NUMBERS; do
+        pm grant com.peko.overlay "$perm" >/dev/null 2>&1 || true
+    done
+
     # Kick the overlay now. Belt-and-braces on top of the app's own
     # BootReceiver: the receiver races with this appops grant, so on a
     # cold first boot canDrawOverlays() can return false when BOOT_
@@ -35,6 +53,12 @@ if pm list packages 2>/dev/null | grep -q '^package:com.peko.overlay$'; then
     # idempotent if the overlay is already up.
     am start-foreground-service --user 0 -n com.peko.overlay/.OverlayService >/dev/null 2>&1 \
         || am start -n com.peko.overlay/.MainActivity >/dev/null 2>&1 || true
+    # Phase 5 + 23: kick every bridge service so they're ready as soon
+    # as the device finishes boot. PekoOverlayApp.onCreate() also starts
+    # them but that path requires the app's process to be alive first.
+    for svc in AudioBridgeService LocationBridgeService CameraBridgeService TelephonyBridgeService; do
+        am start-foreground-service --user 0 -n "com.peko.overlay/.$svc" >/dev/null 2>&1 || true
+    done
 fi
 
 # If the Peko SMS shim shipped alongside, make it the default SMS app
@@ -128,6 +152,17 @@ if pm list packages 2>/dev/null | grep -q '^package:com.peko.shim.sms$'; then
     # queries the content provider periodically anyway.
 fi
 
+# Phase 25 STT model check — the `stt` tool needs a whisper.cpp model
+# at /data/peko/models/whisper.bin. We don't ship the file (~150 MB+)
+# in the Magisk module; the user pushes it via
+# `scripts/download-whisper-model.sh`. Just log a hint at boot if it's
+# absent so the operator knows STT will fail until they push one.
+if [ ! -f /data/peko/models/whisper.bin ]; then
+    echo "[peko] STT model missing at /data/peko/models/whisper.bin — \
+push one via scripts/download-whisper-model.sh to enable on-device \
+speech recognition" >> /data/peko/peko.log
+fi
+
 # Rotate the log so we don't bloat — keep last 5 runs.
 # Shift oldest-to-newest: .4→.5, .3→.4, ... .1→.2, then current→.1
 if [ -f "$LOG" ]; then
@@ -137,6 +172,16 @@ if [ -f "$LOG" ]; then
     [ -f "$LOG.1" ] && mv "$LOG.1" "$LOG.2"
     mv "$LOG" "$LOG.1"
 fi
+
+# Tesseract's data path. The bundled traineddata files live under
+# /system/etc/tessdata (mounted from the Magisk module's
+# system/etc/tessdata/). Setting TESSDATA_PREFIX here means
+# peko-agent's `ocr` tool — which exec's tesseract — picks up the
+# right language data without needing every invocation to pass
+# --tessdata-dir. If the user didn't bundle tesseract, this var is
+# harmless: tesseract isn't installed, the OCR tool returns its
+# typed "not found" error.
+export TESSDATA_PREFIX=/system/etc/tessdata
 
 # Start the LLM daemon first (abstract UDS @peko-llm). Fail-safe — if the
 # user hasn't pushed a GGUF model, the daemon will error and peko-agent
