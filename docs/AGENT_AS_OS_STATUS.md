@@ -70,6 +70,8 @@ The numbers below are real, measured on a OnePlus 6T (codename
 | 5     | PCM record + play + TTS    | PASS         |
 | 21    | bg persistence + budget    | PASS         |
 | 22    | bg mid-run resume + orphan | PASS         |
+| 23    | Camera + GPS + Telephony   | PASS         |
+| 25    | Offline STT (Thai+English) | PASS         |
 
 Re-run anytime: `make device-test PHASE=all`.
 
