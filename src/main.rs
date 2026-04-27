@@ -421,7 +421,16 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to open bg job catalog")?;
     let bg_tools_handle = peko_tools_android::new_tools_handle();
-    registry.register(peko_tools_android::BgTool::new(
+
+    // Phase 25 follow-up: build the TelegramSender once here (when
+    // [telegram] is configured) so BgTool can ping completed jobs and
+    // the existing Scheduler can keep using its own clone. Avoids
+    // duplicating the sender setup in two places.
+    let bg_notifier: Option<TelegramSender> = config.telegram.as_ref()
+        .filter(|tg| !tg.bot_token.trim().is_empty() && !tg.allowed_users.is_empty())
+        .map(|tg| TelegramSender::new(tg.bot_token.clone(), tg.allowed_users.clone()));
+
+    let mut bg_tool = peko_tools_android::BgTool::new(
         bg_store.clone(),
         bg_tools_handle.clone(),
         config_arc.clone(),
@@ -430,8 +439,14 @@ async fn main() -> anyhow::Result<()> {
         skill_store.clone(),
         soul_arc.clone(),
         config.bg.clone(),
-    ));
-    info!(bg_db = %bg_db_path.display(), "background task store initialized");
+    );
+    if let Some(ref n) = bg_notifier {
+        bg_tool = bg_tool.with_notifier(n.clone());
+    }
+    registry.register(bg_tool);
+    info!(bg_db = %bg_db_path.display(),
+        notifier = bg_notifier.is_some(),
+        "background task store initialized");
 
     let tools_arc = Arc::new(registry);
 
@@ -453,6 +468,7 @@ async fn main() -> anyhow::Result<()> {
         soul_arc.clone(),
         config.bg.clone(),
         chrono::Duration::hours(1),
+        bg_notifier.clone(),
     )
     .await;
     if resumed > 0 {
@@ -504,8 +520,14 @@ async fn main() -> anyhow::Result<()> {
             cron: config.autonomy.memory_gardener_cron.clone(),
             ..Default::default()
         };
-        let _ = peko_core::spawn_gardener(memory_store.clone(), gcfg);
-        info!(cron = %config.autonomy.memory_gardener_cron, "memory gardener started");
+        // Phase 25 follow-up: hand the bg store to the gardener so its
+        // daily pass also prunes terminal bg jobs older than 7 days.
+        let _ = peko_core::gardener::spawn_with_bg(
+            memory_store.clone(),
+            Some(bg_store.clone()),
+            gcfg,
+        );
+        info!(cron = %config.autonomy.memory_gardener_cron, "memory + bg gardener started");
     } else {
         info!("autonomy.memory_gardener=false — gardener disabled");
     }

@@ -416,13 +416,35 @@ class AudioBridgeService : Service() {
                     }
                     val rms = kotlin.math.sqrt(sumSq / n).toInt()
                     if (rms < minRms) continue
+                    // Phase 25 follow-up: cheap heuristic label so the
+                    // agent can filter ambient events without a TFLite
+                    // dep. Bands chosen for 16kHz mono mic input:
+                    //   - silence: rms below threshold (already filtered above
+                    //     when minRms > 0; default threshold here for the
+                    //     auto label)
+                    //   - speech: zc rate ~2-12% of samples, rms moderate-high
+                    //   - tone/music: low zc rate, sustained energy
+                    //   - noise: high rms with high zc rate, lacks structure
+                    // Real classification will come in a Phase 24 TFLite
+                    // YAMNet pass; this is the "good-enough until then" version.
+                    val zcRate = zc.toDouble() / n.toDouble()
+                    val label = when {
+                        rms < 200 -> "silence"
+                        rms < 800 && zcRate in 0.02..0.12 -> "speech-quiet"
+                        zcRate in 0.02..0.12 -> "speech"
+                        zcRate < 0.015 -> "tone"
+                        zcRate > 0.30 -> "noise"
+                        else -> "ambient"
+                    }
                     val data = JSONObject()
                         .put("rms", rms)
                         .put("peak", peak)
                         .put("zc", zc)
+                        .put("zc_rate", zcRate)
                         .put("samples", n)
                         .put("sample_rate", sampleRate)
                         .put("window_ms", windowMs)
+                        .put("label", label)
                     store.append("ambient", "audio_stream:$streamId", data)
                 }
             } catch (t: Throwable) {

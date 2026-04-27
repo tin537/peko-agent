@@ -19,7 +19,7 @@ use peko_core::runtime::{build_provider_helper, AgentRuntime};
 use peko_core::tool::{Tool, ToolRegistry, ToolResult};
 use peko_core::{
     bg_metrics, estimate_bg_tokens, BgStore, Checkpoint, MemoryStore, Message, SessionStore,
-    SkillStore, SystemPrompt,
+    SkillStore, SystemPrompt, TelegramSender,
 };
 use serde_json::json;
 use std::future::Future;
@@ -51,6 +51,11 @@ pub struct BgTool {
     /// reload takes effect on subsequent fires without rebuilding the
     /// tool.
     bg_config: Arc<Mutex<BgConfig>>,
+    /// Phase 25 follow-up: when set, every bg job's terminal status
+    /// (Done/Failed/Cancelled/Timeout) emits a Telegram message to
+    /// the configured chats. Closes the polling gap — users no longer
+    /// have to remember `bg status` after firing a slow research job.
+    notifier: Option<TelegramSender>,
 }
 
 impl BgTool {
@@ -67,7 +72,15 @@ impl BgTool {
         Self {
             bg, tools, config, session_db_path, memory, skills, soul,
             bg_config: Arc::new(Mutex::new(bg_config)),
+            notifier: None,
         }
+    }
+
+    /// Wire a Telegram sender so terminal job statuses get pinged out.
+    /// Called from main.rs after the [telegram] config is parsed.
+    pub fn with_notifier(mut self, sender: TelegramSender) -> Self {
+        self.notifier = Some(sender);
+        self
     }
 }
 
@@ -133,11 +146,12 @@ impl Tool for BgTool {
         let skills = self.skills.clone();
         let soul = self.soul.clone();
         let bg_cfg = self.bg_config.clone();
+        let notifier = self.notifier.clone();
 
         Box::pin(async move {
             let action = args["action"].as_str().unwrap_or("").to_string();
             match action.as_str() {
-                "fire" => fire(bg, tools_handle, config, db_path, memory, skills, soul, bg_cfg, &args).await,
+                "fire" => fire(bg, tools_handle, config, db_path, memory, skills, soul, bg_cfg, notifier, &args).await,
                 "status" => status(bg, &args).await,
                 "wait" => wait(bg, &args).await,
                 "list" => list(bg, &args).await,
@@ -161,6 +175,7 @@ async fn fire(
     skills: Arc<Mutex<SkillStore>>,
     soul: Arc<Mutex<String>>,
     bg_config: Arc<Mutex<BgConfig>>,
+    notifier: Option<TelegramSender>,
     args: &serde_json::Value,
 ) -> anyhow::Result<ToolResult> {
     let cfg = bg_config.lock().await.clone();
@@ -232,6 +247,9 @@ async fn fire(
         max_iter,
         wall_clock_secs,
         resume: None,
+        notifier,
+        short_id: short.clone(),
+        name: name.clone(),
     });
 
     Ok(ToolResult::success(format!(
@@ -258,6 +276,15 @@ struct WorkerSpawn {
     /// user input even if the resume scaffold pads `task` with a
     /// summary.
     resume: Option<Checkpoint>,
+    /// Phase 25 follow-up: when set, fire a Telegram message after
+    /// the job hits any terminal status. Lets users walk away from a
+    /// long bg job and learn the moment it finishes.
+    notifier: Option<TelegramSender>,
+    /// Pretty short_id + name for notification text (don't reach into
+    /// BgJob from the worker because the catalog row may have been
+    /// updated by another path).
+    short_id: String,
+    name: Option<String>,
 }
 
 fn spawn_worker(s: WorkerSpawn) {
@@ -274,6 +301,9 @@ fn spawn_worker(s: WorkerSpawn) {
         max_iter,
         wall_clock_secs,
         resume,
+        notifier,
+        short_id,
+        name,
     } = s;
 
     tokio::spawn(async move {
@@ -386,6 +416,7 @@ fn spawn_worker(s: WorkerSpawn) {
         } else {
             Some(run.await)
         };
+        let label = name.as_deref().unwrap_or("unnamed");
         match outcome {
             Some(Ok(resp)) => {
                 let result = if resp.text.is_empty() {
@@ -396,22 +427,61 @@ fn spawn_worker(s: WorkerSpawn) {
                 let tokens = estimate_bg_tokens(&run_input, resp.iterations, &resp.text);
                 bg.mark_done(
                     &id,
-                    result,
+                    result.clone(),
                     Some(resp.session_id),
                     resp.iterations,
                     tokens,
                 )
                 .await;
+                notify_terminal(
+                    &notifier, &short_id, label, "✅ done",
+                    Some(&truncate_chars(&result, 800)), resp.iterations, tokens,
+                ).await;
             }
             Some(Err(e)) => {
-                bg.mark_failed(&id, format!("run_task: {e}")).await;
+                let err_msg = format!("run_task: {e}");
+                bg.mark_failed(&id, err_msg.clone()).await;
+                notify_terminal(
+                    &notifier, &short_id, label, "❌ failed",
+                    Some(&err_msg), 0, 0,
+                ).await;
             }
             None => {
                 bg.mark_timeout(&id, wall_clock_secs).await;
+                notify_terminal(
+                    &notifier, &short_id, label, "⏰ timeout",
+                    Some(&format!("exceeded {wall_clock_secs}s wall clock")), 0, 0,
+                ).await;
             }
         }
     });
 }
+
+/// Send a one-shot notification to every chat configured on the
+/// TelegramSender. Best-effort — failures are logged at warn but don't
+/// affect the bg job's terminal status (which already landed in the DB).
+async fn notify_terminal(
+    notifier: &Option<TelegramSender>,
+    short_id: &str,
+    label: &str,
+    headline: &str,
+    detail: Option<&str>,
+    iterations: usize,
+    tokens: u64,
+) {
+    let Some(sender) = notifier else { return };
+    let mut text = format!(
+        "🤖 bg `{short_id}` ({label}) — {headline}\n  iterations: {iterations}, tokens: {tokens}"
+    );
+    if let Some(d) = detail {
+        if !d.is_empty() {
+            text.push_str("\n\n");
+            text.push_str(d);
+        }
+    }
+    sender.send(&text).await;
+}
+
 
 /// Phase 22: re-spawn workers for `Running` jobs that survived a prior
 /// process crash/restart and have a recent enough checkpoint. Stale or
@@ -429,10 +499,13 @@ pub async fn resume_pending_bg_jobs(
     soul: Arc<Mutex<String>>,
     bg_config: BgConfig,
     max_age: chrono::Duration,
+    notifier: Option<TelegramSender>,
 ) -> usize {
     let pending = bg.pending_resumable(max_age).await;
     let count = pending.len();
     for (job, ckpt) in pending {
+        let short_id = job.short_id().to_string();
+        let name = job.name.clone();
         spawn_worker(WorkerSpawn {
             bg: bg.clone(),
             id: job.id.clone(),
@@ -446,6 +519,9 @@ pub async fn resume_pending_bg_jobs(
             max_iter: bg_config.max_iterations,
             wall_clock_secs: bg_config.max_wall_clock_secs,
             resume: Some(ckpt),
+            notifier: notifier.clone(),
+            short_id,
+            name,
         });
     }
     count

@@ -245,6 +245,14 @@ async fn start_streaming(
     let lang_for_msg = lang.clone();
     let task = tokio::spawn(async move {
         let mut chunk_n: u64 = 0;
+        // Phase 25c min-viable streaming: carry the tail of the prior
+        // transcript as `initial_prompt` for the next chunk. Whisper
+        // uses it as decoder context, which acts like a soft overlap
+        // and dramatically improves accuracy on word boundaries
+        // straddling a chunk split (e.g. "I want to" / "go home" → no
+        // longer split into hallucinated halves). Capped at ~200 chars
+        // because whisper's prompt token limit is small.
+        let mut last_tail: Option<String> = None;
         while running_w.load(Ordering::Relaxed) {
             chunk_n += 1;
             if max_chunks > 0 && chunk_n > max_chunks {
@@ -295,6 +303,7 @@ async fn start_streaming(
             };
             let mut opts = TranscribeOpts::default();
             opts.language = lang.clone();
+            opts.initial_prompt = last_tail.clone();
             let transcript = match engine.transcribe(&wav_src, &opts).await {
                 Ok(t) => t,
                 Err(e) => {
@@ -314,6 +323,12 @@ async fn start_streaming(
                 tracing::warn!(stream_id = %stream_id_w, error = %e, "stt stream: events.db write failed");
             }
             counter_w.fetch_add(1, Ordering::Relaxed);
+
+            // Carry tail forward (last ~200 chars) for the next chunk's
+            // initial_prompt — see comment at start of loop.
+            let count = transcript.text.chars().count();
+            let skip = count.saturating_sub(200);
+            last_tail = Some(transcript.text.chars().skip(skip).collect::<String>());
         }
         tracing::info!(stream_id = %stream_id_w, "stt stream exited");
     });

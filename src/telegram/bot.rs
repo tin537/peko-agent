@@ -649,6 +649,10 @@ impl TelegramBot {
                      /wait <id> — wait + show result\n\
                      /cancel <id> — cancel a bg job\n\
                      /research <topic> — fire research as bg job\n\n\
+                     *Voice (Phase 25):*\n\
+                     /stt — STT model + binary status\n\
+                     \"ฟังหน่อย\" / \"listen for me\" — triggers voice_loop\n\
+                     skill (record → transcribe → reply via TTS)\n\n\
                      /new — reset chat memory\n\
                      /help — this message"
                 ).await;

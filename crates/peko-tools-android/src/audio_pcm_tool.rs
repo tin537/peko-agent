@@ -23,12 +23,9 @@ use serde_json::json;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::time::{Duration, Instant};
-use tokio::time::sleep;
-use uuid::Uuid;
+use std::time::Duration;
 
 const APP_FILES_DIR: &str = "/data/data/com.peko.overlay/files/audio";
-const POLL_INTERVAL_MS: u64 = 200;
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 130; // > max record duration cap (120s)
 
@@ -240,6 +237,14 @@ async fn tts(root: &Path, args: &serde_json::Value) -> anyhow::Result<ToolResult
 }
 
 // ───── transport ────────────────────────────────────────────────────
+//
+// Phase 25 follow-up: the file-RPC plumbing (sentinel write, poll for
+// .done, parse out json + asset, cleanup guard) used to live here as
+// `run_request_inner`. It was a 100-line near-duplicate of
+// bridge_client.rs::send. We now delegate to bridge_client and keep
+// only thin shape-converting helpers + persist_wav. Single source of
+// truth means future protocol tweaks don't drift between record/tts
+// and gps/camera/etc.
 
 struct BridgeResponse {
     json: serde_json::Value,
@@ -247,93 +252,35 @@ struct BridgeResponse {
 }
 
 async fn run_request(
-    root: &Path,
+    _root: &Path,
     req: serde_json::Value,
     _has_input_wav: bool,
     timeout: Duration,
 ) -> anyhow::Result<BridgeResponse> {
-    run_request_inner(root, req, None, timeout).await
+    let r = crate::bridge_client::send(crate::bridge_client::BridgeRequest {
+        topic: "audio",
+        body: req,
+        input_asset: None,
+        input_asset_ext: "wav",
+        timeout,
+    }).await?;
+    Ok(BridgeResponse { json: r.json, out_wav: r.asset })
 }
 
 async fn run_request_with_input(
-    root: &Path,
+    _root: &Path,
     req: serde_json::Value,
     input_wav: &Path,
     timeout: Duration,
 ) -> anyhow::Result<BridgeResponse> {
-    run_request_inner(root, req, Some(input_wav.to_path_buf()), timeout).await
-}
-
-async fn run_request_inner(
-    root: &Path,
-    req: serde_json::Value,
-    input_wav: Option<PathBuf>,
-    timeout: Duration,
-) -> anyhow::Result<BridgeResponse> {
-    let in_dir = root.join("in");
-    let out_dir = root.join("out");
-    tokio::fs::create_dir_all(&in_dir).await?;
-    tokio::fs::create_dir_all(&out_dir).await?;
-
-    let id = Uuid::new_v4().to_string();
-    let req_path = in_dir.join(format!("{id}.json"));
-    let in_wav_path = in_dir.join(format!("{id}.wav"));
-    let start_path = in_dir.join(format!("{id}.start"));
-    let out_json = out_dir.join(format!("{id}.json"));
-    let out_wav = out_dir.join(format!("{id}.wav"));
-    let done = out_dir.join(format!("{id}.done"));
-
-    // Cleanup guard so a panic mid-flight doesn't leak files. We
-    // intentionally exclude `out_wav` — the caller's persist_wav()
-    // copies it AFTER this function returns, so deleting it in the
-    // guard would race the copy and produce ENOENT. Caller drops the
-    // priv-app copy by overwriting on the next request (same id is
-    // never reused; old files leak into out/ and are cheap to ignore).
-    let _guard = CleanupGuard {
-        paths: vec![
-            req_path.clone(), in_wav_path.clone(), start_path.clone(),
-            out_json.clone(), done.clone(),
-        ],
-    };
-
-    // 1) Write request body + (optional) input WAV.
-    tokio::fs::write(&req_path, serde_json::to_vec(&req)?).await?;
-    if let Some(ref src) = input_wav {
-        tokio::fs::copy(src, &in_wav_path).await?;
-    }
-    // Make the priv-app able to read these files. Worst case the write
-    // is a no-op on filesystems that don't support chmod, but on ext4
-    // this lets the app's UID open the files we just wrote as root.
-    let _ = chmod_world_readable(&req_path).await;
-    if input_wav.is_some() {
-        let _ = chmod_world_readable(&in_wav_path).await;
-    }
-
-    // 2) Atomic-ish "go" sentinel.
-    tokio::fs::write(&start_path, b"").await?;
-    let _ = chmod_world_readable(&start_path).await;
-
-    // 3) Poll for done sentinel.
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if done.exists() {
-            let body = tokio::fs::read(&out_json).await
-                .unwrap_or_else(|_| b"{\"ok\":false,\"error\":\"out json missing\"}".to_vec());
-            let json: serde_json::Value = serde_json::from_slice(&body)?;
-            let out = if out_wav.exists() && tokio::fs::metadata(&out_wav).await
-                .map(|m| m.len() > 0).unwrap_or(false)
-            {
-                Some(out_wav.clone())
-            } else { None };
-            return Ok(BridgeResponse { json, out_wav: out });
-        }
-        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
-    }
-    anyhow::bail!(
-        "audio bridge timed out after {:?}. Is PekoOverlay's AudioBridgeService \
-         running? Check `dumpsys activity services com.peko.overlay`.",
-        timeout
-    )
+    let r = crate::bridge_client::send(crate::bridge_client::BridgeRequest {
+        topic: "audio",
+        body: req,
+        input_asset: Some(input_wav),
+        input_asset_ext: "wav",
+        timeout,
+    }).await?;
+    Ok(BridgeResponse { json: r.json, out_wav: r.asset })
 }
 
 fn pick_timeout(args: &serde_json::Value, default_secs: u64) -> Duration {
@@ -345,31 +292,7 @@ fn pick_timeout(args: &serde_json::Value, default_secs: u64) -> Duration {
 }
 
 async fn persist_wav(src: &Path) -> anyhow::Result<PathBuf> {
-    // Copy the bridge-output WAV into peko's own data dir so the agent
-    // can pass it to other tools without worrying about the priv-app
-    // dir lifecycle. Filename uses the source basename for traceability.
-    let dest_dir = PathBuf::from("/data/peko/audio");
-    tokio::fs::create_dir_all(&dest_dir).await.ok();
-    let name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
-    let dest = dest_dir.join(name);
-    tokio::fs::copy(src, &dest).await?;
-    Ok(dest)
-}
-
-async fn chmod_world_readable(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = tokio::fs::metadata(path).await?.permissions();
-    perms.set_mode(0o644);
-    tokio::fs::set_permissions(path, perms).await
-}
-
-struct CleanupGuard { paths: Vec<PathBuf> }
-impl Drop for CleanupGuard {
-    fn drop(&mut self) {
-        for p in &self.paths {
-            let _ = std::fs::remove_file(p);
-        }
-    }
+    crate::bridge_client::persist_asset(src, "audio").await
 }
 
 #[cfg(test)]
